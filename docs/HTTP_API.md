@@ -122,7 +122,7 @@ first run, printed once). 401 without it.
 ndcart serve [--listen 127.0.0.1:8300] [--data-dir DIR]   # env: ND_CARTO_LISTEN, ND_CARTO_DATA_DIR
 ndcart bench [--ppc N]                                    # journal/walls/replay + full-map bake timings (asserts the 30 s budget)
 ndcart convert IN OUT [--format webp|avif|png] [--quality N]
-ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32] [--format webp] [--max-mb 20] [--audience gm|player] [--keep-overlay] --data-dir DIR
+ndcart publish DOC --server URL --email E [--world W] [--floor ID | --all-floors] [--ppc 32] [--format webp] [--max-mb 20] [--audience gm|player] [--keep-overlay] --data-dir DIR
                                                           # password: ND_CARTO_PASSWORD / ND_CARTO_PASSWORD_FILE only
 ```
 

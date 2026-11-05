@@ -31,6 +31,10 @@ pub struct NdWorldLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world: Option<String>,
     pub slug: String,
+    /// Slug of each floor published on its own (nd-world has no multi-floor
+    /// concept, so every floor is its own map). `slug` stays the first/only one.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub floor_slugs: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

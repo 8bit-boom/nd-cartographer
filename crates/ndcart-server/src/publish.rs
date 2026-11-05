@@ -1,7 +1,7 @@
 //! `ndcart publish` — publish a stored document to nd-world (plan §9.2 A).
 //!
 //! ndcart publish DOC --server URL [--world SLUG] --email EMAIL
-//!                [--floor ID] [--ppc 32] [--format webp|avif|png] [--data-dir DIR]
+//!                [--floor ID | --all-floors] [--ppc 32] [--format webp|avif|png] [--data-dir DIR]
 //!
 //! The password is read from `ND_CARTO_PASSWORD` or the file named by
 //! `ND_CARTO_PASSWORD_FILE` — never an argument (it would land in shell history
@@ -18,6 +18,7 @@ const DEFAULT_UPLOAD_CAP_MB: usize = 20;
 const MIN_PPC: i64 = 8; // nd-world's room grid needs cells of at least 8 px
 
 pub struct Args {
+    pub all_floors: bool,
     pub doc: String,
     pub server: String,
     pub world: Option<String>,
@@ -41,6 +42,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
     let mut max_mb = DEFAULT_UPLOAD_CAP_MB;
     let mut audience = Audience::Gm;
     let mut keep_overlay = false;
+    let mut all_floors = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -57,6 +59,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
             "--format" => format = val("--format")?,
             "--data-dir" => data_dir = Some(PathBuf::from(val("--data-dir")?)),
             "--keep-overlay" => keep_overlay = true,
+            "--all-floors" => all_floors = true,
             "--audience" => {
                 audience =
                     Audience::parse(&val("--audience")?).ok_or("--audience must be gm or player")?
@@ -74,7 +77,11 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
         .or_else(|| std::env::var("ND_CARTO_DATA_DIR").ok().map(PathBuf::from))
         .ok_or("--data-dir (or ND_CARTO_DATA_DIR) is required")?;
     let format = tiles::ImageFormat::parse(&format).ok_or("--format must be webp, avif or png")?;
+    if all_floors && floor.is_some() {
+        return Err("--all-floors and --floor exclude each other".into());
+    }
     Ok(Args {
+        all_floors,
         doc: doc.ok_or("name the document (id or exact name)")?,
         server: server.ok_or("--server is required")?,
         world,
@@ -101,6 +108,15 @@ fn password() -> Result<String, String> {
     Err("set ND_CARTO_PASSWORD (or ND_CARTO_PASSWORD_FILE) in your own shell".into())
 }
 
+/// nd-world has no floors: with several, each map is named "Doc – Floor".
+fn map_name(doc: &store::StoredDoc, floor_name: &str) -> String {
+    if doc.floors.len() > 1 {
+        format!("{} – {}", doc.manifest.name, floor_name)
+    } else {
+        doc.manifest.name.clone()
+    }
+}
+
 /// Build what nd-world needs from a stored document. Pure (no network) so the
 /// picture, walls, lights and rooms are testable.
 pub fn build_map(
@@ -118,6 +134,7 @@ pub fn build_map(
             .ok_or(format!("no floor {id}"))?,
         None => doc.floors.first().ok_or("document has no floors")?,
     };
+    let floor_name = floor.name.clone();
     // Everything below is built from the audience's view of the floor: the
     // picture, walls, lights AND the room state (which carries edge marks).
     let filtered = for_audience(floor, audience);
@@ -127,7 +144,7 @@ pub fn build_map(
     let (image, w, h) = tiles::bake_full_as(floor, &walls, cell_size, ppc, format, 80)?;
     let ppc_f = ppc as f64;
     Ok(PublishMap {
-        name: doc.manifest.name.clone(),
+        name: map_name(doc, &floor_name),
         canvas_w: w,
         canvas_h: h,
         cell_px: ppc_f,
@@ -199,6 +216,7 @@ pub fn build_region(
             .ok_or(format!("no floor {id}"))?,
         None => doc.floors.first().ok_or("document has no floors")?,
     };
+    let floor_name = floor.name.clone();
     let filtered = for_audience(floor, audience);
     let floor = &filtered;
     let cell_size = doc.manifest.cell_size;
@@ -208,7 +226,7 @@ pub fn build_region(
     let (hf, round) = (f64::from(h), |v: f64| (v * 1000.0).round() / 1000.0);
     let ll = |x: f32, y: f32| (round(hf - f64::from(y) * s), round(f64::from(x) * s)); // (lat, lng)
     Ok(PublishRegion {
-        name: doc.manifest.name.clone(),
+        name: map_name(doc, &floor_name),
         width_px: w,
         height_px: h,
         image,
@@ -288,120 +306,161 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             a.doc,
             a.data_dir.display()
         ))?;
-    // Lint first: errors are things nd-world would refuse; warnings are shown, not blocking.
-    {
+    let is_region = st.docs[&id].manifest.kind == ndcart_core::DocKind::Region;
+    // Which floors go out: all of them, the named one, or the first.
+    let targets: Vec<String> = {
         let doc = &st.docs[&id];
-        let floor = match a.floor.as_deref() {
-            Some(f) => doc.floors.iter().find(|x| x.id == f),
-            None => doc.floors.first(),
+        if a.all_floors {
+            doc.floors.iter().map(|f| f.id.clone()).collect()
+        } else {
+            let f = match a.floor.as_deref() {
+                Some(f) => doc.floors.iter().find(|x| x.id == f),
+                None => doc.floors.first(),
+            }
+            .ok_or("no such floor")?;
+            vec![f.id.clone()]
         }
-        .ok_or("no such floor")?;
+    };
+    let first_floor = st.docs[&id].floors.first().map(|f| f.id.clone());
+    let cap = a.max_mb * 1_048_576;
+
+    // Build everything before any network call, so a bad floor fails the run
+    // before the first map is touched.
+    let mut jobs: Vec<(String, Option<String>, Payload)> = Vec::new();
+    for fid in &targets {
+        let doc = &st.docs[&id];
+        let floor = doc.floors.iter().find(|x| &x.id == fid).expect("floor");
         let problems = ndcart_core::lint(floor, doc.manifest.cell_size);
         for p in &problems {
-            println!("{:?}: {}", p.severity, p.message);
+            println!(
+                "{} [{}]: {:?}: {}",
+                doc.manifest.name, floor.name, p.severity, p.message
+            );
         }
         if ndcart_core::blocks_publish(&problems) {
-            return Err("fix the errors above first (nd-world would refuse this map)".into());
-        }
-    }
-    let is_region = st.docs[&id].manifest.kind == ndcart_core::DocKind::Region;
-    let existing = st.docs[&id]
-        .manifest
-        .nd_world
-        .as_ref()
-        .filter(|l| l.server == a.server && l.world == a.world)
-        .map(|l| l.slug.clone());
-    let cap = a.max_mb * 1_048_576;
-    let (payload, used_ppc) = if is_region {
-        // On a re-publish the overlay is replaced unless asked not to.
-        let replace = !(a.keep_overlay && existing.is_some());
-        let (m, p) = build_region_fitted(
-            &st.docs[&id],
-            a.floor.as_deref(),
-            a.ppc,
-            a.format,
-            cap,
-            replace,
-            a.audience,
-        )?;
-        if existing.is_some() && replace {
-            println!("note: this replaces the map's markers and regions in nd-world (hand-made ones are not kept; use --keep-overlay to leave them)");
-        }
-        (Payload::Region(m), p)
-    } else {
-        let (m, p) = build_map_fitted(
-            &st.docs[&id],
-            a.floor.as_deref(),
-            a.ppc,
-            a.format,
-            cap,
-            a.audience,
-        )?;
-        (Payload::Battle(m), p)
-    };
-    if used_ppc != a.ppc {
-        println!(
-            "note: lowered the picture from {} to {used_ppc} px per square to fit the {} MB upload cap",
-            a.ppc, a.max_mb
-        );
-    }
-    let pw = password()?;
-    let totp = std::env::var("ND_CARTO_TOTP").ok();
-    let outcome = async {
-        let bridge = Bridge::new(&a.server, a.world.as_deref()).map_err(|e| e.to_string())?;
-        let probe = bridge.probe().await.map_err(|e| e.to_string())?;
-        println!("nd-world build {} ({} mode)", probe.build, probe.mode);
-        if !probe.read_back {
-            println!("note: this image cannot hand a map's walls/rooms back (Rust-only); the studio keeps its own copy, so publishing is unaffected");
-        }
-        bridge
-            .login(&a.email, &pw, totp.as_deref())
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok::<_, String>(match &payload {
-            Payload::Battle(m) => bridge.publish(m, existing.as_deref()).await,
-            Payload::Region(m) => bridge.publish_region(m, existing.as_deref()).await,
-        })
-    }
-    .await?;
-    let link = |slug: &str| NdWorldLink {
-        server: a.server.clone(),
-        world: a.world.clone(),
-        slug: slug.to_string(),
-    };
-    let report = match outcome {
-        Ok(r) => r,
-        Err(BridgeError::Partial { slug, step, cause }) => {
-            // The map exists: remember it so the next run finishes this one
-            // instead of creating a duplicate.
-            let doc = st.docs.get_mut(&id).expect("doc");
-            doc.manifest.nd_world = Some(link(&slug));
-            store::save_doc(Some(&a.data_dir), doc);
             return Err(format!(
-                "map '{slug}' was created but the {step} step failed: {cause}. Run publish again to finish it."
+                "fix the errors above first (nd-world would refuse floor '{}')",
+                floor.name
             ));
         }
-        Err(e) => return Err(e.to_string()),
-    };
-    let doc = st.docs.get_mut(&id).expect("doc");
-    doc.manifest.nd_world = Some(link(&report.slug));
-    store::save_doc(Some(&a.data_dir), doc);
-    println!(
-        "{} map '{}' at {}/maps/{}{}",
-        if report.created {
-            "published"
+        let link = doc
+            .manifest
+            .nd_world
+            .as_ref()
+            .filter(|l| l.server == a.server && l.world == a.world);
+        // The legacy single slug belongs to the first floor.
+        let existing = link.and_then(|l| {
+            l.floor_slugs
+                .get(fid)
+                .cloned()
+                .or_else(|| (Some(fid) == first_floor.as_ref()).then(|| l.slug.clone()))
+        });
+        let (payload, used_ppc) = if is_region {
+            let replace = !(a.keep_overlay && existing.is_some());
+            let (m, p) =
+                build_region_fitted(doc, Some(fid), a.ppc, a.format, cap, replace, a.audience)?;
+            if existing.is_some() && replace {
+                println!("note: this replaces the map's markers and regions in nd-world (hand-made ones are not kept; use --keep-overlay to leave them)");
+            }
+            (Payload::Region(m), p)
         } else {
-            "updated"
-        },
-        doc.manifest.name,
-        a.server.trim_end_matches('/'),
-        if is_region { "" } else { "schematic/" },
-        report.slug
-    );
-    for w in &report.warnings {
-        println!("warning: {w}");
+            let (m, p) = build_map_fitted(doc, Some(fid), a.ppc, a.format, cap, a.audience)?;
+            (Payload::Battle(m), p)
+        };
+        if used_ppc != a.ppc {
+            println!(
+                "note: lowered '{}' from {} to {used_ppc} px per square to fit the {} MB upload cap",
+                floor.name, a.ppc, a.max_mb
+            );
+        }
+        jobs.push((fid.clone(), existing, payload));
     }
-    Ok(())
+
+    let pw = password()?;
+    let totp = std::env::var("ND_CARTO_TOTP").ok();
+    let bridge = Bridge::new(&a.server, a.world.as_deref()).map_err(|e| e.to_string())?;
+    let probe = bridge.probe().await.map_err(|e| e.to_string())?;
+    println!("nd-world build {} ({} mode)", probe.build, probe.mode);
+    if !probe.read_back {
+        println!("note: this image cannot hand a map's walls/rooms back (Rust-only); the studio keeps its own copy, so publishing is unaffected");
+    }
+    bridge
+        .login(&a.email, &pw, totp.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut failed: Option<String> = None;
+    for (fid, existing, payload) in &jobs {
+        let outcome = match payload {
+            Payload::Battle(m) => bridge.publish(m, existing.as_deref()).await,
+            Payload::Region(m) => bridge.publish_region(m, existing.as_deref()).await,
+        };
+        let (slug, report) = match outcome {
+            Ok(r) => (r.slug.clone(), Some(r)),
+            Err(BridgeError::Partial { slug, step, cause }) => {
+                // The map exists: remember it so the next run finishes this
+                // one instead of creating a duplicate.
+                failed = Some(format!(
+                    "map '{slug}' was created but the {step} step failed: {cause}. Run publish again to finish it."
+                ));
+                (slug, None)
+            }
+            Err(e) => {
+                failed = Some(e.to_string());
+                break;
+            }
+        };
+        // Save after every floor: a later failure must not lose earlier slugs.
+        let doc = st.docs.get_mut(&id).expect("doc");
+        let mut link = doc
+            .manifest
+            .nd_world
+            .clone()
+            .filter(|l| l.server == a.server && l.world == a.world)
+            .unwrap_or(NdWorldLink {
+                server: a.server.clone(),
+                world: a.world.clone(),
+                slug: slug.clone(),
+                floor_slugs: Default::default(),
+            });
+        if Some(fid) == first_floor.as_ref() {
+            link.slug = slug.clone();
+        }
+        link.floor_slugs.insert(fid.clone(), slug.clone());
+        doc.manifest.nd_world = Some(link);
+        store::save_doc(Some(&a.data_dir), doc);
+        if let Some(report) = report {
+            let name = doc
+                .floors
+                .iter()
+                .find(|f| &f.id == fid)
+                .map(|f| f.name.as_str())
+                .unwrap_or("");
+            println!(
+                "{} '{}' ({}) at {}/maps/{}{}",
+                if report.created {
+                    "published"
+                } else {
+                    "updated"
+                },
+                doc.manifest.name,
+                name,
+                a.server.trim_end_matches('/'),
+                if is_region { "" } else { "schematic/" },
+                report.slug
+            );
+            for w in &report.warnings {
+                println!("warning: {w}");
+            }
+        }
+        if failed.is_some() {
+            break;
+        }
+    }
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -421,6 +480,43 @@ mod tests {
         .unwrap();
         d.apply_ops(&fid, &ops).unwrap();
         d
+    }
+
+    #[test]
+    fn each_floor_of_a_multi_floor_document_is_its_own_named_map() {
+        let mut d = doc();
+        assert_eq!(
+            build_map(&d, None, 16, tiles::ImageFormat::Png, Audience::Gm)
+                .unwrap()
+                .name,
+            "Vault"
+        );
+        let up = d.add_floor("Upper", None).unwrap();
+        let m0 = build_map(&d, None, 16, tiles::ImageFormat::Png, Audience::Gm).unwrap();
+        let m1 = build_map(&d, Some(&up), 16, tiles::ImageFormat::Png, Audience::Gm);
+        assert_eq!(m0.name, "Vault \u{2013} Ground");
+        // The empty upper floor has no picture to publish, and says so.
+        assert!(m1.is_err() || m1.unwrap().name == "Vault \u{2013} Upper");
+    }
+
+    #[test]
+    fn all_floors_and_one_floor_exclude_each_other() {
+        let args = |v: &[&str]| parse(v.iter().map(|s| s.to_string()).collect());
+        let base = [
+            "d",
+            "--server",
+            "http://x",
+            "--email",
+            "e",
+            "--data-dir",
+            ".",
+        ];
+        let mut both = base.to_vec();
+        both.extend(["--all-floors", "--floor", "f"]);
+        assert!(args(&both).is_err());
+        let mut all = base.to_vec();
+        all.push("--all-floors");
+        assert!(args(&all).unwrap().all_floors);
     }
 
     #[test]
