@@ -109,8 +109,9 @@ impl FloorDoc {
         if !(0.1..=1.0).contains(&light.intensity) {
             return Err(CoreError::Invalid("intensity must be 0.1..=1.0".into()));
         }
-        if light.range <= 0.0 || light.range > 200.0 {
-            return Err(CoreError::Invalid("range must be 0 < range <= 200".into()));
+        if light.range <= 0.0 || light.range > 60.0 {
+            // nd-world's import-uvtt / lights route cap
+            return Err(CoreError::Invalid("range must be 0 < range <= 60".into()));
         }
         if light.color.len() != 7 || !light.color.starts_with('#') {
             return Err(CoreError::Invalid("light color must be #rrggbb".into()));

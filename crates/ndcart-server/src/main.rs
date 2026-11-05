@@ -207,6 +207,64 @@ async fn get_doc(
 #[derive(Deserialize)]
 struct ExportQuery {
     floor: Option<String>,
+    /// Pixels per cell of the exported picture (default 32).
+    ppc: Option<i64>,
+    /// `png` (default), `webp` (lossless) or `avif` (lossy; UVTT takes png/webp only).
+    format: Option<String>,
+    /// AVIF quality 1..=100 (default 80).
+    quality: Option<u8>,
+}
+
+fn pick_format(q: &ExportQuery) -> Result<tiles::ImageFormat, ApiError> {
+    match q.format.as_deref() {
+        None => Ok(tiles::ImageFormat::Png),
+        Some(f) => tiles::ImageFormat::parse(f).ok_or_else(|| {
+            ApiError(CoreError::Invalid(format!(
+                "unknown format {f:?} (png, webp or avif)"
+            )))
+        }),
+    }
+}
+
+/// `GET /api/docs/{id}/export/png[?floor=ID&ppc=N]` — the whole floor as one PNG.
+async fn export_png(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Response, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let floor = doc
+        .floors
+        .get(idx)
+        .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+    let cell_size = doc.manifest.cell_size;
+    let walls = tiles::derive_walls(floor, cell_size);
+    let fmt = pick_format(&q)?;
+    let (bytes, ..) = tiles::bake_full_as(
+        floor,
+        &walls,
+        cell_size,
+        q.ppc.unwrap_or(32),
+        fmt,
+        q.quality.unwrap_or(80),
+    )
+    .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, fmt.mime()),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// `GET /api/docs/{id}/export/uvtt[?floor=ID]` — Universal VTT (walls, doors,
@@ -229,18 +287,26 @@ async fn export_uvtt(
         .floors
         .get(idx)
         .ok_or_else(|| CoreError::NotFound("floor".into()))?;
-    let (mut cols, mut rows) = (1, 1);
-    for (c, _) in floor.grid.cells() {
-        cols = cols.max(c.x + 1);
-        rows = rows.max(c.y + 1);
+    let cell_size = doc.manifest.cell_size;
+    let walls = tiles::derive_walls(floor, cell_size);
+    let (cols, rows) = tiles::grid_extent(floor);
+    let ppc = q.ppc.unwrap_or(32);
+    let fmt = pick_format(&q)?;
+    if fmt == tiles::ImageFormat::Avif {
+        return Err(ApiError(CoreError::Invalid(
+            "UVTT pictures are png or webp (avif is not read by VTTs or nd-world)".into(),
+        )));
     }
+    let (png, ..) = tiles::bake_full_as(floor, &walls, cell_size, ppc, fmt, 90)
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    // The picture is `ppc` px per cell, so the UVTT lattice and walls use it too.
     let map = ndcart_formats::uvtt::UvttMap {
-        cols: cols as u32,
-        rows: rows as u32,
-        cell_size: doc.manifest.cell_size,
-        walls: tiles::derive_walls(floor, doc.manifest.cell_size),
+        cols,
+        rows,
+        cell_size: ppc as f64,
+        walls: tiles::derive_walls(floor, ppc as f64),
         lights: floor.lights.clone(),
-        image_b64: None,
+        image_b64: Some(ndcart_formats::base64::encode(&png)),
     };
     let name = format!(
         "{}.dd2vtt",
@@ -352,9 +418,10 @@ async fn get_tile(
             .or_insert_with(|| Arc::new(tiles::derive_walls(&floor, cell_size)))
             .clone()
     };
-    let bytes = tokio::task::spawn_blocking(move || tiles::bake_tile(&floor, &walls, z, x, y))
-        .await
-        .map_err(|e| CoreError::Invalid(format!("tile bake failed: {e}")))?;
+    let bytes =
+        tokio::task::spawn_blocking(move || tiles::bake_tile(&floor, &walls, cell_size, z, x, y))
+            .await
+            .map_err(|e| CoreError::Invalid(format!("tile bake failed: {e}")))?;
     let mut cache = app.tile_cache.lock().expect("tile cache");
     if cache.len() > 2_000 {
         cache.clear();
@@ -385,6 +452,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs", get(list_docs).post(create_doc))
         .route("/api/docs/{id}", get(get_doc))
         .route("/api/docs/{id}/export/uvtt", get(export_uvtt))
+        .route("/api/docs/{id}/export/png", get(export_png))
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
@@ -729,6 +797,63 @@ mod tests {
         assert_eq!(v["resolution"]["map_size"]["x"], 3);
         assert_eq!(v["resolution"]["map_size"]["y"], 2);
         assert!(!v["line_of_sight"].as_array().unwrap().is_empty());
+        // The picture is embedded (a base64 PNG starts "iVBOR") and the lattice
+        // matches it.
+        assert!(v["image"].as_str().unwrap().starts_with("iVBOR"));
+        assert_eq!(v["resolution"]["pixels_per_grid"], 32);
+    }
+
+    #[tokio::test]
+    async fn png_export_size_and_limits() {
+        let app = test_app();
+        let (doc_id, floor_id) = {
+            let mut st = app.store.write().await;
+            let m = st.create("Vault", DocKind::Battle).clone();
+            let d = st.docs.get_mut(&m.id).unwrap();
+            let fid = d.floors[0].id.clone();
+            let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+                {"t":"upsert_space","space":{"id":"s","name":"H","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","cells":[{"x":0,"y":0},{"x":3,"y":1}],"space":"s"}
+            ]))
+            .unwrap();
+            d.apply_ops(&fid, &ops).unwrap();
+            (m.id, fid)
+        };
+        let router = build_router(app);
+        let get = |q: &str| {
+            Request::get(format!("/api/docs/{doc_id}/export/png?floor={floor_id}{q}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        let resp = router.clone().oneshot(get("&ppc=10")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        // PNG IHDR: width at 16..20, height at 20..24 — 4x2 cells at 10 px.
+        assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 40);
+        assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 20);
+        let resp = router.clone().oneshot(get("&ppc=100000")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // WebP and AVIF come back with the right type and magic bytes.
+        let resp = router
+            .clone()
+            .oneshot(get("&ppc=10&format=webp"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "image/webp");
+        let b = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&b[8..12], b"WEBP");
+        let resp = router
+            .clone()
+            .oneshot(get("&ppc=10&format=avif"))
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["content-type"], "image/avif");
+        let b = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&b[4..12], b"ftypavif");
+        let resp = router.oneshot(get("&format=gif")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

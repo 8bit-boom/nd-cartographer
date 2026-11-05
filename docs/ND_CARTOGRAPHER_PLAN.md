@@ -1018,6 +1018,11 @@ These supersede the text above where they conflict.
   until then. M0's remaining items (WebGL viewport, WS change feed, bench budgets in
   CI, the 100k-object and kill -9 tests) are tracked in ARCHITECTURE.md.
 
+**Image formats** — exports support PNG, WebP and AVIF (owner request). UVTT pictures
+stay PNG/WebP (the consumers can't read AVIF). Lossy WebP for cap-fitting is a
+follow-up (needs libwebp); until then cap-fitting uses AVIF for plain exports and
+downscaling for publish.
+
 **Hardening pulled forward (done in M0+)**
 - Token gate when listening off loopback (§11.2) — implemented.
 - Crash-safe saves (temp file + fsync + rename) — implemented.

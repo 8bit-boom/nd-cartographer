@@ -33,6 +33,13 @@ tracks what actually exists, crate by crate, as milestones land.
   `ND_CARTO_TOKEN_FILE`, or `<data-dir>/token`; Bearer, cookie or `?token=`;
   `/health` public). Saves are temp-file + fsync + rename.
 
+- **Full-map render + export** (`tiles::bake_full_as`): PNG, WebP (lossless,
+  pure-Rust encoder — a lossy WebP for the plan's "q≈85 cap fitting" needs libwebp
+  and is still to do) and AVIF (lossy, ravif). The tile baker and the exporter
+  share one renderer. Fixed along the way: wall strokes were drawn at twice their
+  size because lattice pixels were scaled by pixels-per-cell.
+- Light range is capped at 60 squares (nd-world's cap), not 200.
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the
