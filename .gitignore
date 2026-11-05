@@ -1,0 +1,7 @@
+/target
+/node_modules
+/ui/dist
+*.ndmap/
+.env
+/data
+Cargo.lock.bak

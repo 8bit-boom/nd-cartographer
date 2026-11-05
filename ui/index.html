@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nd-cartographer</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header id="topbar">
+  <strong id="doc-name">nd-cartographer</strong>
+  <span id="doc-meta" class="dim"></span>
+  <span class="spacer"></span>
+  <div class="tools">
+    <button id="tool-pan" class="tool active" title="Pan (drag / middle mouse)">✋ Pan</button>
+    <button id="tool-paint" class="tool" title="Paint cells (drag)">🖌 Paint</button>
+    <span id="palette"></span>
+    <button id="btn-undo" title="Undo (Ctrl+Z)">↩ Undo</button>
+  </div>
+</header>
+<main><canvas id="canvas"></canvas>
+  <div id="status" class="dim">loading…</div>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

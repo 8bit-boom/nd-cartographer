@@ -1,0 +1,11 @@
+[package]
+name = "ndcart-core"
+description = "Document model, command journal, room grid and walls-from-rooms for nd-cartographer"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }

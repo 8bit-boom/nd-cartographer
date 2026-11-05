@@ -1,0 +1,23 @@
+[package]
+name = "ndcart-server"
+description = "The nd-cartographer server binary (ndcart): serve, tiles, doc API, bench"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ndcart"
+path = "src/main.rs"
+
+[dependencies]
+ndcart-core = { path = "../ndcart-core" }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "io-util", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tiny-skia = "0.11"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

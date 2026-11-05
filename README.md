@@ -5,8 +5,15 @@ Dungeondraft class, world/region map-making in the Canvas of Kings class, big-an
 complex made easy, AI as a co-cartographer — with deep, optional integration into
 [nd-world](https://github.com/8bit-boom/nd-world).
 
-**Status: the founding plan is in [docs/ND_CARTOGRAPHER_PLAN.md](docs/ND_CARTOGRAPHER_PLAN.md);
-implementation (M0) is starting.** Nothing here works yet.
+**Status: M0 skeleton works** — cargo workspace with `ndcart-core` (document
+model, append-only journal with exact undo, sparse room grid,
+walls-from-rooms in nd-world's shape) and the `ndcart` server binary
+(doc/ops/undo API, baked zoom tiles, optional persistence, `bench`), a
+paintable browser viewport, CI, and a Dockerfile. Run it:
+`cargo run -p ndcart-server --bin ndcart serve` → http://127.0.0.1:8300.
+The founding plan is [docs/ND_CARTOGRAPHER_PLAN.md](docs/ND_CARTOGRAPHER_PLAN.md);
+what exists is tracked in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the
+API in [docs/HTTP_API.md](docs/HTTP_API.md).
 
 ## What it will be
 
