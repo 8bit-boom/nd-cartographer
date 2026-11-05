@@ -305,6 +305,8 @@ pub fn lint(floor: &FloorDoc, cell_size: f64) -> Vec<Problem> {
         }
     }
 
+    extra_checks(floor, &mut out);
+
     out.sort_by(|a, b| {
         (a.severity, a.code, a.at.map(|c| (c.y, c.x))).cmp(&(
             b.severity,
@@ -315,6 +317,147 @@ pub fn lint(floor: &FloorDoc, cell_size: f64) -> Vec<Problem> {
     out
 }
 
+/// The finer checks: zones, tiny rooms, dead ends, secret-only rooms, repeated names.
+fn extra_checks(floor: &FloorDoc, out: &mut Vec<Problem>) {
+    let grid = &floor.grid;
+    // Zones that point at rooms that are gone, or at nothing.
+    for z in &floor.zones {
+        let live: Vec<String> = z
+            .spaces
+            .iter()
+            .filter(|id| grid.spaces.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+        if live.len() != z.spaces.len() && !live.is_empty() {
+            let mut fixed = z.clone();
+            fixed.spaces = live;
+            out.push(Problem {
+                severity: Severity::Warning,
+                code: "zone_stale_room",
+                message: format!("Zone '{}' lists rooms that no longer exist.", z.name),
+                at: None,
+                fix: Some(Op::UpsertZone { zone: fixed }),
+            });
+        } else if live.is_empty() {
+            out.push(Problem {
+                severity: Severity::Info,
+                code: "zone_empty",
+                message: format!("Zone '{}' has no rooms.", z.name),
+                at: None,
+                fix: Some(Op::RemoveZone { id: z.id.clone() }),
+            });
+        }
+    }
+
+    let cells: Vec<(CellKey, &str)> = grid.cells().collect();
+    let mut per_space: BTreeMap<&str, usize> = BTreeMap::new();
+    for (_, s) in &cells {
+        *per_space.entry(s).or_default() += 1;
+    }
+    // Repeated names make "go to the Armory" ambiguous for the GM and for AI.
+    let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
+    for s in grid.spaces.values() {
+        if s.kind == crate::grid::SpaceKind::Room && per_space.contains_key(s.id.as_str()) {
+            *by_name.entry(s.name.to_lowercase()).or_default() += 1;
+        }
+    }
+    for (name, n) in by_name.iter().filter(|(_, n)| **n > 1) {
+        out.push(problem(
+            Severity::Info,
+            "duplicate_room_name",
+            format!("{n} rooms are called '{name}'."),
+        ));
+    }
+
+    // Dead-end corridors: a corridor that joins only one other space.
+    let mut links: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (c, space) in &cells {
+        for edge in [Edge::North, Edge::East, Edge::South, Edge::West] {
+            let Some(other) = grid.cell_space(neighbor(*c, edge)) else {
+                continue;
+            };
+            if other != *space
+                && matches!(
+                    grid.mark_between(*c, edge).map(|m| m.kind),
+                    Some(MarkKind::Door | MarkKind::Secret | MarkKind::Opening)
+                )
+            {
+                links.entry(space).or_default().insert(other);
+            }
+        }
+    }
+    for (id, s) in &grid.spaces {
+        if s.kind == crate::grid::SpaceKind::Corridor
+            && per_space.contains_key(id.as_str())
+            && links.get(id.as_str()).map(|l| l.len()) == Some(1)
+        {
+            out.push(problem(
+                Severity::Info,
+                "corridor_dead_end",
+                format!("Corridor '{}' leads to only one place.", s.name),
+            ));
+        }
+    }
+
+    // Rooms that can be reached only through a secret door.
+    if cells.len() > 1 {
+        let root_of = |allow_secret: bool| -> Vec<usize> {
+            let index: BTreeMap<CellKey, usize> = cells
+                .iter()
+                .enumerate()
+                .map(|(i, (c, _))| (*c, i))
+                .collect();
+            let mut dsu = Dsu((0..cells.len()).collect());
+            for (i, (c, space)) in cells.iter().enumerate() {
+                for edge in [Edge::East, Edge::South] {
+                    let Some(&j) = index.get(&neighbor(*c, edge)) else {
+                        continue;
+                    };
+                    let through = match grid.mark_between(*c, edge).map(|m| m.kind) {
+                        Some(MarkKind::Door | MarkKind::Opening) => true,
+                        Some(MarkKind::Secret) => allow_secret,
+                        _ => false,
+                    };
+                    if cells[j].1 == *space || through {
+                        dsu.union(i, j);
+                    }
+                }
+            }
+            (0..cells.len()).map(|i| dsu.find(i)).collect()
+        };
+        let (open, all) = (root_of(false), root_of(true));
+        let biggest = |roots: &[usize]| -> usize {
+            let mut n: BTreeMap<usize, usize> = BTreeMap::new();
+            for r in roots {
+                *n.entry(*r).or_default() += 1;
+            }
+            n.into_iter()
+                .max_by_key(|(_, k)| *k)
+                .map(|(r, _)| r)
+                .unwrap_or(0)
+        };
+        let (main_open, main_all) = (biggest(&open), biggest(&all));
+        let mut reported: BTreeSet<usize> = BTreeSet::new();
+        for i in 0..cells.len() {
+            // In the main map once secret doors count, but cut off without them.
+            if all[i] == main_all && open[i] != main_open && reported.insert(open[i]) {
+                let name = grid
+                    .spaces
+                    .get(cells[i].1)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("An area");
+                out.push(Problem {
+                    severity: Severity::Info,
+                    code: "secret_only_room",
+                    message: format!("{name} can be reached only through a secret door."),
+                    at: Some(cells[i].0),
+                    fix: None,
+                });
+            }
+        }
+    }
+}
+
 /// True when nd-world would refuse the publish.
 pub fn blocks_publish(problems: &[Problem]) -> bool {
     problems.iter().any(|p| p.severity == Severity::Error)
@@ -323,6 +466,86 @@ pub fn blocks_publish(problems: &[Problem]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn finer_checks_find_zones_dead_ends_secret_rooms_and_repeats() {
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        let sp = |id: &str, name: &str, kind: SpaceKind| default_space(id, name, kind);
+        for (id, name, kind) in [
+            ("a", "Hall", SpaceKind::Room),
+            ("b", "Vault", SpaceKind::Room),
+            ("c", "Vault", SpaceKind::Room),
+            ("k", "Passage", SpaceKind::Corridor),
+        ] {
+            f.grid.upsert_space(sp(id, name, kind)).unwrap();
+        }
+        // Row y=0:  a a | k | b ... and a secret door to c below b.
+        let at = |x, y| CellKey { x, y };
+        f.grid.paint(&[at(0, 0), at(1, 0)], Some("a")).unwrap();
+        f.grid.paint(&[at(2, 0)], Some("k")).unwrap();
+        f.grid.paint(&[at(3, 0)], Some("b")).unwrap();
+        f.grid.paint(&[at(3, 1)], Some("c")).unwrap();
+        let door = |g: &mut crate::grid::RoomGrid, x, y, edge, kind| {
+            g.set_mark(
+                EdgeKey {
+                    cell: at(x, y),
+                    edge,
+                },
+                Some(Mark::new(kind)),
+            )
+            .unwrap()
+        };
+        door(&mut f.grid, 1, 0, Edge::East, MarkKind::Door); // Hall - Passage
+        door(&mut f.grid, 2, 0, Edge::East, MarkKind::Door); // Passage - Vault(b)
+        door(&mut f.grid, 3, 0, Edge::South, MarkKind::Secret); // Vault(b) - Vault(c)
+        f.zones.push(crate::zone::Zone {
+            id: "z".into(),
+            name: "East".into(),
+            color: "#aabbcc".into(),
+            spaces: vec!["b".into(), "gone".into()],
+        });
+        f.zones.push(crate::zone::Zone {
+            id: "e".into(),
+            name: "Empty".into(),
+            color: "#aabbcc".into(),
+            spaces: vec![],
+        });
+        let codes: Vec<&str> = lint(&f, 32.0).iter().map(|p| p.code).collect();
+        for want in [
+            "zone_stale_room",
+            "zone_empty",
+            "duplicate_room_name",
+            "corridor_dead_end",
+            "secret_only_room",
+        ] {
+            // Passage joins two spaces (Hall and Vault), so it is NOT a dead end.
+            if want == "corridor_dead_end" {
+                assert!(!codes.contains(&want), "{codes:?}");
+            } else {
+                assert!(codes.contains(&want), "{want} missing from {codes:?}");
+            }
+        }
+        // Removing the Hall door makes the passage a dead end.
+        f.grid
+            .set_mark(
+                EdgeKey {
+                    cell: at(1, 0),
+                    edge: Edge::East,
+                },
+                None,
+            )
+            .unwrap();
+        let codes: Vec<&str> = lint(&f, 32.0).iter().map(|p| p.code).collect();
+        assert!(codes.contains(&"corridor_dead_end"), "{codes:?}");
+        // The stale zone's fix is a normal op that cleans the list.
+        let fix = lint(&f, 32.0)
+            .into_iter()
+            .find(|p| p.code == "zone_stale_room")
+            .and_then(|p| p.fix)
+            .unwrap();
+        apply_op(&mut f, &fix).unwrap();
+        assert_eq!(f.zones[0].spaces, ["b"]);
+    }
+
     #[test]
     fn stairs_are_checked_against_the_other_floors() {
         let stair = |to: &str| -> crate::overlay::Marker {
