@@ -107,7 +107,7 @@ pub fn scatter(p: &ScatterParams, taken: usize) -> CoreResult<Vec<Op>> {
             let y = y0 + (j as f32 + 0.1 + 0.8 * rng.unit()) * p.spacing;
             let pick = (rng.next() % p.assets.len() as u64) as usize;
             let scale = p.scale_min + (p.scale_max - p.scale_min) * rng.unit();
-            let rotation = rng.unit() * 6.283_185;
+            let rotation = rng.unit() * std::f32::consts::TAU;
             let flip = rng.next() & 1 == 1;
             if !inside(&p.polygon, x, y) {
                 continue;
