@@ -705,6 +705,74 @@ async fn place_prefab(
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
+#[derive(Deserialize)]
+struct ScatterBody {
+    #[serde(default)]
+    floor: Option<String>,
+    /// The area, in cells.
+    points: Vec<[f32; 2]>,
+    /// A named biome (`forest`, `meadow`, `rocky`, `swamp`, `desert`), or give `assets`.
+    #[serde(default)]
+    biome: Option<String>,
+    #[serde(default)]
+    assets: Vec<String>,
+    #[serde(default)]
+    spacing: Option<f32>,
+    #[serde(default = "one_f32")]
+    density: f32,
+    #[serde(default)]
+    seed: u64,
+}
+fn one_f32() -> f32 {
+    1.0
+}
+
+/// `POST /api/docs/{id}/scatter` — fill an area with props: a named biome
+/// (tinted region + props) or an explicit prop list. One undoable step.
+async fn scatter_props(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<ScatterBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor_id = match &b.floor {
+        Some(f) => f.clone(),
+        None => doc.floors[0].id.clone(),
+    };
+    let idx = floors_by_id(&doc.floors, &floor_id)?;
+    let taken = doc.floors[idx].stamps.len();
+    let ops = match &b.biome {
+        Some(name) => {
+            let biome = ndcart_core::scatter::biome(name)
+                .ok_or_else(|| CoreError::Invalid(format!("unknown biome {name}")))?;
+            ndcart_core::scatter::scatter_biome(&b.points, biome, b.density, b.seed, taken)?
+        }
+        None => ndcart_core::scatter::scatter(
+            &ndcart_core::scatter::ScatterParams {
+                polygon: b.points.clone(),
+                assets: b.assets.clone(),
+                spacing: b.spacing.unwrap_or(2.0),
+                seed: b.seed,
+                scale_min: 0.8,
+                scale_max: 1.2,
+            },
+            taken,
+        )?,
+    };
+    doc.apply_ops(&floor_id, &ops)?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
+}
+
 /// `POST /api/docs/{id}/generate-map` `{floor?, kind, seed, width, height}` — a
 /// dungeon, cave, building, deck or city district drawn onto the floor as ONE
 /// undoable step (it adds to what is there; the same seed gives the same map).
@@ -1205,6 +1273,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/floors", post(floors_route))
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
         .route("/api/docs/{id}/generate-map", post(generate_map))
+        .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/prefabs", get(list_prefabs))
         .route("/api/prefabs/{pid}", axum::routing::delete(delete_prefab))
         .route("/api/docs/{id}/prefabs", post(capture_prefab))
@@ -2369,6 +2438,70 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
         let _ = fb;
+    }
+
+    #[tokio::test]
+    async fn scatter_places_a_biome_in_one_undo_step_and_refuses_bad_input() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(
+            &router,
+            "POST",
+            "/api/docs",
+            br#"{"name":"S","kind":"region"}"#.to_vec(),
+        )
+        .await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let floor = json(d)["floors"][0]["id"].as_str().unwrap().to_string();
+        let url = format!("/api/docs/{id}/scatter");
+        let area = "[[2,2],[22,3],[20,16],[3,14]]";
+        let body = |extra: &str| format!(r#"{{"points":{area},"seed":3{extra}}}"#).into_bytes();
+        let (st, _) = call(&router, "POST", &url, body(r#","biome":"forest""#)).await;
+        assert_eq!(st, StatusCode::OK);
+        let counts = || {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}"));
+            async move {
+                let d = json(call(&router, "GET", &uri, vec![]).await.1);
+                (
+                    d["floors"][0]["outline"]["stamps"]
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0),
+                    d["floors"][0]["regions"]
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0),
+                )
+            }
+        };
+        let (stamps, regions) = counts().await;
+        assert!(stamps > 50 && regions == 1, "{stamps} {regions}");
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/undo"),
+            format!(r#"{{"floor":"{floor}"}}"#).into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(counts().await, (0, 0));
+        let (st, _) = call(
+            &router,
+            "POST",
+            &url,
+            body(r#","assets":["rock"],"spacing":3"#),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        for bad in [
+            r#","biome":"lava""#,
+            r#","assets":[]"#,
+            r#","assets":["rock"],"spacing":0.01"#,
+        ] {
+            let (st, _) = call(&router, "POST", &url, body(bad)).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+        }
     }
 
     #[tokio::test]

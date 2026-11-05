@@ -18,6 +18,7 @@ pub mod lint;
 pub mod outline;
 pub mod overlay;
 pub mod prefab;
+pub mod scatter;
 pub mod stamp;
 pub mod stroke;
 pub mod structure;

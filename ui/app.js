@@ -355,7 +355,7 @@ const TERRAIN_TOOLS = ['raise', 'lower', 'smooth', 'flatten', 'roughen'];
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'stairs', 'prefab', 'region', 'route', 'label', 'pathlabel']) {
+  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'stairs', 'prefab', 'biome', 'region', 'route', 'label', 'pathlabel']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
@@ -363,6 +363,7 @@ function setTool(tool) {
   document.getElementById('stampbar').hidden = tool !== 'stamp';
   setTerrainBar(tool);
   document.getElementById('labelbar').hidden = !(tool === 'label' || tool === 'pathlabel');
+  document.getElementById('biomebar').hidden = tool !== 'biome';
   document.getElementById('lb-hint').textContent = tool === 'pathlabel' ? 'click points along the path, Enter to finish' : tool === 'label' ? 'click to place' : '';
   statusEl.textContent =
     tool === 'paint' ? `Painting ${activeItem().name}`
@@ -373,6 +374,7 @@ function setTool(tool) {
     : tool === 'river' ? 'River: click points from source to mouth · Enter finishes · Esc cancels'
     : tool === 'marker' ? 'Marker: click to place a point of interest'
     : tool === 'prefab' ? `Prefab ${state.prefab?.name || ''}: click to place its top-left corner (R turns it, now ${state.prefabTurns * 90}°)`
+    : tool === 'biome' ? 'Biome: click the corners of the area · Enter fills it · Esc cancels'
     : tool === 'stairs' ? 'Stairs: click where they are, then say which floor they lead to'
     : tool === 'label' ? 'Label: click where the text goes'
     : tool === 'pathlabel' ? 'Text on a path: click points along the way · Enter finishes · Esc cancels'
@@ -826,6 +828,19 @@ async function placeLabel(wx, wy) {
   await postOps([{ t: 'upsert_label', label: { ...labelBase(text), x: +(wx / s).toFixed(3), y: +(wy / s).toFixed(3) } }]);
 }
 
+async function finishBiome() {
+  const pts = overlayDraft;
+  if (!pts || pts.length < 3) { render(); return; }   // too few corners: keep drawing
+  overlayDraft = null;
+  try {
+    const res = await api('POST', `/api/docs/${state.docId}/scatter`, {
+      floor: state.floorId, points: pts, biome: document.getElementById('bi-kind').value,
+      density: Number(document.getElementById('bi-density').value), seed: Math.floor(Math.random() * 4294967295),
+    });
+    state.rev = res.rev; tileCache.clear(); await refresh();
+  } catch (e) { statusEl.textContent = `Error: ${e.message}`; render(); }
+}
+
 async function finishPathLabel() {
   const pts = overlayDraft;
   if (!pts || pts.length < 2) { render(); return; }   // too few points: keep drawing
@@ -896,6 +911,7 @@ function finishDraft() {
   if (state.tool === 'river') return finishRiver();
   if (state.tool === 'region' || state.tool === 'route') return finishOverlayShape();
   if (state.tool === 'pathlabel') return finishPathLabel();
+  if (state.tool === 'biome') return finishBiome();
 }
 
 async function finishOverlayShape() {
@@ -915,7 +931,7 @@ function drawOverlayDraft() {
   if (!overlayDraft || !overlayDraft.length) return;
   const s = ppc();
   ctx.save();
-  ctx.strokeStyle = state.tool === 'region' ? 'rgba(255,120,110,0.95)' : state.tool === 'pathlabel' ? 'rgba(160,220,255,0.95)' : 'rgba(255,230,140,0.95)';
+  ctx.strokeStyle = state.tool === 'region' || state.tool === 'biome' ? 'rgba(255,120,110,0.95)' : state.tool === 'pathlabel' ? 'rgba(160,220,255,0.95)' : 'rgba(255,230,140,0.95)';
   ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
   ctx.beginPath();
   overlayDraft.forEach((p, i) => { const [x, y] = worldToScreen(p[0] * s, p[1] * s); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
@@ -981,6 +997,11 @@ canvas.addEventListener('pointerdown', (e) => {
     dragging = null;
     return;
   }
+  if (state.tool === 'biome' && e.button === 0) {
+    if (isDoubleClick(e)) finishBiome(); else addOverlayPoint(wx, wy);
+    dragging = null;
+    return;
+  }
   if ((state.tool === 'region' || state.tool === 'route') && e.button === 0) {
     if (isDoubleClick(e)) finishOverlayShape(); else addOverlayPoint(wx, wy);
     dragging = null;
@@ -1018,7 +1039,7 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
   const [hx, hy] = screenToWorld(e.offsetX, e.offsetY);
   state.hover = [hx / ppc(), hy / ppc()];
-  if (TERRAIN_TOOLS.includes(state.tool) || ['river', 'region', 'route', 'pathlabel'].includes(state.tool)) render();
+  if (TERRAIN_TOOLS.includes(state.tool) || ['river', 'region', 'route', 'pathlabel', 'biome'].includes(state.tool)) render();
   if (!dragging) return;
   if (dragging.terrain) {
     const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);

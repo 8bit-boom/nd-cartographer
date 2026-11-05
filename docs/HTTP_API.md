@@ -36,6 +36,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
 
 | POST | `/api/docs/{id}/generate-map` | `{floor?, kind: dungeon\|cave\|building\|deck\|district, seed, width, height}` | 16–120 squares a side. Adds to the floor as one undoable step; same seed, same map. |
+| POST | `/api/docs/{id}/scatter` | `{floor?, points:[[x,y]…], biome? \| assets[], spacing?, density?, seed}` | Fill an area with props (and, for a biome, a tinted region) as one undoable step. Biomes: forest, meadow, rocky, swamp, desert. |
 | GET | `/api/prefabs` | – | The prefab library shared by every project. |
 | POST | `/api/docs/{id}/prefabs` | `{floor?, name, spaces:[room ids]}` | Copy rooms (with doors, lights, notes on them) into the library. |
 | DELETE | `/api/prefabs/{pid}` | – | |
