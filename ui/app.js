@@ -464,12 +464,29 @@ function paintTo(cx, cy) {
   state.lastCell = [cx, cy];
 }
 
+// Symmetry: painting a cell also paints its mirror images about the axis
+// lines (a line sits on a cell edge, so cell x mirrors to 2*ax - 1 - x).
+state.sym = { v: false, h: false, ax: 20, ay: 15 };
+function mirrored(x, y) {
+  const { v, h, ax, ay } = state.sym;
+  const xs = v ? [x, 2 * ax - 1 - x] : [x];
+  const ys = h ? [y, 2 * ay - 1 - y] : [y];
+  return xs.flatMap((mx) => ys.map((my) => [mx, my]));
+}
+
 function queuePaint(cellX, cellY) {
   if (!state.painting) state.painting = new Set();
-  state.painting.add(`${cellX},${cellY}`);
+  for (const [mx, my] of mirrored(cellX, cellY)) state.painting.add(`${mx},${my}`);
   drawStrokePreview();
   clearTimeout(state.pendingFlush);
   state.pendingFlush = setTimeout(flushStroke, 120);
+}
+
+for (const [id, key, num] of [['sym-v', 'v'], ['sym-h', 'h'], ['sym-ax', 'ax', true], ['sym-ay', 'ay', true]]) {
+  document.getElementById(id).onchange = (e) => {
+    state.sym[key] = num ? Math.round(Number(e.target.value) || 0) : e.target.checked;
+    drawStrokePreview();
+  };
 }
 
 // ---------- freehand brush ----------
