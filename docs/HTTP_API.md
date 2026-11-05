@@ -32,6 +32,10 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 |---|---|---|---|
 | POST | `/api/docs/{id}/ops` | `{floor, ops:[…]}` | Applies a batch as journal entries; `{"ok":true,"rev":N}`. ≤ 500 ops per request. |
 | POST | `/api/docs/{id}/undo` | `{floor}` | Applies the last entry's inverse as a new entry; `{"ok":true,"rev":N}`. |
+| POST | `/api/docs/{id}/floors` | `{action:"add",name,copy_from?}` / `{action:"rename",floor,name}` / `{action:"remove",floor}` / `{action:"move",floor,to}` | Floor structure. Max 64 floors, last floor cannot be removed. `{"ok":true,"rev":N,"floor":id?}`. |
+| POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
+
+Tiles accept `?onion=<floor id>`: that floor is drawn at 30% opacity under the current floor (404 if the id is unknown).
 
 ### Ops (internally tagged, `"t"`)
 

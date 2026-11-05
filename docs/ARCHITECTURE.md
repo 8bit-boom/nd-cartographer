@@ -257,6 +257,14 @@ cannot express), and `publish` started a nested tokio runtime.
   Fix found on the way: markers, regions, routes and labels now grow the export extent
   (they were cropped from exports of maps without an explicit canvas).
 
+## Floors
+
+All floors share one journal; each entry carries `floor: Option<String>` and undo/replay only touch entries for their own floor
+(legacy entries without a floor match any floor). Floor structure (add / remove / rename / move) lives in a separate `StructJournal`
+(`structure.ndjson`) with its own undo; removing a floor snapshots it so undo restores it. `apply_ops` is atomic. The tile route can
+composite another floor underneath (`onion`, 30%). The UI floor bar offers add, duplicate, rename, reorder, remove, undo and onion skin.
+Not yet: per-floor publish to nd-world (`--all-floors`) and stairs links.
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

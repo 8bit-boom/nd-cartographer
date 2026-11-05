@@ -423,6 +423,90 @@ struct GenerateBody {
     rivers: Option<u32>,
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum FloorRequest {
+    /// A new empty floor, or a copy of `copy_from` (placed right after it).
+    Add {
+        name: String,
+        copy_from: Option<String>,
+    },
+    Rename {
+        id: String,
+        name: String,
+    },
+    Remove {
+        id: String,
+    },
+    Move {
+        id: String,
+        index: usize,
+    },
+}
+
+/// `POST /api/docs/{id}/floors` — add (or duplicate), rename, move or remove a
+/// floor. Each is undoable with `POST /api/docs/{id}/undo-structure`.
+async fn floors_route(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<FloorRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(req) = body.map_err(|_| {
+        ApiError(CoreError::Invalid(
+            "body must be {action: add|rename|remove|move, …}".into(),
+        ))
+    })?;
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let mut new_floor = None;
+    match req {
+        FloorRequest::Add { name, copy_from } => {
+            new_floor = Some(doc.add_floor(&name, copy_from.as_deref())?);
+        }
+        FloorRequest::Rename { id: f, name } => doc.rename_floor(&f, &name)?,
+        FloorRequest::Remove { id: f } => doc.remove_floor(&f)?,
+        FloorRequest::Move { id: f, index } => doc.move_floor(&f, index)?,
+    }
+    let floors: Vec<_> = doc
+        .floors
+        .iter()
+        .map(|f| serde_json::json!({"id": f.id, "name": f.name}))
+        .collect();
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(
+        serde_json::json!({ "floors": floors, "floor": new_floor }),
+    ))
+}
+
+/// `POST /api/docs/{id}/undo-structure` — undo the last floor add/rename/move/remove.
+async fn undo_structure(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.undo_structure()?;
+    let floors: Vec<_> = doc
+        .floors
+        .iter()
+        .map(|f| serde_json::json!({"id": f.id, "name": f.name}))
+        .collect();
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({ "floors": floors })))
+}
+
 /// `POST /api/docs/{id}/generate` — a seeded world (continents, mountains, a sea
 /// level for the requested land fraction, rivers to the sea) replaces the
 /// floor's terrain and rivers as ONE undoable step. Size is capped at 512x512
@@ -756,9 +840,16 @@ async fn post_undo(
     Ok(Json(serde_json::json!({"ok": true, "rev": rev})))
 }
 
+#[derive(Deserialize)]
+struct TileQuery {
+    /// Another floor of the same document to show faintly underneath.
+    onion: Option<String>,
+}
+
 async fn get_tile(
     State(app): State<App>,
     Path((doc_id, floor_id, z, xy)): Path<(String, String, u32, String)>,
+    axum::extract::Query(q): axum::extract::Query<TileQuery>,
 ) -> Result<Response, ApiError> {
     let (x, y) = {
         let mut parts = xy.splitn(2, '_');
@@ -767,7 +858,11 @@ async fn get_tile(
         let y: i64 = b.parse().map_err(|_| CoreError::Invalid("tile y".into()))?;
         (x, y)
     };
-    let key = format!("{doc_id}/{floor_id}/{z}/{x}_{y}");
+    let onion_id = q.onion.filter(|o| *o != floor_id);
+    let key = format!(
+        "{doc_id}/{floor_id}/{z}/{x}_{y}/{}",
+        onion_id.as_deref().unwrap_or("-")
+    );
     if let Some(bytes) = app.tile_cache.lock().expect("tile cache").get(&key) {
         return Ok(png_response(bytes));
     }
@@ -787,10 +882,28 @@ async fn get_tile(
             .or_insert_with(|| Arc::new(tiles::derive_walls(&floor, cell_size)))
             .clone()
     };
-    let bytes =
-        tokio::task::spawn_blocking(move || tiles::bake_tile(&floor, &walls, cell_size, z, x, y))
-            .await
-            .map_err(|e| CoreError::Invalid(format!("tile bake failed: {e}")))?;
+    // The optional floor shown faintly underneath (must be a floor of this document).
+    let ghost = match &onion_id {
+        Some(oid) => {
+            let oi = floors_by_id(&doc.floors, oid)?;
+            let of = doc.floors[oi].clone();
+            let ow = {
+                let mut cache = app.wall_cache.lock().expect("wall cache");
+                cache
+                    .entry((doc_id.clone(), oid.clone(), rev))
+                    .or_insert_with(|| Arc::new(tiles::derive_walls(&of, cell_size)))
+                    .clone()
+            };
+            Some((of, ow))
+        }
+        None => None,
+    };
+    let bytes = tokio::task::spawn_blocking(move || {
+        let onion = ghost.as_ref().map(|(f, w)| (f, w.as_slice()));
+        tiles::bake_tile_onion(&floor, &walls, cell_size, z, x, y, onion)
+    })
+    .await
+    .map_err(|e| CoreError::Invalid(format!("tile bake failed: {e}")))?;
     let mut cache = app.tile_cache.lock().expect("tile cache");
     if cache.len() > 2_000 {
         cache.clear();
@@ -834,6 +947,8 @@ fn build_router(app: App) -> Router {
             convert::MAX_INPUT_BYTES,
         ))
         .route("/api/docs/{id}/generate", post(generate_world))
+        .route("/api/docs/{id}/floors", post(floors_route))
+        .route("/api/docs/{id}/undo-structure", post(undo_structure))
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
@@ -1899,6 +2014,257 @@ mod tests {
             "players see the open label"
         );
         assert_eq!(count(&player, [0, 0, 0xc0]), 0, "and not the GM's note");
+    }
+
+    #[tokio::test]
+    async fn floors_are_independent_undo_per_floor_and_a_removed_floor_comes_back() {
+        let router = build_router(test_app());
+        let (id, ground) = {
+            let (st, body) = call(
+                &router,
+                "POST",
+                "/api/docs",
+                br#"{"name":"Station","kind":"battle"}"#.to_vec(),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+            let g = serde_json::from_slice::<serde_json::Value>(&d).unwrap()["floors"][0]["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            (id, g)
+        };
+        let post = |path: &str, body: serde_json::Value| {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}/{path}"));
+            async move {
+                let (st, b) = call(&router, "POST", &uri, body.to_string().into_bytes()).await;
+                (
+                    st,
+                    serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default(),
+                )
+            }
+        };
+        let doc = || {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}"));
+            async move {
+                serde_json::from_slice::<serde_json::Value>(
+                    &call(&router, "GET", &uri, vec![]).await.1,
+                )
+                .unwrap()
+            }
+        };
+        // Add two floors.
+        let (st, r) = post("floors", serde_json::json!({"action":"add","name":"Upper"})).await;
+        assert_eq!(st, StatusCode::OK);
+        let upper = r["floor"].as_str().unwrap().to_string();
+        let (_, r) = post("floors", serde_json::json!({"action":"add","name":"Roof"})).await;
+        let roof = r["floor"].as_str().unwrap().to_string();
+        assert_eq!(r["floors"].as_array().unwrap().len(), 3);
+        // Paint a room on each of ground and upper (interleaved).
+        let room = |floor: &str, name: &str, x: i32| {
+            serde_json::json!({"floor": floor, "ops": [
+                {"t":"upsert_space","space":{"id":"s","name":name,"color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","cells":[{"x":x,"y":0},{"x":x+1,"y":0}],"space":"s"}]})
+        };
+        assert_eq!(
+            post("ops", room(&ground, "Lobby", 0)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post("ops", room(&upper, "Suite", 5)).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(post("ops", serde_json::json!({"floor": ground, "ops":[{"t":"add_light","light":{"id":"l","x":16.0,"y":16.0,"range":4.0,"color":"#ffaa00","intensity":1.0,"on":true}}]})).await.0, StatusCode::OK);
+        let d = doc().await;
+        let cells = |d: &serde_json::Value, i: usize| {
+            d["floors"][i]["grid"]["cells"].as_array().unwrap().len()
+        };
+        assert_eq!(
+            (cells(&d, 0), cells(&d, 1), cells(&d, 2)),
+            (2, 2, 0),
+            "each floor has only its own cells"
+        );
+        assert_eq!(d["floors"][0]["lights"].as_array().unwrap().len(), 1);
+        assert_eq!(d["floors"][1]["lights"].as_array().unwrap().len(), 0);
+        // Undo on the GROUND floor removes ITS light (the latest edit there), not the upper room.
+        assert_eq!(
+            post("undo", serde_json::json!({"floor": ground})).await.0,
+            StatusCode::OK
+        );
+        let d = doc().await;
+        assert_eq!(d["floors"][0]["lights"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            cells(&d, 1),
+            2,
+            "the upper floor was not touched by undo on the ground floor"
+        );
+        // A request whose second op is invalid applies NOTHING (the first op is rolled back).
+        let bad = serde_json::json!({"floor": upper, "ops":[
+            {"t":"add_light","light":{"id":"a","x":1.0,"y":1.0,"range":4.0,"color":"#ffaa00","intensity":1.0,"on":true}},
+            {"t":"add_light","light":{"id":"b","x":1.0,"y":1.0,"range":4000.0,"color":"#ffaa00","intensity":1.0,"on":true}}]});
+        assert_eq!(post("ops", bad).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            doc().await["floors"][1]["lights"].as_array().unwrap().len(),
+            0,
+            "all or nothing"
+        );
+        // Rename, move, duplicate.
+        assert_eq!(
+            post(
+                "floors",
+                serde_json::json!({"action":"rename","id":upper,"name":"Penthouse"})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post(
+                "floors",
+                serde_json::json!({"action":"move","id":roof,"index":0})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (_, r) = post(
+            "floors",
+            serde_json::json!({"action":"add","name":"Upper copy","copy_from":upper}),
+        )
+        .await;
+        let names: Vec<String> = r["floors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["Roof", "Ground", "Penthouse", "Upper copy"],
+            "the copy sits right after its source"
+        );
+        let d = doc().await;
+        assert_eq!(cells(&d, 3), 2, "a copy carries the content");
+        // Remove the Penthouse, then bring it back with its content.
+        assert_eq!(
+            post("floors", serde_json::json!({"action":"remove","id":upper}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(doc().await["floors"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            post("undo-structure", serde_json::json!({})).await.0,
+            StatusCode::OK
+        );
+        let d = doc().await;
+        let back: Vec<&str> = d["floors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            back,
+            [roof.as_str(), ground.as_str(), upper.as_str(), back[3]],
+            "restored to its old position"
+        );
+        assert_eq!(cells(&d, 2), 2, "with its room");
+        // The last floor cannot be removed; bad input is a 400; unknown floor 400/404.
+        assert_eq!(
+            post("floors", serde_json::json!({"action":"remove","id":"nope"}))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post(
+                "floors",
+                serde_json::json!({"action":"rename","id":ground,"name":""})
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post("floors", serde_json::json!({"action":"fly"})).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post("ops", serde_json::json!({"floor":"ghost","ops":[]}))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn the_tile_route_can_show_another_floor_underneath() {
+        let router = build_router(test_app());
+        let (st, body) = call(
+            &router,
+            "POST",
+            "/api/docs",
+            br#"{"name":"Tower","kind":"battle"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let ground = serde_json::from_slice::<serde_json::Value>(&d).unwrap()["floors"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, r) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/floors"),
+            br#"{"action":"add","name":"Upper"}"#.to_vec(),
+        )
+        .await;
+        let upper = serde_json::from_slice::<serde_json::Value>(&r).unwrap()["floor"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let paint = serde_json::json!({"floor": ground, "ops":[{"t":"batch","ops":[
+            {"t":"upsert_space","space":{"id":"s","name":"Hall","color":"#ff0000","kind":"room"}},
+            {"t":"paint_cells","cells":[{"x":1,"y":1},{"x":2,"y":1}],"space":"s"}]}]});
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/ops"),
+                paint.to_string().into_bytes()
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let tile = |q: String| {
+            let router = router.clone();
+            let uri = format!("/tiles/{id}/{upper}/0/0_0{q}");
+            async move { call(&router, "GET", &uri, vec![]).await }
+        };
+        let (st, plain) = tile(String::new()).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, ghost) = tile(format!("?onion={ground}")).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_ne!(
+            plain, ghost,
+            "the ground floor's room shows under the empty upper floor"
+        );
+        // A floor ghosting onto itself, or the parameter left empty, changes nothing.
+        assert_eq!(tile(format!("?onion={upper}")).await.1, plain);
+        // An onion floor that does not exist is a 404, not a silent no-op.
+        assert_eq!(tile("?onion=ghost".into()).await.0, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

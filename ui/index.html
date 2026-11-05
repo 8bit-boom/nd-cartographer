@@ -51,6 +51,17 @@
     <button id="btn-help" title="Keyboard help (F1)">?</button>
   </div>
 </header>
+<div id="floorbar" role="tablist" aria-label="Floors">
+  <span id="floor-tabs"></span>
+  <button id="fl-add" title="Add an empty floor">＋ Floor</button>
+  <button id="fl-dup" title="Duplicate this floor (placed right after it)">⧉ Copy</button>
+  <button id="fl-rename" title="Rename this floor">✎ Rename</button>
+  <button id="fl-left" title="Move this floor earlier">◀</button>
+  <button id="fl-right" title="Move this floor later">▶</button>
+  <button id="fl-remove" title="Remove this floor (undoable)">🗑 Remove</button>
+  <button id="fl-undo" title="Undo the last floor change (add / rename / move / remove)">↩ Floors</button>
+  <label class="dim" title="Show the floor below faintly underneath, so stairs line up"><input type="checkbox" id="fl-onion"> onion skin</label>
+</div>
 <main>
   <nav id="outliner" aria-label="Map outline">
     <h3>Outline</h3>

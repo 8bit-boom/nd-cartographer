@@ -432,6 +432,18 @@ pub struct JournalEntry {
     /// further instead of toggling the first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undoes: Option<usize>,
+    /// The floor this entry edited. A document's floors share one journal, so
+    /// undo and replay must tell them apart. Entries written before floors existed
+    /// have none and belong to whichever floor asks (there was only one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<String>,
+}
+
+impl JournalEntry {
+    /// Does this entry belong to floor `id`?
+    pub fn is_for(&self, id: &str) -> bool {
+        self.floor.as_deref().is_none_or(|f| f == id)
+    }
 }
 
 #[derive(Default)]
@@ -461,6 +473,7 @@ impl Journal {
             op: op.clone(),
             inverse,
             undoes: None,
+            floor: Some(floor.id.clone()),
         });
         Ok(())
     }
@@ -472,7 +485,13 @@ impl Journal {
             op,
             inverse,
             undoes: None,
+            floor: None,
         });
+    }
+
+    /// Drop everything after the first `n` entries (a failed batch is rolled back).
+    pub fn truncate(&mut self, n: usize) {
+        self.entries.truncate(n);
     }
 
     /// Undo the most recent entry that has not been undone yet: apply its
@@ -488,7 +507,11 @@ impl Journal {
         }
         let target = (0..self.entries.len())
             .rev()
-            .find(|i| self.entries[*i].undoes.is_none() && !undone.contains(i))
+            .find(|i| {
+                self.entries[*i].undoes.is_none()
+                    && !undone.contains(i)
+                    && self.entries[*i].is_for(&floor.id)
+            })
             .ok_or_else(|| CoreError::NotFound("nothing to undo".to_string()))?;
         let inverse = self.entries[target].inverse.clone();
         let redo_inverse = inverse.inverse_against(floor)?;
@@ -497,6 +520,7 @@ impl Journal {
             op: inverse,
             inverse: redo_inverse,
             undoes: Some(target),
+            floor: Some(floor.id.clone()),
         });
         Ok(true)
     }
@@ -525,7 +549,8 @@ impl Journal {
 
     /// Replay the whole journal into a fresh floor.
     pub fn replay_into(&self, floor: &mut FloorDoc) -> CoreResult<()> {
-        for e in &self.entries {
+        let id = floor.id.clone();
+        for e in self.entries.iter().filter(|e| e.is_for(&id)) {
             apply_op(floor, &e.op)?;
         }
         Ok(())
@@ -1390,5 +1415,75 @@ mod tests {
         });
         f.put_overlay(again, None).unwrap();
         assert_eq!(f.markers[3].label, "moved");
+    }
+
+    #[test]
+    fn floors_share_one_journal_but_undo_and_replay_stay_on_their_own_floor() {
+        let mut ground = FloorDoc::new("ground".into(), "Ground".into());
+        let mut upper = FloorDoc::new("upper".into(), "Upper".into());
+        let mut j = Journal::default();
+        // Interleaved edits on two floors.
+        j.push(
+            &mut ground,
+            &Op::AddStamp {
+                stamp: stamp("g1", 1.0),
+                index: None,
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut upper,
+            &Op::AddStamp {
+                stamp: stamp("u1", 1.0),
+                index: None,
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut ground,
+            &Op::AddStamp {
+                stamp: stamp("g2", 2.0),
+                index: None,
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut upper,
+            &Op::AddStamp {
+                stamp: stamp("u2", 2.0),
+                index: None,
+            },
+        )
+        .unwrap();
+        // Undo on the ground floor undoes ITS last edit (g2), not the latest edit anywhere (u2).
+        j.undo_last(&mut ground).unwrap();
+        let ids = |f: &FloorDoc| f.stamps.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&ground), ["g1"]);
+        assert_eq!(ids(&upper), ["u1", "u2"], "the other floor is untouched");
+        // And the upper floor undoes its own, twice, then has nothing left.
+        j.undo_last(&mut upper).unwrap();
+        j.undo_last(&mut upper).unwrap();
+        assert!(upper.stamps.is_empty());
+        assert!(
+            j.undo_last(&mut upper).is_err(),
+            "nothing left to undo on this floor"
+        );
+        assert_eq!(ids(&ground), ["g1"], "still untouched");
+        // Replaying the one journal rebuilds each floor from only its own entries.
+        let back = Journal::from_ndjson(&j.to_ndjson()).unwrap();
+        let (mut g2, mut u2) = (
+            FloorDoc::new("ground".into(), "Ground".into()),
+            FloorDoc::new("upper".into(), "Upper".into()),
+        );
+        back.replay_into(&mut g2).unwrap();
+        back.replay_into(&mut u2).unwrap();
+        assert_eq!(g2.stamps, ground.stamps);
+        assert_eq!(u2.stamps, upper.stamps);
+        // A journal written before floors existed (no floor field) belongs to the floor that asks.
+        let old = r#"{"op":{"t":"add_stamp","stamp":{"id":"o","asset":"crate","x":1,"y":1}},"inverse":{"t":"remove_stamp","id":"o"}}"#;
+        let legacy = Journal::from_ndjson(old).unwrap();
+        let mut any = FloorDoc::new("whatever".into(), "X".into());
+        legacy.replay_into(&mut any).unwrap();
+        assert_eq!(ids(&any), ["o"]);
     }
 }

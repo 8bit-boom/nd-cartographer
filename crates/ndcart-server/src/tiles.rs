@@ -53,6 +53,7 @@ fn parse_hex(color: &str) -> [u8; 3] {
 /// Bake one tile. `z`, `tx`, `ty` are the pyramid coordinates; the tile at
 /// (z, tx, ty) covers world pixels `[tx*256, tx*256+256) x [ty*256, ...)`
 /// in the z-scaled image. PNG bytes.
+#[cfg(test)]
 pub fn bake_tile(
     floor: &FloorDoc,
     walls: &[Wall],
@@ -65,6 +66,33 @@ pub fn bake_tile(
     let ppc = PPC0 << z; // pixels per cell at this zoom (fits i64: 16<<4=256)
     let t = i64::from(TILE);
     render_region(floor, walls, cell_size, ppc, tx * t, ty * t, TILE, TILE)
+}
+
+/// A tile with the floor `onion` shown faintly underneath it.
+pub fn bake_tile_onion(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    z: u32,
+    tx: i64,
+    ty: i64,
+    onion: Option<(&FloorDoc, &[Wall])>,
+) -> Vec<u8> {
+    let ppc = PPC0 << z.min(MAX_Z);
+    let t = i64::from(TILE);
+    render_pixmap_onion(
+        floor,
+        walls,
+        cell_size,
+        ppc,
+        tx * t,
+        ty * t,
+        TILE,
+        TILE,
+        onion,
+    )
+    .encode_png()
+    .expect("png encode")
 }
 
 /// The whole floor as one image at `ppc` pixels per cell (cols x rows is the
@@ -215,6 +243,7 @@ fn surfaces_of(floor: &FloorDoc) -> std::collections::HashMap<&str, Surface> {
         .collect()
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_region(
     floor: &FloorDoc,
@@ -1136,6 +1165,28 @@ fn render_pixmap(
     w: u32,
     h: u32,
 ) -> tiny_skia::Pixmap {
+    render_pixmap_onion(floor, walls, cell_size, ppc, x0, y0, w, h, None)
+}
+
+/// How strongly the neighbouring floor shows through (the "onion skin").
+const ONION_OPACITY: f32 = 0.3;
+
+/// [`render_pixmap`] with an optional second floor drawn faintly *underneath*, so
+/// stairs and walls on the floor below line up with what is being edited. The
+/// other floor is rendered whole (rooms, strokes, props, text) and composited at
+/// [`ONION_OPACITY`] before the current floor is drawn over it.
+#[allow(clippy::too_many_arguments)]
+fn render_pixmap_onion(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    x0: i64,
+    y0: i64,
+    w: u32,
+    h: u32,
+    onion: Option<(&FloorDoc, &[Wall])>,
+) -> tiny_skia::Pixmap {
     let tile_px_w = i64::from(w);
     let tile_px_h = i64::from(h);
     let k = ppc as f32 / cell_size.max(1.0) as f32; // wall pixels -> image pixels
@@ -1144,6 +1195,21 @@ fn render_pixmap(
     pixmap.fill(tiny_skia::Color::from_rgba8(
         VOID[0], VOID[1], VOID[2], 0xff,
     ));
+
+    if let Some((other, other_walls)) = onion {
+        let ghost = render_pixmap(other, other_walls, cell_size, ppc, x0, y0, w, h);
+        pixmap.draw_pixmap(
+            0,
+            0,
+            ghost.as_ref(),
+            &tiny_skia::PixmapPaint {
+                opacity: ONION_OPACITY,
+                ..Default::default()
+            },
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
 
     // Cell range intersecting the tile (in cell coordinates).
     let cx_from = x0.div_euclid(ppc);
@@ -2653,6 +2719,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_floor_below_shows_faintly_underneath_and_the_current_floor_wins() {
+        use ndcart_core::grid::default_space;
+        let room = |name: &str, color: &str, x0: i32, x1: i32| {
+            let mut f = FloorDoc::new(name.into(), name.into());
+            let mut sp = default_space("a", "A", SpaceKind::Room);
+            sp.color = color.into();
+            f.grid.upsert_space(sp).unwrap();
+            let cells: Vec<CellKey> = (x0..x1)
+                .flat_map(|x| (0..4).map(move |y| CellKey::new(x, y)))
+                .collect();
+            f.grid.paint(&cells, Some("a")).unwrap();
+            f
+        };
+        let upper = room("upper", "#d0d0d0", 0, 2); // the floor being edited: cells 0..2
+        let below = room("below", "#ff0000", 2, 4); // the floor under it: cells 2..4
+        let (wu, wb) = (derive_walls(&upper, 32.0), derive_walls(&below, 32.0));
+        // zoom 0 is 16 px per cell: the room cells span x 0..32 and 32..64 of tile (0,0).
+        let plain = decode(&bake_tile_onion(&upper, &wu, 32.0, 0, 0, 0, None));
+        let ghosted = decode(&bake_tile_onion(
+            &upper,
+            &wu,
+            32.0,
+            0,
+            0,
+            0,
+            Some((&below, &wb)),
+        ));
+        // Where only the lower floor has a room: void without onion, ~30% red with it.
+        assert_eq!(rgb(&plain, 48, 32), VOID[..3]);
+        let g = rgb(&ghosted, 48, 32);
+        assert!(
+            g[0] > VOID[0] + 40 && g[0] < 140 && g[1] < 60,
+            "a faint red: {g:?}"
+        );
+        // Where the current floor has a room, it is exactly what it was.
+        assert_eq!(rgb(&ghosted, 16, 32), rgb(&plain, 16, 32));
+        assert_eq!(rgb(&ghosted, 16, 32), [0xd0, 0xd0, 0xd0]);
+        // With no onion floor the bytes are the old tile's, exactly.
+        assert_eq!(
+            bake_tile_onion(&upper, &wu, 32.0, 0, 0, 0, None),
+            bake_tile(&upper, &wu, 32.0, 0, 0, 0)
+        );
     }
 
     #[test]

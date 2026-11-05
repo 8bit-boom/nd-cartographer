@@ -62,6 +62,100 @@ async function ensureDoc() {
   return manifest.id;
 }
 
+// ---------- floors ----------
+// Floors share one document; each has its own tiles, undo, lint and exports.
+
+state.onion = false;
+
+// The floor shown faintly underneath: the one before the current floor in the list.
+function onionFloorId() {
+  const i = state.doc.floors.findIndex(f => f.id === state.floorId);
+  return i > 0 ? state.doc.floors[i - 1].id : null;
+}
+function onionParam() {
+  const o = state.onion ? onionFloorId() : null;
+  return o ? `&onion=${encodeURIComponent(o)}` : '';
+}
+
+function buildFloorBar() {
+  const tabs = document.getElementById('floor-tabs');
+  tabs.textContent = '';
+  for (const f of state.doc.floors) {
+    const b = document.createElement('button');
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(f.id === state.floorId));
+    b.dataset.floor = f.id;
+    b.textContent = f.name;           // textContent: a floor name is never HTML
+    b.onclick = () => selectFloor(f.id);
+    tabs.appendChild(b);
+  }
+  const i = state.doc.floors.findIndex(f => f.id === state.floorId);
+  document.getElementById('fl-left').disabled = i <= 0;
+  document.getElementById('fl-right').disabled = i >= state.doc.floors.length - 1;
+  document.getElementById('fl-remove').disabled = state.doc.floors.length <= 1;
+  document.getElementById('fl-onion').disabled = i <= 0;
+}
+
+async function selectFloor(id) {
+  if (id === state.floorId) return;
+  state.floorId = id;
+  tileCache.clear();
+  await refresh();
+}
+
+async function floorAction(body) {
+  try {
+    const out = await api('POST', `/api/docs/${state.docId}/floors`, body);
+    if (out.floor) state.floorId = out.floor;
+    tileCache.clear();
+    await refresh();
+  } catch (e) {
+    statusEl.textContent = `Floor change refused: ${e.message}`;
+  }
+}
+
+document.getElementById('fl-add').onclick = () => {
+  const name = window.prompt('Name the new floor', `Floor ${state.doc.floors.length + 1}`);
+  if (name && name.trim()) floorAction({ action: 'add', name: name.trim() });
+};
+document.getElementById('fl-dup').onclick = () =>
+  floorAction({ action: 'add', name: `${curFloor().name} copy`, copy_from: state.floorId });
+document.getElementById('fl-rename').onclick = () => {
+  const name = window.prompt('Rename the floor', curFloor().name);
+  if (name && name.trim() && name.trim() !== curFloor().name) floorAction({ action: 'rename', id: state.floorId, name: name.trim() });
+};
+const moveFloor = (d) => {
+  const i = state.doc.floors.findIndex(f => f.id === state.floorId);
+  floorAction({ action: 'move', id: state.floorId, index: i + d });
+};
+document.getElementById('fl-left').onclick = () => moveFloor(-1);
+document.getElementById('fl-right').onclick = () => moveFloor(1);
+document.getElementById('fl-remove').onclick = async () => {
+  if (!window.confirm(`Remove "${curFloor().name}"? (The Floors undo button brings it back.)`)) return;
+  const removing = state.floorId;
+  const i = state.doc.floors.findIndex(f => f.id === removing);
+  // Step to the neighbouring floor FIRST, so nothing asks for the floor being deleted.
+  state.floorId = state.doc.floors[i > 0 ? i - 1 : 1].id;
+  try {
+    await api('POST', `/api/docs/${state.docId}/floors`, { action: 'remove', id: removing });
+  } catch (e) {
+    state.floorId = removing;               // refused: stay where we were
+    statusEl.textContent = `Floor change refused: ${e.message}`;
+  }
+  tileCache.clear();
+  await refresh();
+};
+document.getElementById('fl-undo').onclick = async () => {
+  try {
+    await api('POST', `/api/docs/${state.docId}/undo-structure`, {});
+    tileCache.clear();
+    await refresh();
+  } catch (e) {
+    statusEl.textContent = `Nothing to undo: ${e.message}`;
+  }
+};
+document.getElementById('fl-onion').onchange = (e) => { state.onion = e.target.checked; tileCache.clear(); render(); };
+
 // ---------- projects ----------
 
 async function loadDocList() {
@@ -142,16 +236,20 @@ document.getElementById('file-open').onchange = async (e) => {
   }
 };
 
+const curFloor = () => state.doc.floors.find(f => f.id === state.floorId) || state.doc.floors[0];
+
 async function refresh() {
   state.doc = await api('GET', `/api/docs/${state.docId}`);
   state.rev = state.doc.rev;
-  const floor = state.doc.floors[0];
-  state.floorId = floor.id;
+  // Keep the selected floor if it still exists; otherwise fall back to the first.
+  if (!state.doc.floors.some(f => f.id === state.floorId)) state.floorId = state.doc.floors[0].id;
+  const floor = curFloor();
   docName.textContent = state.doc.manifest.name;
   docMeta.textContent =
     `${state.doc.manifest.kind} · ${floor.digest} · ${floor.walls.length} walls · rev ${state.rev}`;
   render();
   applyKind();
+  buildFloorBar();
   setExportLinks();
   buildOutline();
   refreshProblems();
@@ -190,11 +288,12 @@ function render() {
   const ty0 = Math.floor(wy0 / TILE), ty1 = Math.floor(wy1 / TILE);
   const cacheBust = `rev=${state.rev}`;
   const pending = [];
+  if (!state.doc.floors.some(f => f.id === state.floorId)) return;   // floor just removed
 
   for (let ty = ty0; ty <= ty1; ty++) {
     for (let tx = tx0; tx <= tx1; tx++) {
       const url =
-        `/tiles/${state.docId}/${state.floorId}/${state.z}/${tx}_${ty}?${cacheBust}`;
+        `/tiles/${state.docId}/${state.floorId}/${state.z}/${tx}_${ty}?${cacheBust}${onionParam()}`;
       const [sx, sy] = worldToScreen(tx * TILE, ty * TILE);
       pending.push(drawTile(url, sx, sy));
     }
@@ -288,7 +387,7 @@ const NEIGHBOUR = { west: [-1, 0, 'east'], east: [1, 0, 'west'], north: [0, -1, 
 
 function markAt(edge) {
   const [dx, dy, back] = NEIGHBOUR[edge.edge];
-  const marks = state.doc.floors[0].grid.marks || [];
+  const marks = curFloor().grid.marks || [];
   return marks.find(m => {
     const c = m.edge.cell;
     return (c.x === edge.cell.x && c.y === edge.cell.y && m.edge.edge === edge.edge) ||
@@ -540,7 +639,7 @@ function applyKind() {
   document.getElementById('terrain-tools').hidden = !region;
   for (const el of document.querySelectorAll('.battle-only')) el.hidden = region;
   if (region && ['paint', 'door', 'window'].includes(state.tool)) setTool('pan');
-  const t = state.doc.floors[0].terrain;
+  const t = curFloor().terrain;
   if (t) syncStyleControls(t.style);
 }
 
@@ -593,7 +692,7 @@ async function finishRiver() {
   if (state.tool !== 'river') return;
   if (!pts || pts.length < 2) { render(); return; }   // too few points: keep drawing
   riverDraft = null;
-  const n = (state.doc.floors[0].rivers || []).length + 1;
+  const n = (curFloor().rivers || []).length + 1;
   await postOps([{ t: 'add_river', river: {
     id: 'rv_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
     name: `River ${n}`, points: pts, width: trVal('tr-rwidth'),
@@ -647,7 +746,7 @@ for (const id of ['ts-sea', 'ts-hill', 'ts-contour', 'ts-tint', 'ts-tint-amt', '
 document.getElementById('tr-radius').oninput = (e) => { document.getElementById('tr-radius-o').textContent = e.target.value; };
 document.getElementById('ts-regen').onclick = () => {
   document.getElementById('nd-seed').value = String(Math.floor(Math.random() * 1e6));
-  const w = state.doc.floors[0].canvas;
+  const w = curFloor().canvas;
   if (w) { document.getElementById('nd-cols').value = w[0]; document.getElementById('nd-rows').value = w[1]; }
   document.querySelector('input[name=nd-kind][value=region]').checked = true;
   document.getElementById('nd-world').hidden = false;
@@ -1035,7 +1134,7 @@ function addRow(parent, key, level, html, label, handlers = {}) {
 const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function buildOutline() {
-  const o = state.doc.floors[0].outline;
+  const o = curFloor().outline;
   // Rebuilding replaces the rows; if the keyboard was in the tree, put it back.
   const hadFocus = treeEl.contains(document.activeElement);
   treeEl.textContent = '';
@@ -1044,9 +1143,9 @@ function buildOutline() {
     ['lights', 'Lights', o.lights.length],
     ['labels', 'Notes', o.labels.length],
     ['stamps', 'Props', (o.stamps || []).length],
-    ['markers', 'Markers', (state.doc.floors[0].markers || []).length],
-    ['regions', 'Regions', (state.doc.floors[0].regions || []).length],
-    ['routes', 'Routes', (state.doc.floors[0].routes || []).length],
+    ['markers', 'Markers', (curFloor().markers || []).length],
+    ['regions', 'Regions', (curFloor().regions || []).length],
+    ['routes', 'Routes', (curFloor().routes || []).length],
   ];
   for (const [g, title, n] of groups) {
     const head = addRow(treeEl, `g:${g}`, 1, `${esc(title)} <span class="meta">${n}</span>`, `${title}, ${n}`);
@@ -1071,7 +1170,7 @@ function buildOutline() {
       r.cell = l.cell;
     }
     if (g === 'markers' || g === 'regions' || g === 'routes') {
-      const f = state.doc.floors[0];
+      const f = curFloor();
       const kind = g === 'markers' ? 'marker' : g === 'regions' ? 'region' : 'route';
       for (const it of f[g]) {
         const name = it.label ?? it.name ?? it.id;
@@ -1103,7 +1202,7 @@ function buildOutline() {
       r.onclick = () => { focusRow(r); centerOn({ x: l.cell[0], y: l.cell[1] }); };
       r.ondeleterequest = () => postOps([{ t: 'remove_label', id: l.id }]);
       r.onrenamerequest = () => {
-        const full = (state.doc.floors[0].labels || []).find(x => x.id === l.id);
+        const full = (curFloor().labels || []).find(x => x.id === l.id);
         const n = window.prompt('Label text', l.text);
         if (!full || n === null || !n.trim() || n.trim() === l.text) return;
         postOps([{ t: 'upsert_label', label: { ...full, text: n.trim().slice(0, 200) } }]);
