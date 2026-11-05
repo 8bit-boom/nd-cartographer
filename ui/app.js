@@ -1383,7 +1383,15 @@ const SPEC_EXAMPLE = {
       links: [ { a: 'tun', b: 'pump' } ] },
   ],
 };
-let proposal = null;     // {id, seed, spec}
+const WORLD_EXAMPLE = {
+  name: 'The Cold Archipelago', cols: 120, rows: 80, land: 0.38, continent: 0.25, ridges: 0.7, rivers: 6,
+  biomes: [ { biome: 'forest', x: 0.5, y: 0.5, rx: 0.2, ry: 0.15 }, { biome: 'rocky', x: 0.3, y: 0.35, rx: 0.12, ry: 0.1, density: 1.5 } ],
+  places: [ { name: 'Port Neon', note: 'A smugglers\' harbour.', x: 0.5, y: 0.5 }, { name: 'The Drowned Abbey', x: 0.35, y: 0.4 } ],
+  regions: [ { name: 'The Wild North', points: [[0.15, 0.1], [0.85, 0.1], [0.85, 0.35], [0.15, 0.35]] } ],
+};
+const specMode = () => document.querySelector('input[name=spec-mode]:checked').value;
+let proposal = null;     // {id, seed, spec, mode}
+const proposalUrl = () => `/api/docs/${state.docId}/${proposal.mode === 'world' ? 'world-proposals' : 'proposals'}/${proposal.id}`;
 
 async function runSpec(seed) {
   const msg = document.getElementById('spec-msg');
@@ -1392,9 +1400,27 @@ async function runSpec(seed) {
   catch (e) { msg.textContent = `That is not valid JSON: ${e.message}`; return; }
   msg.textContent = 'Laying it out…';
   try {
-    if (proposal) { try { await api('DELETE', `/api/docs/${state.docId}/proposals/${proposal.id}`); } catch { /* already gone */ } proposal = null; }
+    if (proposal) { try { await api('DELETE', proposalUrl()); } catch { /* already gone */ } proposal = null; }
+    const mode = specMode();
+    if (mode === 'world') {
+      if (!isRegion()) { msg.textContent = 'World maps go in a world-map project (New → World map).'; return; }
+      const p = await api('POST', `/api/docs/${state.docId}/propose-world`, { spec, seed });
+      proposal = { id: p.id, seed, spec, mode };
+      const box = document.getElementById('spec-floors');
+      box.textContent = '';
+      const fig = document.createElement('figure');
+      const img = document.createElement('img');
+      img.alt = `Proposed world ${p.name}`;
+      img.src = `/api/docs/${state.docId}/world-proposals/${p.id}/preview?ppc=4`;
+      const cap = document.createElement('figcaption');
+      cap.textContent = `${p.name}: ${p.biomes} biome(s), ${p.places} place(s), ${p.regions} region(s). Accepting replaces this map's terrain (Ctrl+Z undoes).`;
+      fig.append(img, cap); box.appendChild(fig);
+      document.getElementById('spec-result').hidden = false;
+      msg.textContent = `World ${seed}. Nothing has been changed yet.`;
+      return;
+    }
     const p = await api('POST', `/api/docs/${state.docId}/propose`, { spec, seed });
-    proposal = { id: p.id, seed, spec };
+    proposal = { id: p.id, seed, spec, mode };
     const box = document.getElementById('spec-floors');
     box.textContent = '';
     p.floors.forEach((f, i) => {
@@ -1423,28 +1449,34 @@ document.getElementById('spec-draft').onclick = async () => {
   const btn = document.getElementById('spec-draft');
   btn.disabled = true; msg.textContent = 'Asking the AI (this can take a minute)…';
   try {
-    const { spec } = await api('POST', '/api/draft', { prompt });
+    const { spec } = await api('POST', specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt });
     document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
     await runSpec(Math.floor(Math.random() * 1e6));
   } catch (e) { msg.textContent = e.message; }
   finally { btn.disabled = false; }
 };
-document.getElementById('spec-example').onclick = () => { document.getElementById('spec-text').value = JSON.stringify(SPEC_EXAMPLE, null, 2); };
+document.getElementById('spec-example').onclick = () => { document.getElementById('spec-text').value = JSON.stringify(specMode() === 'world' ? WORLD_EXAMPLE : SPEC_EXAMPLE, null, 2); };
 document.getElementById('spec-go').onclick = () => runSpec(Math.floor(Math.random() * 1e6));
 document.getElementById('spec-again').onclick = () => runSpec(Math.floor(Math.random() * 1e6));
 document.getElementById('spec-accept').onclick = async () => {
   if (!proposal) return;
   try {
-    const res = await api('POST', `/api/docs/${state.docId}/proposals/${proposal.id}/accept`);
+    const world = proposal.mode === 'world';
+    const res = await api('POST', `${proposalUrl()}/accept`);
     proposal = null; specDialog.close();
     state.rev = res.rev; tileCache.clear();
-    state.floorId = res.floors[0];
-    await refresh();
-    statusEl.textContent = `Added ${res.floors.length} floor(s). Undo floors (↶ Floors) takes them back one at a time.`;
+    if (world) {
+      await refresh();
+      statusEl.textContent = 'Drew the world. Ctrl+Z takes it back in one step.';
+    } else {
+      state.floorId = res.floors[0];
+      await refresh();
+      statusEl.textContent = `Added ${res.floors.length} floor(s). Undo floors (↶ Floors) takes them back one at a time.`;
+    }
   } catch (e) { document.getElementById('spec-msg').textContent = e.message; }
 };
 document.getElementById('spec-reject').onclick = async () => {
-  if (proposal) { try { await api('DELETE', `/api/docs/${state.docId}/proposals/${proposal.id}`); } catch { /* gone */ } proposal = null; }
+  if (proposal) { try { await api('DELETE', proposalUrl()); } catch { /* gone */ } proposal = null; }
   document.getElementById('spec-result').hidden = true;
   document.getElementById('spec-msg').textContent = 'Rejected. Nothing was added.';
 };

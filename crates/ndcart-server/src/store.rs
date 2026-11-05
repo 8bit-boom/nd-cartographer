@@ -25,6 +25,13 @@ pub struct Checkpoint {
 pub const MAX_CHECKPOINTS: usize = 30;
 pub const MAX_PROPOSALS: usize = 10;
 
+/// A pending world map: nothing is drawn until it is accepted.
+#[derive(Clone)]
+pub struct WorldProposal {
+    pub id: String,
+    pub ops: Vec<Op>,
+}
+
 /// A map the GM has been shown but not accepted: the spec, the seed, and the
 /// laid-out floors. Nothing in the document changes until it is accepted.
 #[derive(Clone)]
@@ -44,6 +51,7 @@ pub struct StoredDoc {
     pub checkpoints: Vec<Checkpoint>,
     /// Pending AI/spec proposals (in memory only).
     pub proposals: Vec<Proposal>,
+    pub world_proposals: Vec<WorldProposal>,
     pub rev: u64,
 }
 
@@ -68,6 +76,7 @@ impl StoredDoc {
             structure: StructJournal::default(),
             checkpoints: Vec::new(),
             proposals: Vec::new(),
+            world_proposals: Vec::new(),
             rev: 0,
         }
     }
@@ -179,6 +188,29 @@ impl StoredDoc {
             floors,
         });
         Ok(self.proposals.last().expect("just pushed"))
+    }
+
+    /// Draw the proposal onto the first floor (one undoable step) and drop it.
+    pub fn accept_world(&mut self, id: &str) -> CoreResult<()> {
+        let p = self
+            .world_proposals
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or_else(|| ndcart_core::CoreError::NotFound(format!("proposal {id}")))?;
+        let fid = self.floors[0].id.clone();
+        self.apply_ops(&fid, &p.ops)?;
+        self.world_proposals.retain(|x| x.id != id);
+        Ok(())
+    }
+
+    pub fn reject_world(&mut self, id: &str) -> CoreResult<()> {
+        let before = self.world_proposals.len();
+        self.world_proposals.retain(|p| p.id != id);
+        if self.world_proposals.len() == before {
+            return Err(ndcart_core::CoreError::NotFound(format!("proposal {id}")));
+        }
+        Ok(())
     }
 
     pub fn reject_proposal(&mut self, id: &str) -> CoreResult<()> {
@@ -421,6 +453,7 @@ impl Store {
                         .and_then(|t| serde_json::from_str(&t).ok())
                         .unwrap_or_default(),
                     proposals: Vec::new(),
+                    world_proposals: Vec::new(),
                     rev,
                 },
             );

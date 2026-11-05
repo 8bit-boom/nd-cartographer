@@ -12,6 +12,7 @@ mod publish;
 mod store;
 mod text;
 mod tiles;
+mod worldspec;
 
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
@@ -1245,6 +1246,29 @@ async fn reject_proposal(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// `POST /api/draft-world` `{prompt}` — like `/api/draft`, for an overland map.
+async fn draft_world_spec(
+    body: Result<Json<DraftBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) =
+        body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
+    #[cfg(feature = "bridge")]
+    {
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let spec = draft::draft_world(&cfg, &b.prompt)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        Ok(Json(serde_json::json!({ "spec": spec })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = b;
+        Err(ApiError(CoreError::NotFound(
+            "this build has no nd-world client (built without the bridge feature)".into(),
+        )))
+    }
+}
+
 #[derive(Deserialize)]
 struct DraftBody {
     #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
@@ -1276,6 +1300,143 @@ async fn draft_spec(
             "this build has no nd-world client (built without the bridge feature)".into(),
         )))
     }
+}
+
+#[derive(Deserialize)]
+struct ProposeWorldBody {
+    spec: worldspec::WorldSpec,
+    #[serde(default)]
+    seed: Option<u32>,
+}
+
+/// `POST /api/docs/{id}/propose-world` `{spec, seed?}` — an overland map as a
+/// proposal (terrain, rivers, biome props, places, regions). Nothing changes until accepted.
+async fn propose_world(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<ProposeWorldBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad spec: {e}"))))?;
+    let seed = b.seed.unwrap_or(1);
+    let spec = b.spec;
+    // Terrain generation takes a moment: do it off the async threads.
+    let compiled = {
+        let store = app.store.read().await;
+        let doc = store
+            .docs
+            .get(&id)
+            .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+        if doc.manifest.kind != ndcart_core::DocKind::Region {
+            return Err(ApiError(CoreError::Invalid(
+                "a world map goes in a world-map project (New → World map)".into(),
+            )));
+        }
+        let old: Vec<String> = doc.floors[0].rivers.iter().map(|r| r.id.clone()).collect();
+        let spec = spec.clone();
+        tokio::task::spawn_blocking(move || worldspec::compile(&spec, seed, &old))
+            .await
+            .map_err(|e| ApiError(CoreError::Invalid(format!("generation failed: {e}"))))??
+    };
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    if doc.world_proposals.len() >= store::MAX_PROPOSALS {
+        doc.world_proposals.remove(0);
+    }
+    let pid = ndcart_core::ids::new_id("pw");
+    doc.world_proposals.push(store::WorldProposal {
+        id: pid.clone(),
+        ops: compiled,
+    });
+    Ok(Json(serde_json::json!({
+        "id": pid, "name": spec.name, "seed": seed,
+        "places": spec.places.len(), "biomes": spec.biomes.len(), "regions": spec.regions.len(),
+    })))
+}
+
+/// `GET /api/docs/{id}/world-proposals/{pid}/preview?ppc=` — the proposed world as a PNG.
+async fn world_proposal_preview(
+    State(app): State<App>,
+    Path((id, pid)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<ProposalPreviewQuery>,
+) -> Result<Response, ApiError> {
+    let (mut scratch, ops, cell_size) = {
+        let store = app.store.read().await;
+        let doc = store
+            .docs
+            .get(&id)
+            .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+        let p = doc
+            .world_proposals
+            .iter()
+            .find(|p| p.id == pid)
+            .ok_or_else(|| CoreError::NotFound(format!("proposal {pid}")))?;
+        (doc.floors[0].clone(), p.ops.clone(), doc.manifest.cell_size)
+    };
+    let ppc = q.ppc.unwrap_or(4);
+    let png = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ApiError> {
+        let mut j = ndcart_core::Journal::default();
+        for op in &ops {
+            j.push(&mut scratch, op)?;
+        }
+        let walls = tiles::derive_walls(&scratch, cell_size);
+        let (png, ..) = tiles::bake_full_as(
+            &scratch,
+            &walls,
+            cell_size,
+            ppc,
+            tiles::ImageFormat::Png,
+            90,
+        )
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        Ok(png)
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("preview failed: {e}"))))??;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        png,
+    )
+        .into_response())
+}
+
+/// `POST /api/docs/{id}/world-proposals/{pid}/accept` — draw it (replaces the
+/// first floor's terrain and rivers) as one undoable step.
+async fn accept_world(
+    State(app): State<App>,
+    Path((id, pid)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.accept_world(&pid)?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
+}
+
+/// `DELETE /api/docs/{id}/world-proposals/{pid}`.
+async fn reject_world(
+    State(app): State<App>,
+    Path((id, pid)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.reject_world(&pid)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// `GET /api/docs/{id}/preview?x=&y=&radius=&darkness=&ppc=` — what the table
@@ -1639,7 +1800,21 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
         .route("/api/draft", post(draft_spec))
+        .route("/api/draft-world", post(draft_world_spec))
         .route("/api/docs/{id}/propose", post(propose_map))
+        .route("/api/docs/{id}/propose-world", post(propose_world))
+        .route(
+            "/api/docs/{id}/world-proposals/{pid}",
+            axum::routing::delete(reject_world),
+        )
+        .route(
+            "/api/docs/{id}/world-proposals/{pid}/preview",
+            get(world_proposal_preview),
+        )
+        .route(
+            "/api/docs/{id}/world-proposals/{pid}/accept",
+            post(accept_world),
+        )
         .route(
             "/api/docs/{id}/proposals/{pid}",
             axum::routing::delete(reject_proposal),
@@ -2954,6 +3129,129 @@ mod tests {
         assert!(hits[0]["at"].is_array());
         assert_eq!(search("zzzz").await.0, StatusCode::OK);
         assert_eq!(search("%20").await.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_world_proposal_changes_nothing_until_accepted_and_one_undo_takes_it_back() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(
+            &router,
+            "POST",
+            "/api/docs",
+            br#"{"name":"W","kind":"region"}"#.to_vec(),
+        )
+        .await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let floor = json(d)["floors"][0]["id"].as_str().unwrap().to_string();
+        let spec = serde_json::json!({"spec": {"name":"Isles","cols":64,"rows":48,"land":0.45,
+            "biomes":[{"biome":"forest","x":0.5,"y":0.5,"rx":0.25,"ry":0.2}],
+            "places":[{"name":"Port Neon","x":0.5,"y":0.5}]}, "seed": 5});
+        let (st, r) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/propose-world"),
+            spec.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let pid = json(r)["id"].as_str().unwrap().to_string();
+        let info = || {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}"));
+            async move {
+                let d = json(call(&router, "GET", &uri, vec![]).await.1);
+                (
+                    d["floors"][0]["markers"]
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0),
+                    d["floors"][0]["rivers"]
+                        .as_array()
+                        .map(|a| a.len())
+                        .unwrap_or(0),
+                )
+            }
+        };
+        assert_eq!(info().await, (0, 0), "a proposal alone changes nothing");
+        let (st, png) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/world-proposals/{pid}/preview?ppc=3"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(&png[1..4], b"PNG");
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/world-proposals/{pid}/accept"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (markers, _) = info().await;
+        assert_eq!(markers, 1);
+        call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/undo"),
+            format!(r#"{{"floor":"{floor}"}}"#).into_bytes(),
+        )
+        .await;
+        assert_eq!(info().await, (0, 0));
+        // A battle project refuses a world; a bad spec is refused with its reason; rejecting works.
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"B"}"#.to_vec()).await;
+        let bid = json(b)["id"].as_str().unwrap().to_string();
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{bid}/propose-world"),
+            spec.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let bad = serde_json::json!({"spec": {"name":"X","land":2.0}});
+        let (st, body) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/propose-world"),
+            bad.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body).contains("land must be"));
+        let (_, r) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/propose-world"),
+            spec.to_string().into_bytes(),
+        )
+        .await;
+        let p2 = json(r)["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            call(
+                &router,
+                "DELETE",
+                &format!("/api/docs/{id}/world-proposals/{p2}"),
+                vec![]
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/world-proposals/{p2}/accept"),
+                vec![]
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
     }
 
     #[tokio::test]

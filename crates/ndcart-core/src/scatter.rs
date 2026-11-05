@@ -56,6 +56,15 @@ fn inside(poly: &[[f32; 2]], x: f32, y: f32) -> bool {
 /// The scatter as ops. `taken` is how many stamps the floor already has (the
 /// per-floor cap counts them).
 pub fn scatter(p: &ScatterParams, taken: usize) -> CoreResult<Vec<Op>> {
+    scatter_where(p, taken, &|_, _| true)
+}
+
+/// Like [`scatter`], but only where `keep(x, y)` says so (for instance on land).
+pub fn scatter_where(
+    p: &ScatterParams,
+    taken: usize,
+    keep: &dyn Fn(f32, f32) -> bool,
+) -> CoreResult<Vec<Op>> {
     if p.polygon.len() < 3 || p.polygon.len() > 500 {
         return Err(CoreError::Invalid("an area needs 3 to 500 points".into()));
     }
@@ -109,7 +118,7 @@ pub fn scatter(p: &ScatterParams, taken: usize) -> CoreResult<Vec<Op>> {
             let scale = p.scale_min + (p.scale_max - p.scale_min) * rng.unit();
             let rotation = rng.unit() * std::f32::consts::TAU;
             let flip = rng.next() & 1 == 1;
-            if !inside(&p.polygon, x, y) {
+            if !inside(&p.polygon, x, y) || !keep(x, y) {
                 continue;
             }
             if ops.len() >= room {
@@ -206,10 +215,23 @@ pub fn scatter_biome(
     seed: u64,
     taken: usize,
 ) -> CoreResult<Vec<Op>> {
+    scatter_biome_where(polygon, b, density, seed, taken, true, &|_, _| true)
+}
+
+/// A biome over an area where `keep` allows; `tint` adds the coloured region.
+pub fn scatter_biome_where(
+    polygon: &[[f32; 2]],
+    b: &Biome,
+    density: f32,
+    seed: u64,
+    taken: usize,
+    tint: bool,
+    keep: &dyn Fn(f32, f32) -> bool,
+) -> CoreResult<Vec<Op>> {
     if !density.is_finite() || !(0.5..=4.0).contains(&density) {
         return Err(CoreError::Invalid("density must be 0.5-4".into()));
     }
-    let mut ops = scatter(
+    let mut ops = scatter_where(
         &ScatterParams {
             polygon: polygon.to_vec(),
             assets: b.assets.iter().map(|a| a.to_string()).collect(),
@@ -219,6 +241,7 @@ pub fn scatter_biome(
             scale_max: b.scale.1,
         },
         taken,
+        keep,
     )?;
     let Some(Op::Batch { ops: inner }) = ops.pop() else {
         return Err(CoreError::Invalid("nothing fitted in that area".into()));
@@ -231,10 +254,13 @@ pub fn scatter_biome(
         opacity: b.tint.1,
         hatch: false,
     };
-    let mut all = vec![Op::PutOverlay {
-        item: crate::overlay::OverlayItem::Region(region),
-        index: None,
-    }];
+    let mut all = Vec::new();
+    if tint {
+        all.push(Op::PutOverlay {
+            item: crate::overlay::OverlayItem::Region(region),
+            index: None,
+        });
+    }
     all.extend(inner);
     Ok(vec![Op::Batch { ops: all }])
 }

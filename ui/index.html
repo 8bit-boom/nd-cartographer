@@ -122,6 +122,10 @@
   </div>
   <dialog id="spec-dialog">
     <h3>Map from a spec</h3>
+    <div class="row" role="radiogroup" aria-label="What to make">
+      <label><input type="radio" name="spec-mode" value="battle" checked> Battle map (rooms)</label>
+      <label><input type="radio" name="spec-mode" value="world"> World map (land, biomes, places)</label>
+    </div>
     <p class="dim">Rooms and how they connect, as JSON (an AI can write this for you). Nothing changes until you accept.</p>
     <div class="row">
       <input id="spec-prompt" type="text" maxlength="2000" placeholder="Describe a map: abandoned metro station, 3 levels, flooded bottom" aria-label="Describe the map" style="flex:1;min-width:240px">

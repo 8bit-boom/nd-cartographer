@@ -82,7 +82,21 @@ pub fn parse_reply(reply: &str) -> Result<MapSpec, String> {
 }
 
 /// Ask until a valid spec comes back (the first try plus `repairs` corrections).
-pub async fn draft_with<F, Fut>(prompt: &str, repairs: usize, mut ask: F) -> Result<MapSpec, String>
+pub async fn draft_with<F, Fut>(prompt: &str, repairs: usize, ask: F) -> Result<MapSpec, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: Future<Output = Result<String, String>>,
+{
+    draft_loop(prompt, repairs, ask, parse_reply).await
+}
+
+/// The ask/judge/repair loop, for any kind of spec.
+pub async fn draft_loop<T, F, Fut>(
+    prompt: &str,
+    repairs: usize,
+    mut ask: F,
+    judge: impl Fn(&str) -> Result<T, String>,
+) -> Result<T, String>
 where
     F: FnMut(String) -> Fut,
     Fut: Future<Output = Result<String, String>>,
@@ -91,7 +105,7 @@ where
     let mut last = String::new();
     for _ in 0..=repairs {
         let reply = ask(user.clone()).await?;
-        match parse_reply(&reply) {
+        match judge(&reply) {
             Ok(spec) => return Ok(spec),
             Err(problem) => {
                 user = format!(
@@ -106,6 +120,36 @@ where
         "the model did not produce a usable spec after {} tries; last problem: {last}",
         repairs + 1
     ))
+}
+
+pub const WORLD_SYSTEM_PROMPT: &str = r##"You design overland fantasy/sci-fi maps. Reply with ONE JSON object and nothing else (no prose, no code fences).
+
+Schema (every coordinate is 0..1 across the map: x left to right, y top to bottom):
+{
+  "name": string (1-80 chars),
+  "cols": 16-512 (default 160), "rows": 16-512 (default 110),
+  "land": 0.05-0.95        // fraction of the map that is dry land
+  "continent": 0-1         // 0 = scattered islands, 1 = one central continent
+  "ridges": 0-1            // mountain chains
+  "rivers": 0-40,
+  "biomes": [ {"biome": "forest"|"meadow"|"rocky"|"swamp"|"desert", "x": 0-1, "y": 0-1, "rx": 0.02-0.5, "ry": 0.02-0.5, "density": 0.5-4 (higher = sparser)} ],
+  "places": [ {"name": string, "note": string, "x": 0-1, "y": 0-1} ],     // cities, ruins, landmarks
+  "regions": [ {"name": string, "points": [[x,y], ...3-100 points], "color": "#rrggbb"} ] // kingdoms, wilds
+}
+
+Rules: biomes are ellipses where props grow, and only on dry land. Put places on land (near the middle of the map is safest for islands). Use few, meaningful features. Do not invent fields."##;
+
+/// Parse and validate one world reply (the error goes back to the model).
+pub fn parse_world_reply(reply: &str) -> Result<crate::worldspec::WorldSpec, String> {
+    let json = extract_json(reply)
+        .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
+    let spec: crate::worldspec::WorldSpec = serde_json::from_str(json)
+        .map_err(|e| format!("The JSON did not match the schema: {e}."))?;
+    spec.validate()
+        .map_err(|e| format!("The spec broke a rule: {e}."))?;
+    crate::worldspec::compile(&spec, 1, &[])
+        .map_err(|e| format!("The spec could not be drawn: {e}."))?;
+    Ok(spec)
 }
 
 pub struct Config {
@@ -151,6 +195,39 @@ pub async fn draft(cfg: &Config, prompt: &str) -> Result<MapSpec, String> {
                 .map_err(|e| e.to_string())
         }
     })
+    .await
+}
+
+/// Log in to nd-world and draft a WORLD spec from `prompt`.
+pub async fn draft_world(
+    cfg: &Config,
+    prompt: &str,
+) -> Result<crate::worldspec::WorldSpec, String> {
+    if prompt.trim().is_empty() || prompt.chars().count() > 2_000 {
+        return Err("describe the map in 1-2000 characters".into());
+    }
+    let pw = crate::publish::password()?;
+    let totp = std::env::var("ND_CARTO_TOTP").ok();
+    let bridge = Bridge::new(&cfg.server, cfg.world.as_deref()).map_err(|e| e.to_string())?;
+    bridge
+        .login(&cfg.email, &pw, totp.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+    let model = cfg.model.clone();
+    draft_loop(
+        prompt,
+        2,
+        |user| {
+            let (bridge, model) = (&bridge, model.clone());
+            async move {
+                bridge
+                    .chat(WORLD_SYSTEM_PROMPT, &user, model.as_deref())
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        },
+        parse_world_reply,
+    )
     .await
 }
 
@@ -241,6 +318,39 @@ mod tests {
         assert!(seen[0].contains("a crypt") && !seen[0].contains("refused"));
         assert!(seen[1].contains("refused") && seen[1].contains("no JSON"));
         assert!(seen[2].contains("schema"), "{}", seen[2]);
+    }
+
+    #[tokio::test]
+    async fn a_world_reply_is_judged_like_a_map_reply_and_repaired_the_same_way() {
+        let good = r#"{"name":"Isles","cols":64,"rows":48,"land":0.4,"places":[{"name":"Port","x":0.5,"y":0.5}]}"#;
+        assert!(parse_world_reply(&format!("```{good}```")).is_ok());
+        assert!(parse_world_reply(r#"{"name":"X","land":3}"#)
+            .unwrap_err()
+            .contains("land must be"));
+        assert!(parse_world_reply(
+            r#"{"name":"X","biomes":[{"biome":"lava","x":0.5,"y":0.5,"rx":0.1,"ry":0.1}]}"#
+        )
+        .unwrap_err()
+        .contains("use one of"));
+        let replies = [r#"{"name":"X","land":3}"#.to_string(), good.to_string()];
+        let mut i = 0;
+        let mut seen = Vec::new();
+        let spec = draft_loop(
+            "an archipelago",
+            2,
+            |u| {
+                seen.push(u);
+                let r = replies[i].clone();
+                i += 1;
+                async move { Ok(r) }
+            },
+            parse_world_reply,
+        )
+        .await
+        .unwrap();
+        assert_eq!(spec.name, "Isles");
+        assert!(seen[1].contains("land must be"), "{}", seen[1]);
+        assert!(WORLD_SYSTEM_PROMPT.contains("biomes") && WORLD_SYSTEM_PROMPT.contains("0..1"));
     }
 
     #[tokio::test]
