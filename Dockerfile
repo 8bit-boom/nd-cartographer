@@ -12,16 +12,18 @@ WORKDIR /src
 # Cache the dependency build with stub sources.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ndcart-core/Cargo.toml crates/ndcart-core/Cargo.toml
+COPY crates/ndcart-formats/Cargo.toml crates/ndcart-formats/Cargo.toml
 COPY crates/ndcart-server/Cargo.toml crates/ndcart-server/Cargo.toml
-RUN mkdir -p crates/ndcart-core/src crates/ndcart-server/src \
+RUN mkdir -p crates/ndcart-core/src crates/ndcart-formats/src crates/ndcart-server/src \
     && echo "" > crates/ndcart-core/src/lib.rs \
+    && echo "" > crates/ndcart-formats/src/lib.rs \
     && echo "fn main() {}" > crates/ndcart-server/src/main.rs \
     && cargo build --release --locked --target x86_64-unknown-linux-musl
 
 # Real sources.
 COPY crates crates
 COPY ui ui
-RUN touch crates/ndcart-core/src/lib.rs crates/ndcart-server/src/main.rs \
+RUN touch crates/ndcart-core/src/lib.rs crates/ndcart-formats/src/lib.rs crates/ndcart-server/src/main.rs \
     && cargo build --release --locked --target x86_64-unknown-linux-musl \
     && mkdir -p /out && cp target/x86_64-unknown-linux-musl/release/ndcart /out/ndcart
 

@@ -2,6 +2,7 @@
 //! run it (plan §4): `ndcart serve` (desktop/docker), `ndcart bench`.
 //! Desktop is the Tauri shell wrapping this same server (M0 ships serve).
 
+mod auth;
 mod store;
 mod tiles;
 
@@ -204,6 +205,61 @@ async fn get_doc(
 }
 
 #[derive(Deserialize)]
+struct ExportQuery {
+    floor: Option<String>,
+}
+
+/// `GET /api/docs/{id}/export/uvtt[?floor=ID]` — Universal VTT (walls, doors,
+/// lights; no image yet: the baked underlay joins when the full-map render lands).
+async fn export_uvtt(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Response, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let floor = doc
+        .floors
+        .get(idx)
+        .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+    let (mut cols, mut rows) = (1, 1);
+    for (c, _) in floor.grid.cells() {
+        cols = cols.max(c.x + 1);
+        rows = rows.max(c.y + 1);
+    }
+    let map = ndcart_formats::uvtt::UvttMap {
+        cols: cols as u32,
+        rows: rows as u32,
+        cell_size: doc.manifest.cell_size,
+        walls: tiles::derive_walls(floor, doc.manifest.cell_size),
+        lights: floor.lights.clone(),
+        image_b64: None,
+    };
+    let name = format!(
+        "{}.dd2vtt",
+        doc.manifest.name.replace(['"', '/', '\\'], "_")
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{name}\""),
+            ),
+        ],
+        ndcart_formats::uvtt::to_uvtt(&map).to_string(),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
 struct OpsBody {
     floor: String,
     ops: Vec<Op>,
@@ -328,6 +384,7 @@ fn build_router(app: App) -> Router {
         .route("/app.css", get(app_css))
         .route("/api/docs", get(list_docs).post(create_doc))
         .route("/api/docs/{id}", get(get_doc))
+        .route("/api/docs/{id}/export/uvtt", get(export_uvtt))
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
@@ -438,13 +495,24 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            let app_data_dir = data_dir.clone();
             let app: App = Arc::new(AppState {
                 store: tokio::sync::RwLock::new(store),
                 data_dir,
                 wall_cache: Mutex::new(HashMap::new()),
                 tile_cache: Mutex::new(HashMap::new()),
             });
-            let router = build_router(app);
+            let mut router = build_router(app);
+            if !auth::is_loopback(&listen) {
+                let (token, fresh) = auth::resolve_token(app_data_dir.as_deref());
+                if fresh {
+                    println!("ndcart: access token (shown once): {token}");
+                }
+                println!("ndcart: not loopback, token required (?token=… or Bearer)");
+                router = router.layer(axum::middleware::from_fn(move |req, next| {
+                    auth::gate(token.clone(), req, next)
+                }));
+            }
             let listener = tokio::net::TcpListener::bind(&listen)
                 .await
                 .unwrap_or_else(|e| panic!("cannot bind {listen}: {e}"));
@@ -490,6 +558,43 @@ mod tests {
     async fn body_string(resp: axum::response::Response) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn token_gate_blocks_without_token() {
+        let router = build_router(test_app()).layer(axum::middleware::from_fn(|req, next| {
+            auth::gate("s3cret".to_string(), req, next)
+        }));
+        let get = |uri: &str, extra: Option<(&str, &str)>| {
+            let mut b = Request::get(uri.to_string());
+            if let Some((k, v)) = extra {
+                b = b.header(k, v);
+            }
+            b.body(Body::empty()).unwrap()
+        };
+        let r = router
+            .clone()
+            .oneshot(get("/api/docs", None))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = router.clone().oneshot(get("/health", None)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = router
+            .clone()
+            .oneshot(get("/api/docs", Some(("authorization", "Bearer s3cret"))))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let r = router
+            .clone()
+            .oneshot(get("/api/docs", Some(("authorization", "Bearer wrong"))))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = router.oneshot(get("/?token=s3cret", None)).await.unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(r.headers().get("set-cookie").is_some());
     }
 
     #[tokio::test]
@@ -593,6 +698,37 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&bytes[0..4], &[0x89, b'P', b'N', b'G']);
+    }
+
+    #[tokio::test]
+    async fn uvtt_export_has_walls_and_grid() {
+        let app = test_app();
+        let (doc_id, floor_id) = {
+            let mut st = app.store.write().await;
+            let m = st.create("Vault", DocKind::Battle).clone();
+            let d = st.docs.get_mut(&m.id).unwrap();
+            let fid = d.floors[0].id.clone();
+            let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+                {"t":"upsert_space","space":{"id":"s","name":"H","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":1}],"space":"s"}
+            ]))
+            .unwrap();
+            d.apply_ops(&fid, &ops).unwrap();
+            (m.id, fid)
+        };
+        let resp = build_router(app)
+            .oneshot(
+                Request::get(format!("/api/docs/{doc_id}/export/uvtt?floor={floor_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(v["resolution"]["map_size"]["x"], 3);
+        assert_eq!(v["resolution"]["map_size"]["y"], 2);
+        assert!(!v["line_of_sight"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

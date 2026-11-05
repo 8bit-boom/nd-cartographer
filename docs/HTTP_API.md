@@ -55,6 +55,19 @@ Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
 |---|---|---|
 | GET | `/tiles/{doc}/{floor}/{z}/{x}_{y}?rev=N` | 256px PNG. Zoom pyramid: z0 = 16 px/cell, doubles per level, z ≤ 4. `rev` busts caches after edits. |
 
+## Export
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/docs/{id}/export/uvtt[?floor=ID]` | Universal VTT 0.3 JSON (walls, door portals, lights; image field empty until the full-map render lands). |
+
+## Access control
+
+Listening off loopback requires a token: `Authorization: Bearer T`, cookie
+`ndcart_token=T`, or `?token=T` (sets the cookie). `/health` is public. Token from
+`ND_CARTO_TOKEN`, `ND_CARTO_TOKEN_FILE`, or `<data-dir>/token` (generated 0600 on
+first run, printed once). 401 without it.
+
 ## CLI
 
 ```

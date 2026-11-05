@@ -1,7 +1,8 @@
 # nd-cartographer — a standalone TTRPG map creator & editor, with deep nd-world integration
 
-**Status: PLAN ONLY. Nothing has been created, coded, or committed. This document is the
-complete design; execution starts only on an explicit go.**
+**Status (2026-11-05, revised): M0 skeleton is built and M1a is under way — see
+[ARCHITECTURE.md](ARCHITECTURE.md) for what exists. This document is the design; §19
+records the review pass that revised the milestone order and corrected nd-world facts.**
 
 Plan for a Rust desktop + Docker application that is a **full map creator in its own
 right** — battle-map painting in the Dungeondraft class, world/region map-making in the
@@ -963,7 +964,7 @@ filters — painting here is constructive: materials, stamps, heightmaps); isome
 rendering in 1.x; i18n in 1.x; Inkarnate import (no open format); any runtime play
 feature beyond the table remote — nd-world owns the table.
 
-## 18. Execution checklist (for the go-ahead — NOT done)
+## 18. Execution checklist (original; progress noted)
 
 1. Create the sibling repo `nd-cartographer` (private first), with this plan adapted
    into its `README.md` + `docs/ARCHITECTURE.md`; MIT `LICENSE`; CI skeletons from §11.
@@ -982,6 +983,46 @@ feature beyond the table remote — nd-world owns the table.
 7. Seed the new repo's issue tracker from §17: the P1 items are already in the
    milestone table above; every P2 item becomes a labeled backlog issue so nothing
    in the round-two pass is lost.
+
+---
+
+## 19. Review pass (2026-11-05) — corrections and re-ordering
+
+Found by re-reading this plan against the M0 code and the current nd-world tree.
+These supersede the text above where they conflict.
+
+**Corrected nd-world facts**
+1. **The Rust-only nd-world image does not serve `POST /maps/schematic/import-uvtt`**
+   (Python only; the gateway has walls/lights/rooms in `edits.rs`). Publish A must
+   probe `/health` (`ND_MODE`, `ND_PYTHON_FREE`) and the routes it needs, and fall back
+   to the per-part path (create map → background upload → `/walls` → `/lights` →
+   `/rooms` → `/grid`) — or port `import-uvtt` to the gateway as Tier-1 work. Every
+   other route in §9.2 must be checked against the gateway the same way.
+2. `import-uvtt` **refuses a file with no picture**, so a full-map render is a
+   prerequisite of publish A, not a later export feature.
+3. nd-world's limits are the studio's limits: light range ≤ 60 squares (the core
+   allowed 200), 5,000 lines / 20,000 points per UVTT import, every UVTT portal
+   imports as a door (windows are not distinguished). The linter flags all of these.
+4. Cite routes by name, not by `file:line` (they drift); §18.4's re-verification is
+   mandatory before publish work starts.
+
+**Re-ordered milestones**
+- **M1 splits.** *M1a — structure & publish* (rooms, marks, walls-from-rooms, full-map
+  PNG export, UVTT in/out, publish A against a local nd-world, linter v1) comes first
+  because §18.6 says the publish path is the product. *M1b — painting* (brushes,
+  materials with blending, stamps + shadows, starter pack) follows once publishing is
+  proven.
+- **Hex battle maps are out of v1**: walls-from-rooms, nd-world's room grid and UVTT
+  are square-only. Hex stays a region-map overlay (M2).
+- **Tauri shell moves to M5** with the installers; browser mode covers everything
+  until then. M0's remaining items (WebGL viewport, WS change feed, bench budgets in
+  CI, the 100k-object and kill -9 tests) are tracked in ARCHITECTURE.md.
+
+**Hardening pulled forward (done in M0+)**
+- Token gate when listening off loopback (§11.2) — implemented.
+- Crash-safe saves (temp file + fsync + rename) — implemented.
+- Doc/plan drift: the code uses `manifest.json`, PNG tiles at `{x}_{y}`, port 8300;
+  the plan's `manifest.toml` / `.webp` / port 8000 are the eventual `.ndmap` shape.
 
 ---
 

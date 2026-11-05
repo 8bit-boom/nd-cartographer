@@ -155,9 +155,28 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
     let manifest = serde_json::to_string_pretty(&doc.manifest).expect("manifest serializes");
     let floors = serde_json::to_string_pretty(&doc.floors).expect("floors serialize");
     let journal = doc.journal.to_ndjson();
-    let _ = std::fs::write(dir.join("manifest.json"), manifest);
-    let _ = std::fs::write(dir.join("floors.json"), floors);
-    let _ = std::fs::write(dir.join("journal.ndjson"), journal);
+    // Crash-safe: write to a temp file, fsync, then rename over the target, so
+    // a kill -9 mid-save leaves either the old or the new file, never a torn one.
+    for (name, body) in [
+        ("manifest.json", manifest),
+        ("floors.json", floors),
+        ("journal.ndjson", journal),
+    ] {
+        if let Err(e) = write_atomic(&dir.join(name), body.as_bytes()) {
+            eprintln!("ndcart: cannot save {name}: {e}");
+        }
+    }
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 /// Apply ops with the journal captured per-op (used by the bench too).

@@ -1,0 +1,12 @@
+[package]
+name = "ndcart-formats"
+description = "Interchange formats for nd-cartographer (Universal VTT read/write)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ndcart-core = { path = "../ndcart-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }

@@ -1,4 +1,4 @@
-# Architecture (M0 snapshot)
+# Architecture (M0 + M1a start)
 
 The full design is [ND_CARTOGRAPHER_PLAN.md](ND_CARTOGRAPHER_PLAN.md); this file
 tracks what actually exists, crate by crate, as milestones land.
@@ -22,6 +22,21 @@ tracks what actually exists, crate by crate, as milestones land.
 - **`ndcart-server`** — the `ndcart` binary: axum app serving the M0 UI,
   the doc/ops/undo API, tiles (tiny-skia bake on a zoom pyramid, 16 px/cell
   at z0), optional `--data-dir` persistence, and `bench`.
+
+- **`ndcart-formats`** — Universal VTT read/write (`uvtt`): walls/secrets →
+  `line_of_sight`, doors → `portals`, lights as `aarrggbb`; windows ride in an
+  `x_ndcart.windows` extension (exact ndcart round trip, ignored by other tools).
+  Import validates every number and caps sizes. Served by
+  `GET /api/docs/{id}/export/uvtt[?floor=]` (no picture yet — needs the full-map
+  render, which nd-world's `import-uvtt` requires).
+- **Server hardening** — off-loopback listening requires a token (`ND_CARTO_TOKEN`,
+  `ND_CARTO_TOKEN_FILE`, or `<data-dir>/token`; Bearer, cookie or `?token=`;
+  `/health` public). Saves are temp-file + fsync + rename.
+
+## Still open in M0
+
+WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the
+100k-object / kill -9 acceptance tests.
 
 ## Not yet (per plan)
 
