@@ -18,6 +18,7 @@
     <button id="tool-window" class="tool" title="Window on a cell edge">🪟 Window</button>
     <span id="palette"></span>
     <button id="btn-undo" title="Undo (Ctrl+Z)">↩ Undo</button>
+    <button id="btn-outline" title="Outline (O)">☰ Outline</button>
     <button id="btn-problems" title="Problems (P)">⚠ Problems</button>
     <span id="exports" class="dim">
       <label title="Secret doors become plain walls, GM-only notes are dropped"><input type="checkbox" id="exp-player"> players' copy</label>
@@ -30,7 +31,13 @@
     <button id="btn-help" title="Keyboard help (F1)">?</button>
   </div>
 </header>
-<main><canvas id="canvas"></canvas>
+<main>
+  <nav id="outliner" aria-label="Map outline">
+    <h3>Outline</h3>
+    <ul id="tree" role="tree" aria-label="Rooms, lights and notes"></ul>
+    <p class="dim hint">↑↓ move · ←→ fold · Enter go to · F2 rename · Del remove</p>
+  </nav>
+  <div id="stage"><canvas id="canvas"></canvas>
   <aside id="problems" hidden>
     <h3>Problems <button id="problems-close" title="Close">×</button></h3>
     <ul id="problem-list"></ul>
@@ -41,6 +48,7 @@
     <p class="dim">Press F1 or Esc to close.</p>
   </div>
   <div id="status" class="dim">loading…</div>
+  </div>
 </main>
 <script src="/app.js"></script>
 </body>

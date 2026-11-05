@@ -77,6 +77,7 @@ struct FloorView {
     wall_tally: std::collections::BTreeMap<&'static str, usize>,
     lights: Vec<Light>,
     labels: Vec<Label>,
+    outline: ndcart_core::Outline,
 }
 
 #[derive(Serialize)]
@@ -103,6 +104,7 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         wall_tally: tally(&walls),
         lights: floor.lights.clone(),
         labels: floor.labels.clone(),
+        outline: ndcart_core::outline(floor, cell_size),
     }
 }
 

@@ -69,6 +69,7 @@ async function refresh() {
     `battle · ${floor.digest} · ${floor.walls.length} walls · rev ${state.rev}`;
   render();
   setExportLinks();
+  buildOutline();
   refreshProblems();
 }
 
@@ -221,7 +222,7 @@ async function flushStroke() {
   const ops = [{
     t: 'batch',
     ops: [
-      { t: 'upsert_space', space: { id: spaceId, name: spaceId, color: state.color, kind: 'room' } },
+      { t: 'upsert_space', space: { id: spaceId, name: PALETTE.find(p => p.color === state.color)?.name || spaceId, color: state.color, kind: 'room' } },
       { t: 'paint_cells', cells, space: spaceId },
     ],
   }];
@@ -316,6 +317,7 @@ const KEYS = [
   { key: 'w', label: 'Window tool', run: () => setTool('window') },
   { key: 'v', label: 'Pan tool', run: () => setTool('pan') },
   { key: 'p', label: 'Problems panel', run: () => toggleProblems() },
+  { key: 'o', label: 'Outline (focus the tree)', run: () => toggleOutline() },
   { key: 'z', ctrl: true, label: 'Undo', run: () => undo() },
   { key: 'F1', label: 'This help', run: () => toggleHelp() },
   { key: 'Escape', label: 'Pan tool / close panels', run: () => { toggleHelp(false); setTool('pan'); } },
@@ -324,6 +326,8 @@ const KEYS = [
 function keyLabel(k) { return (k.ctrl ? 'Ctrl+' : '') + (k.key.length === 1 ? k.key.toUpperCase() : k.key); }
 
 window.addEventListener('keydown', (e) => {
+  // Inside the outline tree (or any text field) letters belong to it, not to the tools.
+  if (e.target.closest && e.target.closest('#outliner, input, textarea') && !['F1', 'Escape'].includes(e.key)) return;
   const k = KEYS.find(x => x.key.toLowerCase() === e.key.toLowerCase() && !!x.ctrl === (e.ctrlKey || e.metaKey));
   if (!k) return;
   e.preventDefault();
@@ -395,6 +399,132 @@ async function refreshProblems() {
   }
 }
 
+// ---------- outliner ----------
+// ARIA tree: roving tabindex, arrow keys, Enter = go to, F2 = rename a room,
+// Delete = remove a light or note. Data comes from the server's `outline`.
+
+const treeEl = document.getElementById('tree');
+const treeOpen = { rooms: true, lights: true, labels: true };
+let treeFocus = null;   // data-key of the focused row, kept across rebuilds
+
+function toggleOutline(force) {
+  const el = document.getElementById('outliner');
+  const show = force === undefined ? el.hidden : force;
+  el.hidden = !show;
+  resizeCanvas();
+  if (show) focusRow(visibleRows()[0]);
+}
+
+function visibleRows() { return [...treeEl.querySelectorAll('li[role=treeitem]')]; }
+
+function focusRow(row) {
+  if (!row) return;
+  for (const r of visibleRows()) r.tabIndex = -1;
+  row.tabIndex = 0;
+  row.focus();
+  treeFocus = row.dataset.key;
+}
+
+function addRow(parent, key, level, html, label, handlers = {}) {
+  const li = document.createElement('li');
+  li.setAttribute('role', 'treeitem');
+  li.setAttribute('aria-level', String(level));
+  li.setAttribute('aria-label', label);
+  li.dataset.key = key;
+  li.tabIndex = -1;
+  li.innerHTML = html;                       // html is built only from escaped text below
+  Object.assign(li, handlers);
+  parent.appendChild(li);
+  return li;
+}
+
+const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function buildOutline() {
+  const o = state.doc.floors[0].outline;
+  // Rebuilding replaces the rows; if the keyboard was in the tree, put it back.
+  const hadFocus = treeEl.contains(document.activeElement);
+  treeEl.textContent = '';
+  const groups = [
+    ['rooms', 'Rooms', o.spaces.length],
+    ['lights', 'Lights', o.lights.length],
+    ['labels', 'Notes', o.labels.length],
+  ];
+  for (const [g, title, n] of groups) {
+    const head = addRow(treeEl, `g:${g}`, 1, `${esc(title)} <span class="meta">${n}</span>`, `${title}, ${n}`);
+    head.setAttribute('aria-expanded', String(treeOpen[g]));
+    head.onclick = () => { treeOpen[g] = !treeOpen[g]; buildOutline(); focusKey(`g:${g}`); };
+    if (!treeOpen[g]) continue;
+    if (g === 'rooms') for (const s of o.spaces) {
+      const where = s.bbox ? `${s.cells} squares` : 'no squares yet';
+      const r = addRow(treeEl, `s:${s.id}`, 2,
+        `<span class="chip" style="background:${esc(s.color)}"></span>${esc(s.name)}<span class="meta">${where} · ${esc(s.kind)}</span>`,
+        `Room ${s.name}, ${where}, ${s.kind}`);
+      r.dataset.kind = 'space';
+      r.onclick = () => { focusRow(r); goToRoom(s); };
+      r.onrenamerequest = () => renameRoom(s);
+    }
+    if (g === 'lights') for (const l of o.lights) {
+      const r = addRow(treeEl, `l:${l.id}`, 2, `${esc(l.label)}<span class="meta">${l.on ? 'on' : 'off'}</span>`,
+        `Light ${l.label}, ${l.on ? 'on' : 'off'}`);
+      r.dataset.kind = 'light';
+      r.onclick = () => { focusRow(r); centerOn({ x: l.cell[0], y: l.cell[1] }); };
+      r.ondeleterequest = () => postOps([{ t: 'remove_light', id: l.id }]);
+      r.cell = l.cell;
+    }
+    if (g === 'labels') for (const l of o.labels) {
+      const r = addRow(treeEl, `n:${l.id}`, 2, `${esc(l.text)}<span class="meta">${l.gm_only ? 'GM only' : ''}</span>`,
+        `Note ${l.text}${l.gm_only ? ', GM only' : ''}`);
+      r.dataset.kind = 'label';
+      r.onclick = () => { focusRow(r); centerOn({ x: l.cell[0], y: l.cell[1] }); };
+      r.ondeleterequest = () => postOps([{ t: 'remove_label', id: l.id }]);
+    }
+  }
+  const rows = visibleRows();
+  const keep = rows.find(r => r.dataset.key === treeFocus) || rows[0];
+  if (keep) {
+    keep.tabIndex = 0;
+    if (hadFocus) keep.focus();
+  }
+}
+
+function focusKey(key) { focusRow(visibleRows().find(r => r.dataset.key === key)); }
+
+function goToRoom(s) {
+  if (!s.bbox) return;
+  centerOn({ x: (s.bbox[0] + s.bbox[2]) / 2 - 0.5, y: (s.bbox[1] + s.bbox[3]) / 2 - 0.5 });
+}
+
+function renameRoom(s) {
+  const name = window.prompt('Rename room', s.name);
+  if (name === null || !name.trim() || name.trim() === s.name) return;
+  postOps([{ t: 'upsert_space', space: { id: s.id, name: name.trim().slice(0, 60), color: s.color, kind: s.kind } }]);
+}
+
+treeEl.addEventListener('keydown', (e) => {
+  const rows = visibleRows();
+  const i = rows.indexOf(document.activeElement);
+  if (i < 0) return;
+  const row = rows[i];
+  let used = true;
+  switch (e.key) {
+    case 'ArrowDown': focusRow(rows[Math.min(rows.length - 1, i + 1)]); break;
+    case 'ArrowUp': focusRow(rows[Math.max(0, i - 1)]); break;
+    case 'Home': focusRow(rows[0]); break;
+    case 'End': focusRow(rows[rows.length - 1]); break;
+    case 'ArrowRight': if (row.getAttribute('aria-expanded') === 'false') row.click(); else focusRow(rows[Math.min(rows.length - 1, i + 1)]); break;
+    case 'ArrowLeft':
+      if (row.getAttribute('aria-expanded') === 'true') row.click();
+      else { const head = rows.slice(0, i).reverse().find(r => r.getAttribute('aria-level') === '1'); focusRow(head); }
+      break;
+    case 'Enter': case ' ': row.click(); break;
+    case 'F2': if (row.onrenamerequest) row.onrenamerequest(); break;
+    case 'Delete': case 'Backspace': if (row.ondeleterequest) row.ondeleterequest(); break;
+    default: used = false;
+  }
+  if (used) e.preventDefault();
+});
+
 function setExportLinks() {
   const base = `/api/docs/${state.docId}/export`;
   const player = document.getElementById('exp-player').checked;
@@ -428,6 +558,7 @@ document.getElementById('tool-paint').onclick = () => setTool('paint');
 document.getElementById('tool-door').onclick = () => setTool('door');
 document.getElementById('tool-window').onclick = () => setTool('window');
 document.getElementById('btn-problems').onclick = () => toggleProblems();
+document.getElementById('btn-outline').onclick = () => toggleOutline();
 document.getElementById('problems-close').onclick = () => toggleProblems(false);
 document.getElementById('btn-help').onclick = () => toggleHelp();
 document.getElementById('exp-player').onchange = setExportLinks;

@@ -89,6 +89,14 @@ cannot express), and `publish` started a nested tokio runtime.
   `secret` survives in the player state, the exported picture, or the publish
   payload. The upcoming true-preview must use the same function.
 
+- **Outliner v1** (`ndcart-core::outline`, in every floor view as `outline`) —
+  rooms with square counts and extents (sorted by name, case-insensitive), lights
+  and notes with the cell they sit in. The UI renders it as an ARIA tree (roving
+  tabindex; ↑↓ move, ←→ fold, Enter goes to the item, F2 renames a room, Delete
+  removes a light or note; letters inside the tree never fire the tool keys) —
+  the keyboard-complete path the plan calls "the accessible map". Not yet:
+  zones, drag-and-drop, multi-select bulk ops (M3).
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the
