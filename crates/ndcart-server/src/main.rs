@@ -509,6 +509,90 @@ async fn undo_structure(
     Ok(Json(serde_json::json!({ "floors": floors })))
 }
 
+#[derive(Deserialize)]
+struct CheckpointBody {
+    name: String,
+}
+
+/// `GET /api/docs/{id}/checkpoints` — named save points, newest last.
+async fn list_checkpoints(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let list: Vec<_> = doc
+        .checkpoints
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id, "name": c.name, "created_at": c.created_at,
+                "floors": c.floors.len(),
+                "cells": c.floors.iter().map(|f| f.grid.cell_count()).sum::<usize>(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "checkpoints": list })))
+}
+
+/// `POST /api/docs/{id}/checkpoints` `{name}` — save the document as it is now.
+async fn create_checkpoint(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<CheckpointBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) =
+        body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"name\": ...}".into())))?;
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let cid = doc.create_checkpoint(&b.name)?;
+    store::save_checkpoints(app.data_dir.as_deref(), &store.docs[&id]);
+    Ok(Json(serde_json::json!({ "ok": true, "id": cid })))
+}
+
+/// `DELETE /api/docs/{id}/checkpoints/{cid}`.
+async fn delete_checkpoint(
+    State(app): State<App>,
+    Path((id, cid)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.delete_checkpoint(&cid)?;
+    store::save_checkpoints(app.data_dir.as_deref(), &store.docs[&id]);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `POST /api/docs/{id}/checkpoints/{cid}/restore` — replaces every floor with
+/// the saved copy and starts a fresh undo history. The state it replaces is
+/// saved as a new checkpoint first.
+async fn restore_checkpoint(
+    State(app): State<App>,
+    Path((id, cid)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.restore_checkpoint(&cid)?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    store::save_checkpoints(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
+}
+
 /// `POST /api/docs/{id}/generate` — a seeded world (continents, mountains, a sea
 /// level for the requested land fraction, rivers to the sea) replaces the
 /// floor's terrain and rivers as ONE undoable step. Size is capped at 512x512
@@ -952,6 +1036,18 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/generate", post(generate_world))
         .route("/api/docs/{id}/floors", post(floors_route))
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
+        .route(
+            "/api/docs/{id}/checkpoints",
+            get(list_checkpoints).post(create_checkpoint),
+        )
+        .route(
+            "/api/docs/{id}/checkpoints/{cid}",
+            axum::routing::delete(delete_checkpoint),
+        )
+        .route(
+            "/api/docs/{id}/checkpoints/{cid}/restore",
+            post(restore_checkpoint),
+        )
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
@@ -2017,6 +2113,84 @@ mod tests {
             "players see the open label"
         );
         assert_eq!(count(&player, [0, 0, 0xc0]), 0, "and not the GM's note");
+    }
+
+    #[tokio::test]
+    async fn checkpoints_save_list_restore_and_delete_over_http() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"CP"}"#.to_vec()).await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let floor = json(d)["floors"][0]["id"].as_str().unwrap().to_string();
+        let paint = |x: i32| {
+            serde_json::json!({"floor": floor, "ops": [
+                {"t":"upsert_space","space":{"id":"s","name":"Hall","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","cells":[{"x":x,"y":0}],"space":"s"}]})
+            .to_string()
+            .into_bytes()
+        };
+        call(&router, "POST", &format!("/api/docs/{id}/ops"), paint(0)).await;
+        let (st, b) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/checkpoints"),
+            br#"{"name":"one cell"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let cid = json(b)["id"].as_str().unwrap().to_string();
+        call(&router, "POST", &format!("/api/docs/{id}/ops"), paint(4)).await;
+        let cells = |router: &Router| {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}"));
+            async move {
+                json(call(&router, "GET", &uri, vec![]).await.1)["floors"][0]["grid"]["cells"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            }
+        };
+        assert_eq!(cells(&router).await, 2);
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/checkpoints/{cid}/restore"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(cells(&router).await, 1);
+        // The list shows the original and the automatic "before restoring" one.
+        let (_, b) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/checkpoints"),
+            vec![],
+        )
+        .await;
+        let list = json(b)["checkpoints"].as_array().unwrap().clone();
+        assert_eq!(list.len(), 2);
+        assert!(list[1]["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("Before restoring"));
+        assert_eq!(list[1]["cells"], 2);
+        let (st, _) = call(
+            &router,
+            "DELETE",
+            &format!("/api/docs/{id}/checkpoints/{cid}"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/checkpoints"),
+            br#"{"name":""}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

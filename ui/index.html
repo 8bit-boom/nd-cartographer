@@ -77,6 +77,11 @@
       <button id="bk-delete" title="Delete the selected rooms (undoable)">Delete</button>
     </div>
     <ul id="tree" role="tree" aria-label="Rooms, lights and notes"></ul>
+    <details id="cpanel">
+      <summary>Checkpoints</summary>
+      <button id="cp-save" title="Save the whole map as it is now, under a name">Save checkpoint…</button>
+      <ul id="cp-list" aria-label="Saved checkpoints"></ul>
+    </details>
     <p class="dim hint">↑↓ move · ←→ fold · Enter go to · Ctrl/Shift+click selects rooms · F2 rename · Del remove</p>
   </nav>
   <div id="stage"><canvas id="canvas"></canvas>

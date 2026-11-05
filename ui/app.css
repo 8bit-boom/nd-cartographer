@@ -186,3 +186,10 @@ dialog#new-dialog::backdrop { background: rgba(0,0,0,0.55); }
 #bulkbar select, #bulkbar button { font-size: 12px; padding: 2px 6px; }
 #bulkbar button:disabled { opacity: .4; }
 #tree li[aria-selected=true] { background: rgba(110, 200, 255, 0.18); outline: 1px solid var(--accent); }
+
+#cpanel { margin: 8px 0; font-size: 12px; }
+#cpanel summary { cursor: pointer; font-weight: 600; color: var(--dim); }
+#cp-list { list-style: none; margin: 6px 0 0; padding: 0; }
+#cp-list li { display: flex; gap: 4px; align-items: center; padding: 2px 0; }
+#cp-list .cp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#cp-list button, #cp-save { font-size: 12px; padding: 2px 6px; }

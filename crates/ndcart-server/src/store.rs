@@ -12,12 +12,25 @@ use ndcart_core::{CoreResult, DocOp, StructJournal};
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// A named save point: every floor as it was. Restoring replaces the floors
+/// and starts a fresh undo history (the state before is itself saved first).
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct Checkpoint {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub floors: Vec<FloorDoc>,
+}
+
+pub const MAX_CHECKPOINTS: usize = 30;
+
 pub struct StoredDoc {
     pub manifest: Manifest,
     pub floors: Vec<FloorDoc>,
     pub journal: Journal,
     /// Adding, renaming, moving and removing floors, with its own undo.
     pub structure: StructJournal,
+    pub checkpoints: Vec<Checkpoint>,
     pub rev: u64,
 }
 
@@ -40,6 +53,7 @@ impl StoredDoc {
             floors: vec![floor],
             journal: Journal::default(),
             structure: StructJournal::default(),
+            checkpoints: Vec::new(),
             rev: 0,
         }
     }
@@ -134,6 +148,62 @@ impl StoredDoc {
         Ok(())
     }
 
+    pub fn create_checkpoint(&mut self, name: &str) -> CoreResult<String> {
+        let name = name.trim();
+        let n = name.chars().count();
+        if n == 0 || n > 80 {
+            return Err(ndcart_core::CoreError::Invalid(
+                "a checkpoint name is 1-80 characters".into(),
+            ));
+        }
+        if self.checkpoints.len() >= MAX_CHECKPOINTS {
+            return Err(ndcart_core::CoreError::CapExceeded(format!(
+                "at most {MAX_CHECKPOINTS} checkpoints; delete one first"
+            )));
+        }
+        let id = new_id("cp");
+        self.checkpoints.push(Checkpoint {
+            id: id.clone(),
+            name: name.to_string(),
+            created_at: ndcart_core::doc::now_iso(),
+            floors: self.floors.clone(),
+        });
+        Ok(id)
+    }
+
+    pub fn delete_checkpoint(&mut self, id: &str) -> CoreResult<()> {
+        let before = self.checkpoints.len();
+        self.checkpoints.retain(|c| c.id != id);
+        if self.checkpoints.len() == before {
+            return Err(ndcart_core::CoreError::NotFound(format!("checkpoint {id}")));
+        }
+        Ok(())
+    }
+
+    /// Put the document back as it was at a checkpoint. The current state is
+    /// kept as its own checkpoint, so a restore can itself be taken back.
+    pub fn restore_checkpoint(&mut self, id: &str) -> CoreResult<()> {
+        let cp = self
+            .checkpoints
+            .iter()
+            .find(|c| c.id == id)
+            .cloned()
+            .ok_or_else(|| ndcart_core::CoreError::NotFound(format!("checkpoint {id}")))?;
+        if self.checkpoints.len() >= MAX_CHECKPOINTS {
+            self.checkpoints.remove(0);
+        }
+        self.checkpoints.push(Checkpoint {
+            id: new_id("cp"),
+            name: format!("Before restoring \u{201c}{}\u{201d}", cp.name),
+            created_at: ndcart_core::doc::now_iso(),
+            floors: std::mem::replace(&mut self.floors, cp.floors),
+        });
+        self.journal = Journal::default();
+        self.structure = StructJournal::default();
+        self.touched();
+        Ok(())
+    }
+
     pub fn undo_last(&mut self, floor_id: &str) -> CoreResult<()> {
         let idx = floors_by_id(&self.floors, floor_id)?;
         let floor = &mut self.floors[idx];
@@ -217,6 +287,10 @@ impl Store {
                     floors,
                     journal,
                     structure,
+                    checkpoints: std::fs::read_to_string(doc_dir.join("checkpoints.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok())
+                        .unwrap_or_default(),
                     rev,
                 },
             );
@@ -268,6 +342,23 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
         if let Err(e) = write_atomic(&dir.join(name), body.as_bytes()) {
             eprintln!("ndcart: cannot save {name}: {e}");
         }
+    }
+}
+
+/// Checkpoints are written only when they change (they hold whole copies).
+pub fn save_checkpoints(data_dir: Option<&Path>, doc: &StoredDoc) {
+    let Some(root) = data_dir else { return };
+    let dir = root.join(&doc.manifest.id);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    match serde_json::to_string(&doc.checkpoints) {
+        Ok(body) => {
+            if let Err(e) = write_atomic(&dir.join("checkpoints.json"), body.as_bytes()) {
+                eprintln!("ndcart: cannot save checkpoints: {e}");
+            }
+        }
+        Err(e) => eprintln!("ndcart: cannot serialize checkpoints: {e}"),
     }
 }
 
@@ -372,5 +463,40 @@ mod persistence_tests {
         back.undo_structure().unwrap();
         assert_eq!(back.floors[2].name, "Roof");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_checkpoint_restores_the_floors_and_the_restore_can_be_taken_back() {
+        use ndcart_core::journal::Op;
+        let mut d = StoredDoc::new("CP", DocKind::Battle);
+        let fid = d.floors[0].id.clone();
+        let paint = |cells: &[(i32, i32)]| -> Vec<Op> {
+            vec![
+                serde_json::from_value(serde_json::json!({"t":"upsert_space","space":{"id":"s","name":"Hall","color":"#7f5539","kind":"room"}})).unwrap(),
+                serde_json::from_value(serde_json::json!({"t":"paint_cells","space":"s","cells":cells.iter().map(|(x,y)| serde_json::json!({"x":x,"y":y})).collect::<Vec<_>>()})).unwrap(),
+            ]
+        };
+        d.apply_ops(&fid, &paint(&[(0, 0), (1, 0)])).unwrap();
+        let cp = d.create_checkpoint("two cells").unwrap();
+        d.apply_ops(&fid, &paint(&[(5, 5)])).unwrap();
+        assert_eq!(d.floors[0].grid.cell_count(), 3);
+        d.restore_checkpoint(&cp).unwrap();
+        assert_eq!(d.floors[0].grid.cell_count(), 2);
+        // The three-cell state was saved as its own checkpoint.
+        let before = d.checkpoints.last().unwrap().id.clone();
+        assert!(d
+            .checkpoints
+            .last()
+            .unwrap()
+            .name
+            .starts_with("Before restoring"));
+        d.restore_checkpoint(&before).unwrap();
+        assert_eq!(d.floors[0].grid.cell_count(), 3);
+        // History restarts: nothing to undo until the next edit.
+        assert!(d.undo_last(&fid).is_err());
+        assert!(d.create_checkpoint("  ").is_err());
+        assert!(d.delete_checkpoint("nope").is_err());
+        d.delete_checkpoint(&cp).unwrap();
+        assert!(d.restore_checkpoint(&cp).is_err());
     }
 }

@@ -35,6 +35,10 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/floors` | `{action:"add",name,copy_from?}` / `{action:"rename",floor,name}` / `{action:"remove",floor}` / `{action:"move",floor,to}` | Floor structure. Max 64 floors, last floor cannot be removed. `{"ok":true,"rev":N,"floor":id?}`. |
 | POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
 
+| GET / POST | `/api/docs/{id}/checkpoints` | POST `{name}` | Named save points of every floor (max 30). |
+| DELETE | `/api/docs/{id}/checkpoints/{cid}` | – | |
+| POST | `/api/docs/{id}/checkpoints/{cid}/restore` | – | Replaces all floors; the replaced state becomes a new "Before restoring…" checkpoint; undo history restarts. |
+
 Tiles accept `?onion=<floor id>`: that floor is drawn at 30% opacity under the current floor (404 if the id is unknown).
 
 ### Ops (internally tagged, `"t"`)

@@ -1301,6 +1301,43 @@ function buildOutline() {
   }
 }
 
+// ---------- checkpoints ----------
+async function loadCheckpoints() {
+  const list = document.getElementById('cp-list');
+  let cps = [];
+  try { cps = (await api('GET', `/api/docs/${state.docId}/checkpoints`)).checkpoints; } catch { return; }
+  list.textContent = '';
+  if (cps.length === 0) { const li = document.createElement('li'); li.className = 'dim'; li.textContent = 'None yet'; list.appendChild(li); }
+  for (const c of cps.slice().reverse()) {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'cp-name'; name.textContent = c.name;     // a name is never HTML
+    name.title = `${c.created_at} · ${c.floors} floor(s), ${c.cells} squares`;
+    const restore = document.createElement('button'); restore.textContent = 'Restore';
+    restore.onclick = async () => {
+      if (!window.confirm(`Restore "${c.name}"? The map as it is now is saved as a checkpoint first; undo history starts over.`)) return;
+      try {
+        await api('POST', `/api/docs/${state.docId}/checkpoints/${c.id}/restore`);
+        tileCache.clear(); state.sel = new Set(); await refresh(); await loadCheckpoints();
+      } catch (e) { statusEl.textContent = `Error: ${e.message}`; }
+    };
+    const del = document.createElement('button'); del.textContent = 'Delete';
+    del.onclick = async () => {
+      try { await api('DELETE', `/api/docs/${state.docId}/checkpoints/${c.id}`); await loadCheckpoints(); }
+      catch (e) { statusEl.textContent = `Error: ${e.message}`; }
+    };
+    li.append(name, restore, del);
+    list.appendChild(li);
+  }
+}
+document.getElementById('cp-save').onclick = async () => {
+  const name = window.prompt('Checkpoint name', 'Before the big change');
+  if (name === null || !name.trim()) return;
+  try { await api('POST', `/api/docs/${state.docId}/checkpoints`, { name: name.trim().slice(0, 80) }); await loadCheckpoints(); }
+  catch (e) { statusEl.textContent = `Error: ${e.message}`; }
+};
+document.getElementById('cpanel').addEventListener('toggle', (e) => { if (e.target.open) loadCheckpoints(); });
+
 // ---------- selection and bulk edits ----------
 // A selection is a set of room ids. Every bulk edit is one batch op, so a
 // single Ctrl+Z puts everything back.
