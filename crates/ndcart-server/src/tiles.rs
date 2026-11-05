@@ -236,6 +236,210 @@ fn render_region(
         .expect("png encode")
 }
 
+/// Rasterize one stamp definition into `pixmap`, centred at `(cx, cy)` pixels,
+/// `w` x `h` pixels, rotated `rot` radians, optionally mirrored and tinted.
+/// With `shadow`, a soft drop shadow (three low-alpha layers, each a little
+/// bigger and further out) goes down first, lit from the top-left.
+#[allow(clippy::too_many_arguments)]
+fn draw_stamp(
+    pixmap: &mut tiny_skia::Pixmap,
+    def: &ndcart_paint::StampDef,
+    (cx, cy): (f32, f32),
+    (w, h): (f32, f32),
+    rot: f32,
+    flip: bool,
+    tint: Option<[u8; 3]>,
+    shadow_px: Option<f32>,
+) {
+    use ndcart_paint::Prim;
+    use tiny_skia::{FillRule, Paint, PathBuilder, Stroke, Transform};
+    let (sn, cs) = rot.sin_cos();
+    let sx = if flip { -w } else { w };
+    let xf =
+        |dx: f32, dy: f32| Transform::from_row(cs * sx, sn * sx, -sn * h, cs * h, cx + dx, cy + dy);
+    let colour = |rgb: [u8; 3]| match tint {
+        Some(t) => [
+            (u16::from(rgb[0]) * u16::from(t[0]) / 255) as u8,
+            (u16::from(rgb[1]) * u16::from(t[1]) / 255) as u8,
+            (u16::from(rgb[2]) * u16::from(t[2]) / 255) as u8,
+        ],
+        None => rgb,
+    };
+    let path_of = |p: &Prim| -> Option<(tiny_skia::Path, [u8; 3], Option<f32>)> {
+        let mut pb = PathBuilder::new();
+        match *p {
+            Prim::Ellipse {
+                cx,
+                cy,
+                rx,
+                ry,
+                rgb,
+            } => {
+                let r = tiny_skia::Rect::from_xywh(cx - rx, cy - ry, rx * 2.0, ry * 2.0)?;
+                pb.push_oval(r);
+                Some((pb.finish()?, rgb, None))
+            }
+            Prim::Rect { x, y, w, h, rgb } => {
+                pb.push_rect(tiny_skia::Rect::from_xywh(x, y, w, h)?);
+                Some((pb.finish()?, rgb, None))
+            }
+            Prim::Poly { pts, rgb } => {
+                pb.move_to(pts[0][0], pts[0][1]);
+                for q in &pts[1..] {
+                    pb.line_to(q[0], q[1]);
+                }
+                pb.close();
+                Some((pb.finish()?, rgb, None))
+            }
+            Prim::Line { a, b, w, rgb } => {
+                pb.move_to(a[0], a[1]);
+                pb.line_to(b[0], b[1]);
+                Some((pb.finish()?, rgb, Some(w)))
+            }
+        }
+    };
+    let prims: Vec<_> = def.prims.iter().filter_map(path_of).collect();
+    if let Some(off) = shadow_px.filter(|o| *o > 0.0) {
+        for (k, (grow, a)) in [(0.0f32, 0.09f32), (0.04, 0.07), (0.08, 0.05)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(0, 0, 0, (a * 255.0) as u8);
+            paint.anti_alias = true;
+            let t = xf(off * (0.55 + 0.25 * k as f32), off * (0.8 + 0.3 * k as f32));
+            for (path, _, line) in &prims {
+                if line.is_some() {
+                    continue; // lines are detail; the silhouette is the filled shapes
+                }
+                pixmap.fill_path(path, &paint, FillRule::Winding, t, None);
+                if grow > 0.0 {
+                    let stroke = Stroke {
+                        width: grow,
+                        ..Default::default()
+                    };
+                    pixmap.stroke_path(path, &paint, &stroke, t, None);
+                }
+            }
+        }
+    }
+    let t = xf(0.0, 0.0);
+    for (path, rgb, line) in &prims {
+        let c = colour(*rgb);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(c[0], c[1], c[2], 255);
+        paint.anti_alias = true;
+        match line {
+            None => pixmap.fill_path(path, &paint, FillRule::Winding, t, None),
+            Some(width) => {
+                let stroke = Stroke {
+                    width: *width,
+                    line_cap: tiny_skia::LineCap::Round,
+                    ..Default::default()
+                };
+                pixmap.stroke_path(path, &paint, &stroke, t, None);
+            }
+        }
+    }
+}
+
+/// Largest sprite (pixels) rasterized for one stamp; bigger ones (a huge stamp
+/// at high zoom) are drawn straight onto the region instead.
+const MAX_SPRITE_PIXELS: i64 = 16_000_000;
+
+/// Composite the floor's stamps over strokes, in z-order. A stamp whose pack
+/// asset is unknown is simply not drawn.
+///
+/// Each stamp is rasterized once into its own sprite, in coordinates that do
+/// not depend on which tile is being baked, then blitted at an integer pixel
+/// offset. That is what makes a tile pixel-identical to the same crop of the
+/// full render (a path's anti-aliasing would otherwise depend on its offset).
+fn apply_stamps(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+    if floor.stamps.is_empty() {
+        return;
+    }
+    let scale = ppc as f32;
+    let (w, h) = (i64::from(pixmap.width()), i64::from(pixmap.height()));
+    for st in &floor.stamps {
+        let Some(def) = ndcart_paint::find_stamp(&st.asset) else {
+            continue;
+        };
+        let (pw, ph) = (
+            def.size[0] * st.scale * scale,
+            def.size[1] * st.scale * scale,
+        );
+        let throw = if st.shadow {
+            def.height * st.scale * scale * 0.12 * 1.6
+        } else {
+            0.0
+        };
+        // Reach: half the diagonal plus the shadow's throw and its growth.
+        let reach = (pw * pw + ph * ph).sqrt() * 0.5 + throw * 2.0 + 2.0;
+        // The stamp's centre in WORLD pixels, independent of the region.
+        let (wx, wy) = (st.x * scale, st.y * scale);
+        let (ox, oy) = ((wx - reach).floor() as i64, (wy - reach).floor() as i64);
+        let side = (reach * 2.0).ceil() as i64 + 2;
+        if ox + side < x0 || oy + side < y0 || ox > x0 + w || oy > y0 + h {
+            continue;
+        }
+        let tint = st.tint.as_deref().map(parse_hex);
+        let shadow =
+            (st.shadow && def.height > 0.0).then_some(def.height * st.scale * scale * 0.12);
+        if side * side <= MAX_SPRITE_PIXELS {
+            let Some(mut sprite) = tiny_skia::Pixmap::new(side as u32, side as u32) else {
+                continue;
+            };
+            draw_stamp(
+                &mut sprite,
+                def,
+                (wx - ox as f32, wy - oy as f32),
+                (pw, ph),
+                st.rotation,
+                st.flip,
+                tint,
+                shadow,
+            );
+            pixmap.draw_pixmap(
+                (ox - x0) as i32,
+                (oy - y0) as i32,
+                sprite.as_ref(),
+                &tiny_skia::PixmapPaint::default(),
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        } else {
+            draw_stamp(
+                pixmap,
+                def,
+                (wx - x0 as f32, wy - y0 as f32),
+                (pw, ph),
+                st.rotation,
+                st.flip,
+                tint,
+                shadow,
+            );
+        }
+    }
+}
+
+/// A square icon of a stamp (for the palette), on a transparent background.
+pub fn stamp_icon(def: &ndcart_paint::StampDef, px: u32) -> Vec<u8> {
+    let mut pm = tiny_skia::Pixmap::new(px, px).expect("icon pixmap");
+    let longest = def.size[0].max(def.size[1]);
+    let k = px as f32 * 0.86 / longest;
+    draw_stamp(
+        &mut pm,
+        def,
+        (px as f32 / 2.0, px as f32 / 2.0),
+        (def.size[0] * k, def.size[1] * k),
+        0.0,
+        false,
+        None,
+        (def.height > 0.0).then_some(px as f32 * 0.04),
+    );
+    pm.encode_png().expect("png")
+}
+
 /// Composite the floor's paint strokes over the baked cells, in z-order.
 /// A paint stroke mixes its material toward each pixel by `coverage * opacity`;
 /// an eraser mixes back toward what was there before any stroke (the room
@@ -410,6 +614,7 @@ fn render_pixmap(
     }
 
     apply_strokes(&mut pixmap, floor, ppc, x0, y0);
+    apply_stamps(&mut pixmap, floor, ppc, x0, y0);
 
     // Walls on top: stroke width grows with zoom, min 1px, so z0 reads.
     let mut wall_paint = tiny_skia::Paint {
@@ -998,6 +1203,259 @@ mod tests {
         let (w, h) = (i64::from(cols) * ppc, i64::from(rows) * ppc);
         let png = render_region(f, &walls, 32.0, ppc, 0, 0, w as u32, h as u32);
         (png, w as u32, h as u32)
+    }
+
+    fn light_floor() -> FloorDoc {
+        use ndcart_core::grid::default_space;
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        let mut sp = default_space("a", "A", SpaceKind::Room);
+        sp.color = "#d0d0d0".into();
+        f.grid.upsert_space(sp).unwrap();
+        let cells: Vec<CellKey> = (0..8)
+            .flat_map(|x| (0..8).map(move |y| CellKey::new(x, y)))
+            .collect();
+        f.grid.paint(&cells, Some("a")).unwrap();
+        f
+    }
+
+    fn mk_stamp(id: &str, asset: &str, x: f32, y: f32) -> ndcart_core::Stamp {
+        ndcart_core::Stamp {
+            id: id.into(),
+            asset: asset.into(),
+            x,
+            y,
+            scale: 1.0,
+            rotation: 0.0,
+            flip: false,
+            tint: None,
+            shadow: true,
+        }
+    }
+
+    fn bake_stamped(f: &FloorDoc, ppc: i64) -> tiny_skia::Pixmap {
+        let (png, ..) = bake_full_stroked(f, ppc);
+        decode(&png)
+    }
+
+    fn lum(p: [u8; 3]) -> i32 {
+        i32::from(p[0]) + i32::from(p[1]) + i32::from(p[2])
+    }
+
+    #[test]
+    fn a_stamp_draws_in_place_and_leaves_the_rest_alone() {
+        let mut f = light_floor();
+        let before = bake_stamped(&f, 32);
+        f.add_stamp(mk_stamp("c", "crate", 3.5, 3.5), None).unwrap();
+        let after = bake_stamped(&f, 32);
+        // The crate's centre is wood-coloured (the X braces cross at the middle, so look just off it).
+        let c = rgb(&after, 3 * 32 + 16, 3 * 32 + 6);
+        assert!(c[0] > c[2] + 30, "wood is warm: {c:?}");
+        assert_eq!(
+            rgb(&after, 6 * 32, 6 * 32),
+            rgb(&before, 6 * 32, 6 * 32),
+            "far away is untouched"
+        );
+        // An unknown asset is not drawn, and is not an error.
+        let mut g = light_floor();
+        g.add_stamp(mk_stamp("x", "no_such_prop", 3.5, 3.5), None)
+            .unwrap();
+        assert_eq!(bake_stamped(&g, 32).data(), before.data());
+    }
+
+    #[test]
+    fn shadows_fall_down_and_right_and_can_be_switched_off() {
+        let mut f = light_floor();
+        f.add_stamp(mk_stamp("p", "pillar", 3.5, 3.5), None)
+            .unwrap();
+        let with = bake_stamped(&f, 48);
+        let mut g = light_floor();
+        let mut no = mk_stamp("p", "pillar", 3.5, 3.5);
+        no.shadow = false;
+        g.add_stamp(no, None).unwrap();
+        let without = bake_stamped(&g, 48);
+        let clear = bake_stamped(&light_floor(), 48);
+        // The pillar is ~1 cell (48 px) wide centred at 168,168: just outside its
+        // lower-right edge there is shadow; just outside its upper-left there is none.
+        // (the pillar's radius is ~22 px; the shadow reaches ~6 px past it, down and right)
+        let (lr, ul) = ((168 + 6, 168 + 22 + 3), (168 - 30, 168 - 30));
+        assert!(
+            lum(rgb(&with, lr.0, lr.1)) < lum(rgb(&clear, lr.0, lr.1)),
+            "shadow darkens the lower right"
+        );
+        assert_eq!(
+            rgb(&with, ul.0, ul.1),
+            rgb(&clear, ul.0, ul.1),
+            "no shadow on the lit side"
+        );
+        assert_eq!(
+            rgb(&without, lr.0, lr.1),
+            rgb(&clear, lr.0, lr.1),
+            "shadow: false draws none"
+        );
+        // A flat prop (rug, height 0) throws no shadow even when asked.
+        let mut r = light_floor();
+        r.add_stamp(mk_stamp("r", "rug", 3.5, 3.5), None).unwrap();
+        let rug = bake_stamped(&r, 48);
+        assert_eq!(
+            rgb(&rug, 168 + 60, 168 + 40 + 24),
+            rgb(&clear, 168 + 60, 168 + 40 + 24)
+        );
+    }
+
+    #[test]
+    fn rotation_flip_and_tint_do_what_they_say() {
+        // Rotate a table (2x1) a quarter turn: it becomes tall.
+        let mut f = light_floor();
+        let mut t = mk_stamp("t", "table", 4.0, 4.0);
+        t.shadow = false;
+        f.add_stamp(t.clone(), None).unwrap();
+        let flat = bake_stamped(&f, 32);
+        let mut g = light_floor();
+        t.rotation = std::f32::consts::FRAC_PI_2;
+        g.add_stamp(t, None).unwrap();
+        let tall = bake_stamped(&g, 32);
+        let clear = bake_stamped(&light_floor(), 32);
+        let changed = |pm: &tiny_skia::Pixmap, x: u32, y: u32| pm.pixel(x, y) != clear.pixel(x, y);
+        // flat: covers x 3..5 cells around y=4, not 0.8 cells above; tall: the reverse.
+        assert!(changed(&flat, 4 * 32 - 28, 4 * 32) && !changed(&flat, 4 * 32, 4 * 32 - 26 - 8));
+        assert!(changed(&tall, 4 * 32, 4 * 32 - 28) && !changed(&tall, 4 * 32 - 26 - 8, 4 * 32));
+        // Tint multiplies: a black tint blacks the prop out.
+        let mut b = light_floor();
+        let mut bt = mk_stamp("b", "crate", 3.5, 3.5);
+        bt.shadow = false;
+        bt.tint = Some("#000000".into());
+        b.add_stamp(bt, None).unwrap();
+        assert_eq!(
+            rgb(&bake_stamped(&b, 32), 3 * 32 + 16, 3 * 32 + 6),
+            [0, 0, 0]
+        );
+        // Flip mirrors an asymmetric prop (the rock's highlight sits left of centre).
+        let rock = |flip: bool| {
+            let mut h = light_floor();
+            let mut r = mk_stamp("r", "rock", 4.0, 4.0);
+            r.shadow = false;
+            r.flip = flip;
+            h.add_stamp(r, None).unwrap();
+            bake_stamped(&h, 64)
+        };
+        let (a, m) = (rock(false), rock(true));
+        let mut mirrored_equal = true;
+        for y in (200..320).step_by(7) {
+            for x in (200..320).step_by(7) {
+                let mx = 2 * 256 - x;
+                if lum(rgb(&a, x, y)) != lum(rgb(&m, mx, y)) {
+                    mirrored_equal = false;
+                }
+            }
+        }
+        assert!(
+            !mirrored_equal || a.data() == m.data(),
+            "flip must change an asymmetric prop"
+        );
+        assert_ne!(a.data(), m.data());
+    }
+
+    #[test]
+    fn stamps_sit_above_strokes_and_in_z_order() {
+        use ndcart_core::{BrushKind, StrokeKind};
+        let mut f = light_floor();
+        f.add_stamp(mk_stamp("c", "crate", 3.5, 3.5), None).unwrap();
+        f.add_stroke(
+            mk_stroke(
+                "s",
+                StrokeKind::Paint,
+                BrushKind::Round,
+                "#ff0000",
+                3.0,
+                &[(1.0, 3.5), (6.0, 3.5)],
+            ),
+            None,
+        )
+        .unwrap();
+        let pm = bake_stamped(&f, 32);
+        // The red stroke runs right through the crate, but the crate is on top.
+        let on_crate = rgb(&pm, 3 * 32 + 16, 3 * 32 + 6);
+        assert!(
+            !(on_crate[0] > 240 && on_crate[1] < 20),
+            "crate covers the stroke: {on_crate:?}"
+        );
+        assert_eq!(
+            rgb(&pm, 6 * 32 - 4, 3 * 32 + 16),
+            [255, 0, 0],
+            "stroke visible beside it"
+        );
+        // Two overlapping stamps: the later one is drawn over the earlier.
+        let mut g = light_floor();
+        let mut a = mk_stamp("a", "chest", 3.5, 3.5);
+        a.shadow = false;
+        a.tint = Some("#ff0000".into());
+        let mut b = mk_stamp("b", "chest", 3.5, 3.5);
+        b.shadow = false;
+        b.tint = Some("#0000ff".into());
+        g.add_stamp(a, None).unwrap();
+        g.add_stamp(b, None).unwrap();
+        let top = rgb(&bake_stamped(&g, 32), 3 * 32 + 16, 3 * 32 + 8);
+        assert!(
+            top[2] >= top[0],
+            "the later (blue) chest is on top: {top:?}"
+        );
+    }
+
+    #[test]
+    fn stamps_bake_the_same_in_tiles_and_in_the_full_render() {
+        let mut f = light_floor();
+        for (i, a) in ["tree", "table", "bed", "rock", "barrel", "torch"]
+            .iter()
+            .enumerate()
+        {
+            let mut s = mk_stamp(
+                &format!("s{i}"),
+                a,
+                1.2 + i as f32 * 1.1,
+                1.0 + (i % 3) as f32 * 2.1,
+            );
+            s.rotation = i as f32 * 0.5;
+            f.add_stamp(s, None).unwrap();
+        }
+        let (png, ..) = bake_full_stroked(&f, 64);
+        let full = decode(&png);
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
+            let mut worst = 0u8;
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    let (a, b) = (
+                        rgb(&tile, x, y),
+                        rgb(&full, tx as u32 * 256 + x, ty as u32 * 256 + y),
+                    );
+                    for k in 0..3 {
+                        worst = worst.max(a[k].abs_diff(b[k]));
+                    }
+                }
+            }
+            // Sprites make this exact: no tolerance.
+            assert_eq!(worst, 0, "tile ({tx},{ty}) differs by {worst}");
+        }
+    }
+
+    #[test]
+    fn the_icon_is_a_64px_png_with_a_drawn_centre() {
+        for def in ndcart_paint::stamps() {
+            let png = stamp_icon(def, 64);
+            let pm = decode(&png);
+            assert_eq!((pm.width(), pm.height()), (64, 64), "{}", def.id);
+            assert!(
+                pm.pixel(32, 32).unwrap().alpha() > 0,
+                "{} has a centre",
+                def.id
+            );
+            assert_eq!(
+                pm.pixel(0, 0).unwrap().alpha(),
+                0,
+                "{} corner is clear",
+                def.id
+            );
+        }
     }
 
     #[test]

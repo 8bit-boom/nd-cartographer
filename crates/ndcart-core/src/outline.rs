@@ -39,7 +39,15 @@ pub struct OutlineLabel {
 }
 
 #[derive(Serialize, Clone, PartialEq, Debug)]
+pub struct OutlineStamp {
+    pub id: String,
+    pub asset: String,
+    pub cell: [i32; 2],
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
 pub struct Outline {
+    pub stamps: Vec<OutlineStamp>,
     pub spaces: Vec<OutlineSpace>,
     pub lights: Vec<OutlineLight>,
     pub labels: Vec<OutlineLabel>,
@@ -89,6 +97,15 @@ pub fn outline(floor: &FloorDoc, cell_size: f64) -> Outline {
         .collect();
     spaces.sort_by(|a, b| (a.name.to_lowercase(), &a.id).cmp(&(b.name.to_lowercase(), &b.id)));
     Outline {
+        stamps: floor
+            .stamps
+            .iter()
+            .map(|s| OutlineStamp {
+                id: s.id.clone(),
+                asset: s.asset.clone(),
+                cell: [s.x.floor() as i32, s.y.floor() as i32],
+            })
+            .collect(),
         spaces,
         lights: floor
             .lights

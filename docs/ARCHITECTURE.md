@@ -148,6 +148,30 @@ cannot express), and `publish` started a nested tokio runtime.
   rectangle brush variants, a stroke list in the outliner, and caching prepared
   strokes across tiles.
 
+- **Stamps** (props) — `ndcart-core::stamp` + `ndcart-paint::stamps`. A stamp is a
+  placement (asset id, centre in cells, scale 0.1–8, rotation, flip, tint, shadow)
+  with ops `add_stamp` (z-index kept on undo), `update_stamp` (move/rotate/re-tint
+  in place, exact inverse) and `remove_stamp`. The first-party pack is twelve
+  props defined as vector primitives in a unit box (crate, barrel, table, chair,
+  pillar, torch, bed, rug, chest, tree, bush, rock): MIT, tiny, resolution
+  independent. The baker draws each stamp into its **own sprite** in
+  tile-independent coordinates and blits it at an integer offset, so a tile equals
+  the same crop of the full render **exactly** (a path's anti-aliasing otherwise
+  depends on its offset — caught by test at 11/255). Soft shadows are three
+  low-alpha layers thrown down-right in proportion to the prop's height (rugs and
+  torches lie flat). `GET /api/stamps` and `GET /api/stamps/{id}/icon.png` feed the
+  UI's Stamp tool (`S`; `,` `.` rotate, `F` flips; snap to ½ cell) and the
+  outliner's Props group.
+- **Journal undo is now linear history.** Undo used to *swap* the undone entry for
+  its inverse, which lost the forward op (replaying the journal then failed on any
+  document that had undone an add/remove) and made a second Undo toggle instead of
+  step back. Undo now appends an entry marked `undoes: <index>`; forward entries
+  are never rewritten, repeated undo walks back, and replay from the start always
+  reproduces the document. Old journals still load.
+- **Wall ids are stable** — derived from the run's axis, line, start and kind, so
+  a re-publish keeps the same id for a door that has not moved and nd-world keeps
+  its runtime open/closed state.
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

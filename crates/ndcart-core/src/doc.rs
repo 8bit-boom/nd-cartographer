@@ -88,6 +88,9 @@ pub struct FloorDoc {
     /// shape the baked picture, never walls or rooms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub strokes: Vec<crate::stroke::Stroke>,
+    /// Placed props in z-order, drawn over the strokes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stamps: Vec<crate::stamp::Stamp>,
 }
 
 pub fn now_iso() -> String {
@@ -118,6 +121,7 @@ impl FloorDoc {
             lights: Vec::new(),
             labels: Vec::new(),
             strokes: Vec::new(),
+            stamps: Vec::new(),
         }
     }
 
@@ -142,6 +146,48 @@ impl FloorDoc {
         }
         let at = index.unwrap_or(self.strokes.len()).min(self.strokes.len());
         self.strokes.insert(at, stroke);
+        Ok(())
+    }
+
+    pub fn add_stamp(
+        &mut self,
+        stamp: crate::stamp::Stamp,
+        index: Option<usize>,
+    ) -> CoreResult<()> {
+        stamp.validate()?;
+        if self.stamps.iter().any(|s| s.id == stamp.id) {
+            return Err(CoreError::Invalid(format!("duplicate stamp {}", stamp.id)));
+        }
+        if self.stamps.len() >= crate::stamp::MAX_STAMPS {
+            return Err(CoreError::CapExceeded(format!(
+                "at most {} stamps per floor",
+                crate::stamp::MAX_STAMPS
+            )));
+        }
+        let at = index.unwrap_or(self.stamps.len()).min(self.stamps.len());
+        self.stamps.insert(at, stamp);
+        Ok(())
+    }
+
+    /// Replace a placed stamp in place (move / rotate / re-tint), keeping its z-order.
+    pub fn update_stamp(&mut self, stamp: crate::stamp::Stamp) -> CoreResult<()> {
+        stamp.validate()?;
+        let slot = self
+            .stamps
+            .iter_mut()
+            .find(|s| s.id == stamp.id)
+            .ok_or_else(|| CoreError::NotFound(format!("stamp {}", stamp.id)))?;
+        *slot = stamp;
+        Ok(())
+    }
+
+    pub fn remove_stamp(&mut self, id: &str) -> CoreResult<()> {
+        let i = self
+            .stamps
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or_else(|| CoreError::NotFound(format!("stamp {id}")))?;
+        self.stamps.remove(i);
         Ok(())
     }
 
@@ -243,11 +289,12 @@ impl FloorDoc {
         let spaces = self.grid.spaces.len();
         let cells = self.grid.cell_count();
         format!(
-            "{}: {cells} cells, {spaces} spaces, {} lights, {} labels, {} strokes",
+            "{}: {cells} cells, {spaces} spaces, {} lights, {} labels, {} strokes, {} stamps",
             self.name,
             self.lights.len(),
             self.labels.len(),
-            self.strokes.len()
+            self.strokes.len(),
+            self.stamps.len()
         )
     }
 }

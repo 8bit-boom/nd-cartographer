@@ -39,6 +39,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 - `{"t":"upsert_space","space":{"id","name","color":"#rrggbb","kind":"room|corridor|area","material?":"stone_floor"}}` — `material` is an id from `GET /api/materials` (1–40 chars `a-z0-9_`); without one the flat `color` paints
 - `{"t":"add_stroke","stroke":{"id","kind":"paint|erase","brush":"round|scatter","material?","color":"#rrggbb","size":0.05-64,"opacity":0-1,"hardness?":0-1,"roughness?":0-1,"density?":0-1,"seed","points":[{"x","y","pressure?":0-1,"tilt?":0-1}]},"index?"}` — a paint stroke in cell coordinates (1–4,000 points, ≤ 20,000 per floor); `index` is its z-order position (default: on top)
 - `{"t":"remove_stroke","id"}`
+- `{"t":"add_stamp","stamp":{"id","asset":"crate","x","y","scale?":0.1-8,"rotation?","flip?","tint?":"#rrggbb","shadow?"},"index?"}`, `{"t":"update_stamp","stamp":{…same id…}}`, `{"t":"remove_stamp","id"}` — placed props (`GET /api/stamps` lists the pack)
 - `{"t":"remove_space","id"}`
 - `{"t":"set_mark","edge":{"cell":{"x","y"},"edge":"west|north|east|south"},"mark":{"kind":"opening|door|window|secret","state":"open|closed"}|null}`
 - `{"t":"add_light","light":{"id","x","y","range","color","intensity","on","label?"}}` — ≤ 60 per floor (nd-world publish cap)
@@ -56,6 +57,13 @@ Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/materials` | The starter pack: `{pack, materials:[{id, name, color}]}`; `color` is the base colour for swatches. |
+
+## Stamps
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/stamps` | The starter pack: `{pack, stamps:[{id, name, size}]}` (size in cells). |
+| GET | `/api/stamps/{id}/icon.png` | A 64 px icon for palettes. |
 
 ## Tiles
 

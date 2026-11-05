@@ -256,6 +256,31 @@ async fn list_materials() -> Json<serde_json::Value> {
     }))
 }
 
+/// `GET /api/stamps` — the starter stamp pack.
+async fn list_stamps() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "pack": "starter",
+        "stamps": ndcart_paint::stamps().iter().map(|s| serde_json::json!({
+            "id": s.id, "name": s.name, "size": s.size,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// `GET /api/stamps/{id}/icon.png` — a 64 px icon for the palette.
+async fn stamp_icon_png(Path(id): Path<String>) -> Result<Response, ApiError> {
+    let def =
+        ndcart_paint::find_stamp(&id).ok_or_else(|| CoreError::NotFound(format!("stamp {id}")))?;
+    let png = tiles::stamp_icon(def, 64);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        png,
+    )
+        .into_response())
+}
+
 /// `GET /api/docs/{id}/lint[?floor=ID]` — the Problems panel: deterministic
 /// checks with undoable fixes (`fix` is an op you can POST to `/ops`).
 async fn lint_doc(
@@ -553,6 +578,8 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/export/png", get(export_png))
         .route("/api/docs/{id}/lint", get(lint_doc))
         .route("/api/materials", get(list_materials))
+        .route("/api/stamps", get(list_stamps))
+        .route("/api/stamps/{id}/icon.png", get(stamp_icon_png))
         .route("/api/convert", post(convert_image))
         .layer(axum::extract::DefaultBodyLimit::max(
             convert::MAX_INPUT_BYTES,

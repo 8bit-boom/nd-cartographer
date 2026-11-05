@@ -16,6 +16,7 @@
     <button id="tool-paint" class="tool" title="Paint cells (drag)">🖌 Paint</button>
     <button id="tool-brush" class="tool" title="Brush: freehand material (R). Pen pressure and tilt shape the line">🖍 Brush</button>
     <button id="tool-erase" class="tool" title="Eraser: reveals the room layer beneath (E)">🧽 Erase</button>
+    <button id="tool-stamp" class="tool" title="Stamp: place a prop (S). , and . rotate, F flips">📦 Stamp</button>
     <button id="tool-door" class="tool" title="Door on a cell edge (click an edge again to remove)">🚪 Door</button>
     <button id="tool-window" class="tool" title="Window on a cell edge">🪟 Window</button>
     <span id="palette"></span>
@@ -48,6 +49,15 @@
     <label>Rough edge <input type="range" id="br-rough" min="0" max="1" step="0.05" value="0.2"></label>
     <label>Density <input type="range" id="br-density" min="0.05" max="1" step="0.05" value="0.6"></label>
     <span class="dim">[ ] size</span>
+  </div>
+  <div id="stampbar" hidden>
+    <span id="stamp-palette"></span>
+    <label>Scale <input type="range" id="st-scale" min="0.3" max="3" step="0.1" value="1"></label>
+    <label>Rotate <input type="range" id="st-rot" min="0" max="345" step="15" value="0"><output id="st-rot-o">0°</output></label>
+    <label><input type="checkbox" id="st-flip"> flip</label>
+    <label><input type="checkbox" id="st-shadow" checked> shadow</label>
+    <label><input type="checkbox" id="st-snap" checked> snap ½ cell</label>
+    <span class="dim">, . rotate · F flip</span>
   </div>
   <aside id="problems" hidden>
     <h3>Problems <button id="problems-close" title="Close">×</button></h3>

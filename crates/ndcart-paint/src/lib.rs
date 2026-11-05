@@ -14,10 +14,12 @@
 mod brush;
 mod noise;
 mod pack;
+mod stamps;
 
 pub use brush::{stroke_salt, Prepared, MAX_DOTS};
 pub use noise::{fbm, hash2, rand01, value_noise};
 pub use pack::{find, starter, Material, Pattern};
+pub use stamps::{find_stamp, stamps, Prim, StampDef};
 
 /// A colour, 8 bits per channel.
 pub type Rgb = [u8; 3];

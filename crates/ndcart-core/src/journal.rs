@@ -53,6 +53,19 @@ pub enum Op {
     RemoveStroke {
         id: String,
     },
+    /// Place a stamp (a prop) on top of the stamp z-order, or at `index`.
+    AddStamp {
+        stamp: crate::stamp::Stamp,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+    },
+    /// Move / rotate / re-tint a placed stamp (same id), keeping its z-order.
+    UpdateStamp {
+        stamp: crate::stamp::Stamp,
+    },
+    RemoveStamp {
+        id: String,
+    },
     /// Several ops as one undoable step.
     Batch {
         ops: Vec<Op>,
@@ -178,6 +191,30 @@ impl Op {
                     index: Some(index),
                 })
             }
+            Op::AddStamp { stamp, .. } => Ok(Op::RemoveStamp {
+                id: stamp.id.clone(),
+            }),
+            Op::UpdateStamp { stamp } => {
+                let prev = floor
+                    .stamps
+                    .iter()
+                    .find(|s| s.id == stamp.id)
+                    .ok_or_else(|| CoreError::NotFound(format!("stamp {}", stamp.id)))?;
+                Ok(Op::UpdateStamp {
+                    stamp: prev.clone(),
+                })
+            }
+            Op::RemoveStamp { id } => {
+                let index = floor
+                    .stamps
+                    .iter()
+                    .position(|s| s.id == *id)
+                    .ok_or_else(|| CoreError::NotFound(format!("stamp {id}")))?;
+                Ok(Op::AddStamp {
+                    stamp: floor.stamps[index].clone(),
+                    index: Some(index),
+                })
+            }
             Op::Batch { ops } => {
                 // Compute the batch inverse by walking a scratch copy of the
                 // floor forward through the batch.
@@ -208,6 +245,9 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::RemoveLabel { id } => floor.remove_label(id)?,
         Op::AddStroke { stroke, index } => floor.add_stroke(stroke.clone(), *index)?,
         Op::RemoveStroke { id } => floor.remove_stroke(id)?,
+        Op::AddStamp { stamp, index } => floor.add_stamp(stamp.clone(), *index)?,
+        Op::UpdateStamp { stamp } => floor.update_stamp(stamp.clone())?,
+        Op::RemoveStamp { id } => floor.remove_stamp(id)?,
         Op::Batch { ops } => {
             for op in ops {
                 apply_op(floor, op)?;
@@ -223,6 +263,12 @@ pub struct JournalEntry {
     /// The inverse as computed at journal time; undo applies this as a new
     /// op (so redo stays possible by journal order, and nothing is deleted).
     pub inverse: Op,
+    /// Set on an entry that *is* an undo: the index of the entry it reverses.
+    /// Forward entries are never rewritten, so replaying the journal from the
+    /// start always reproduces the document, and a second undo steps back
+    /// further instead of toggling the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undoes: Option<usize>,
 }
 
 #[derive(Default)]
@@ -251,6 +297,7 @@ impl Journal {
         self.entries.push(JournalEntry {
             op: op.clone(),
             inverse,
+            undoes: None,
         });
         Ok(())
     }
@@ -258,28 +305,36 @@ impl Journal {
     /// Low-level append for callers that apply ops themselves (the store's
     /// batch path, the bench). Validation is the caller's duty.
     pub fn push_entry(&mut self, op: Op, inverse: Op) {
-        self.entries.push(JournalEntry { op, inverse });
+        self.entries.push(JournalEntry {
+            op,
+            inverse,
+            undoes: None,
+        });
     }
 
-    /// Undo the last entry: apply its inverse as a NEW entry (the journal is
-    /// append-only; redo = journal position, which M0's server exposes by
-    /// refusing to undo past the start).
+    /// Undo the most recent entry that has not been undone yet: apply its
+    /// stored inverse and APPEND that as a new entry marked `undoes`. Nothing is
+    /// rewritten or deleted (append-only), and repeated undo walks back through
+    /// history.
     pub fn undo_last(&mut self, floor: &mut FloorDoc) -> CoreResult<bool> {
-        let last = self
-            .entries
-            .len()
-            .checked_sub(1)
+        let mut undone = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            if let Some(i) = e.undoes {
+                undone.insert(i);
+            }
+        }
+        let target = (0..self.entries.len())
+            .rev()
+            .find(|i| self.entries[*i].undoes.is_none() && !undone.contains(i))
             .ok_or_else(|| CoreError::NotFound("nothing to undo".to_string()))?;
-        let inverse = self.entries[last].inverse.clone();
-        let forward = self.entries[last].op.clone();
+        let inverse = self.entries[target].inverse.clone();
         let redo_inverse = inverse.inverse_against(floor)?;
         apply_op(floor, &inverse)?;
-        // Swap the entry so the journal stays consistent going forward.
-        self.entries[last] = JournalEntry {
+        self.entries.push(JournalEntry {
             op: inverse,
             inverse: redo_inverse,
-        };
-        let _ = forward; // kept above only for clarity
+            undoes: Some(target),
+        });
         Ok(true)
     }
 
@@ -676,5 +731,134 @@ mod tests {
         j2.push(&mut f2, &batch).unwrap();
         j2.undo_last(&mut f2).unwrap();
         assert!(f2.strokes.is_empty());
+    }
+
+    fn stamp(id: &str, x: f32) -> crate::stamp::Stamp {
+        crate::stamp::Stamp {
+            id: id.into(),
+            asset: "crate".into(),
+            x,
+            y: 1.0,
+            scale: 1.0,
+            rotation: 0.0,
+            flip: false,
+            tint: None,
+            shadow: true,
+        }
+    }
+
+    #[test]
+    fn stamps_add_move_remove_and_undo_exactly() {
+        let mut floor = FloorDoc::new("f".into(), "G".into());
+        let mut j = Journal::default();
+        for (id, x) in [("a", 1.0), ("b", 2.0), ("c", 3.0)] {
+            j.push(
+                &mut floor,
+                &Op::AddStamp {
+                    stamp: stamp(id, x),
+                    index: None,
+                },
+            )
+            .unwrap();
+        }
+        let ids = |f: &FloorDoc| f.stamps.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        // Move b: z-order is kept, and undo restores the exact old placement.
+        j.push(
+            &mut floor,
+            &Op::UpdateStamp {
+                stamp: stamp("b", 9.0),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (ids(&floor), floor.stamps[1].x),
+            (vec!["a".into(), "b".into(), "c".into()], 9.0)
+        );
+        j.undo_last(&mut floor).unwrap();
+        assert_eq!(floor.stamps[1].x, 2.0);
+        // Remove the middle one and undo: back in the middle.
+        j.push(&mut floor, &Op::RemoveStamp { id: "b".into() })
+            .unwrap();
+        j.undo_last(&mut floor).unwrap();
+        assert_eq!(ids(&floor), ["a", "b", "c"]);
+        // Refusals are never journaled: duplicate id, updating a missing stamp, bad number.
+        let n = j.len();
+        let mut bad = stamp("z", 0.0);
+        bad.scale = f32::NAN;
+        for op in [
+            Op::AddStamp {
+                stamp: stamp("a", 0.0),
+                index: None,
+            },
+            Op::AddStamp {
+                stamp: bad,
+                index: None,
+            },
+            Op::UpdateStamp {
+                stamp: stamp("nope", 0.0),
+            },
+            Op::RemoveStamp { id: "nope".into() },
+        ] {
+            assert!(j.push(&mut floor, &op).is_err());
+        }
+        assert_eq!(j.len(), n);
+        // Replay from NDJSON reproduces the floor.
+        let back = Journal::from_ndjson(&j.to_ndjson()).unwrap();
+        let mut fresh = FloorDoc::new("f".into(), "G".into());
+        back.replay_into(&mut fresh).unwrap();
+        assert_eq!(fresh.stamps, floor.stamps);
+    }
+
+    #[test]
+    fn repeated_undo_walks_back_and_replay_always_matches() {
+        let mut floor = FloorDoc::new("f".into(), "G".into());
+        let mut j = Journal::default();
+        for (id, x) in [("a", 1.0), ("b", 2.0), ("c", 3.0)] {
+            j.push(
+                &mut floor,
+                &Op::AddStamp {
+                    stamp: stamp(id, x),
+                    index: None,
+                },
+            )
+            .unwrap();
+        }
+        // Undo twice: c then b are gone (the old swap would have toggled c back).
+        j.undo_last(&mut floor).unwrap();
+        j.undo_last(&mut floor).unwrap();
+        assert_eq!(
+            floor
+                .stamps
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
+        // Forward entries are intact and undo entries are marked.
+        assert_eq!(j.len(), 5);
+        assert_eq!(j.entries()[3].undoes, Some(2));
+        assert_eq!(j.entries()[4].undoes, Some(1));
+        // A new edit after undo, then replay from scratch == the live floor.
+        j.push(
+            &mut floor,
+            &Op::AddStamp {
+                stamp: stamp("d", 4.0),
+                index: None,
+            },
+        )
+        .unwrap();
+        let mut fresh = FloorDoc::new("f".into(), "G".into());
+        Journal::from_ndjson(&j.to_ndjson())
+            .unwrap()
+            .replay_into(&mut fresh)
+            .unwrap();
+        assert_eq!(fresh.stamps, floor.stamps);
+        // Undo everything, then one more is a clean error, not a panic.
+        while j.undo_last(&mut floor).is_ok() {}
+        assert!(floor.stamps.is_empty());
+        assert!(j.undo_last(&mut floor).is_err());
+        // Old journals (written before `undoes` existed) still load.
+        let old = r#"{"op":{"t":"remove_light","id":"x"},"inverse":{"t":"remove_light","id":"x"}}"#;
+        assert!(Journal::from_ndjson(old).is_ok());
     }
 }

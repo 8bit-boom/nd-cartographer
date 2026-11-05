@@ -109,3 +109,16 @@ canvas#canvas.panning { cursor: grabbing; }
 #brushbar input[type=range] { width: 90px; }
 #brushbar select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; }
 #brushbar output { min-width: 2.2em; color: var(--text); }
+
+#stampbar {
+  position: absolute; left: 10px; top: 10px; z-index: 4;
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  background: rgba(29, 32, 38, 0.92); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 12px; max-width: calc(100% - 20px);
+}
+#stampbar[hidden] { display: none; }
+#stampbar label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+#stamp-palette { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+#stamp-palette button { padding: 2px; border-radius: 6px; line-height: 0; }
+#stamp-palette button.active { border-color: var(--accent); background: rgba(0,179,230,0.18); }
+#stamp-palette img { width: 34px; height: 34px; }

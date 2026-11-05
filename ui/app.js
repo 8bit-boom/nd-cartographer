@@ -164,15 +164,17 @@ const EDGE_TOOLS = { door: 'door', window: 'window' };
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'brush', 'erase', 'door', 'window']) {
+  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
   document.getElementById('brushbar').hidden = !(tool === 'brush' || tool === 'erase');
+  document.getElementById('stampbar').hidden = tool !== 'stamp';
   statusEl.textContent =
     tool === 'paint' ? `Painting ${activeItem().name}`
     : tool === 'brush' ? `Brush: ${activeItem().name} — drag to paint (pressure and tilt count)`
     : tool === 'erase' ? 'Eraser: drag to reveal the room layer beneath'
+    : tool === 'stamp' ? `Stamp: click to place a ${state.stamp?.name || 'prop'} (, . rotate · F flip)`
     : tool in EDGE_TOOLS ? `Click a cell edge to place a ${tool}; click it again to remove`
     : 'Pan (drag) · wheel zooms';
 }
@@ -377,6 +379,63 @@ for (const id of ['br-size']) {
   brushEl(id).oninput = () => { brushEl('br-size-o').textContent = brushEl(id).value; };
 }
 
+// ---------- stamps (props) ----------
+
+state.stamp = null;      // {id, name, size}
+let STAMPS = [];
+
+function rotateStamp(deg) {
+  const el = document.getElementById('st-rot');
+  el.value = String((((parseInt(el.value, 10) + deg) % 360) + 360) % 360);
+  document.getElementById('st-rot-o').textContent = `${el.value}°`;
+}
+
+async function loadStamps() {
+  try {
+    STAMPS = (await api('GET', '/api/stamps')).stamps;
+  } catch { STAMPS = []; }
+  const wrap = document.getElementById('stamp-palette');
+  wrap.textContent = '';
+  for (const s of STAMPS) {
+    const b = document.createElement('button');
+    b.title = s.name;
+    b.className = state.stamp?.id === s.id ? 'active' : '';
+    const img = document.createElement('img');
+    img.src = `/api/stamps/${s.id}/icon.png`;
+    img.alt = s.name;
+    b.appendChild(img);
+    b.onclick = () => { state.stamp = s; loadStampsSelection(); setTool('stamp'); };
+    wrap.appendChild(b);
+  }
+  if (!state.stamp && STAMPS.length) state.stamp = STAMPS[0];
+}
+
+function loadStampsSelection() {
+  [...document.getElementById('stamp-palette').children].forEach((b, i) =>
+    b.classList.toggle('active', STAMPS[i]?.id === state.stamp?.id));
+}
+
+async function placeStamp(wx, wy) {
+  if (!state.stamp) return;
+  const s = ppc();
+  let x = wx / s, y = wy / s;
+  if (document.getElementById('st-snap').checked) { x = Math.round(x * 2) / 2; y = Math.round(y * 2) / 2; }
+  const stamp = {
+    id: 'pp_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+    asset: state.stamp.id,
+    x, y,
+    scale: parseFloat(document.getElementById('st-scale').value),
+    rotation: (parseInt(document.getElementById('st-rot').value, 10) * Math.PI) / 180,
+    flip: document.getElementById('st-flip').checked,
+    shadow: document.getElementById('st-shadow').checked,
+  };
+  await postOps([{ t: 'add_stamp', stamp }]);
+}
+
+document.getElementById('st-rot').oninput = (e) => {
+  document.getElementById('st-rot-o').textContent = `${e.target.value}°`;
+};
+
 // ---------- input ----------
 
 let dragging = null; // {sx, sy, px, py, moved}
@@ -388,6 +447,11 @@ canvas.addEventListener('pointerdown', (e) => {
   if ((state.tool === 'brush' || state.tool === 'erase') && e.button === 0) {
     startStroke(wx, wy, e);
     dragging = { stroking: true };
+    return;
+  }
+  if (state.tool === 'stamp' && e.button === 0) {
+    placeStamp(wx, wy);
+    dragging = null;
     return;
   }
   if (state.tool in EDGE_TOOLS && e.button === 0) {
@@ -463,6 +527,10 @@ const KEYS = [
   { key: 'b', label: 'Paint tool', run: () => setTool('paint') },
   { key: 'r', label: 'Brush tool', run: () => setTool('brush') },
   { key: 'e', label: 'Eraser tool', run: () => setTool('erase') },
+  { key: 's', label: 'Stamp tool', run: () => setTool('stamp') },
+  { key: ',', label: 'Rotate stamp left', run: () => rotateStamp(-15) },
+  { key: '.', label: 'Rotate stamp right', run: () => rotateStamp(15) },
+  { key: 'f', label: 'Flip stamp', run: () => { const f = document.getElementById('st-flip'); f.checked = !f.checked; } },
   { key: '[', label: 'Smaller brush', run: () => nudgeSize(-1) },
   { key: ']', label: 'Larger brush', run: () => nudgeSize(1) },
   { key: 'd', label: 'Door tool', run: () => setTool('door') },
@@ -556,7 +624,7 @@ async function refreshProblems() {
 // Delete = remove a light or note. Data comes from the server's `outline`.
 
 const treeEl = document.getElementById('tree');
-const treeOpen = { rooms: true, lights: true, labels: true };
+const treeOpen = { rooms: true, lights: true, labels: true, stamps: true };
 let treeFocus = null;   // data-key of the focused row, kept across rebuilds
 
 function toggleOutline(force) {
@@ -601,6 +669,7 @@ function buildOutline() {
     ['rooms', 'Rooms', o.spaces.length],
     ['lights', 'Lights', o.lights.length],
     ['labels', 'Notes', o.labels.length],
+    ['stamps', 'Props', (o.stamps || []).length],
   ];
   for (const [g, title, n] of groups) {
     const head = addRow(treeEl, `g:${g}`, 1, `${esc(title)} <span class="meta">${n}</span>`, `${title}, ${n}`);
@@ -623,6 +692,13 @@ function buildOutline() {
       r.onclick = () => { focusRow(r); centerOn({ x: l.cell[0], y: l.cell[1] }); };
       r.ondeleterequest = () => postOps([{ t: 'remove_light', id: l.id }]);
       r.cell = l.cell;
+    }
+    if (g === 'stamps') for (const st of (o.stamps || [])) {
+      const name = STAMPS.find(x => x.id === st.asset)?.name || st.asset;
+      const r = addRow(treeEl, `p:${st.id}`, 2, `${esc(name)}<span class="meta">${st.cell[0]}, ${st.cell[1]}</span>`, `Prop ${name} at ${st.cell[0]}, ${st.cell[1]}`);
+      r.dataset.kind = 'stamp';
+      r.onclick = () => { focusRow(r); centerOn({ x: st.cell[0], y: st.cell[1] }); };
+      r.ondeleterequest = () => postOps([{ t: 'remove_stamp', id: st.id }]);
     }
     if (g === 'labels') for (const l of o.labels) {
       const r = addRow(treeEl, `n:${l.id}`, 2, `${esc(l.text)}<span class="meta">${l.gm_only ? 'GM only' : ''}</span>`,
@@ -709,6 +785,7 @@ document.getElementById('tool-pan').onclick = () => setTool('pan');
 document.getElementById('tool-paint').onclick = () => setTool('paint');
 document.getElementById('tool-brush').onclick = () => setTool('brush');
 document.getElementById('tool-erase').onclick = () => setTool('erase');
+document.getElementById('tool-stamp').onclick = () => setTool('stamp');
 document.getElementById('tool-door').onclick = () => setTool('door');
 document.getElementById('tool-window').onclick = () => setTool('window');
 document.getElementById('btn-problems').onclick = () => toggleProblems();
@@ -753,6 +830,7 @@ window.addEventListener('resize', resizeCanvas);
     }
   } catch { /* flat palette */ }
   buildPalette();
+  loadStamps();
   resizeCanvas();
   try {
     state.docId = await ensureDoc();

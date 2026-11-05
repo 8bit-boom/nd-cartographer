@@ -1049,10 +1049,7 @@ first-party procedural pack; the brush engine followed: strokes as journal ops w
 scatter brushes, an eraser that reveals the room layer, all deterministic and
 tile-identical (see ARCHITECTURE). Stamps with drop shadows remain.
 
-**Known wrinkle (open):** wall ids are generated fresh on every derivation, so each
-re-publish replaces nd-world's walls with new ids and any door the table had opened
-snaps back to its authored state. Stable ids (derived from the edge) would let a
-re-publish keep runtime door state; not done yet.
+**Resolved:** wall ids are now stable (derived from the edge), so a re-publish keeps nd-world's runtime door state for any door that has not moved.
 
 **Image formats** — exports support PNG, WebP and AVIF (owner request). UVTT pictures
 stay PNG/WebP (the consumers can't read AVIF). Lossy WebP for cap-fitting is a
