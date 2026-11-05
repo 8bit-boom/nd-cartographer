@@ -87,6 +87,9 @@ struct FloorView {
     rivers: Vec<ndcart_core::River>,
     #[serde(skip_serializing_if = "Option::is_none")]
     canvas: Option<[u32; 2]>,
+    markers: Vec<ndcart_core::Marker>,
+    regions: Vec<ndcart_core::Region>,
+    routes: Vec<ndcart_core::Route>,
 }
 
 #[derive(Serialize)]
@@ -127,6 +130,9 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         }),
         rivers: floor.rivers.clone(),
         canvas: floor.canvas,
+        markers: floor.markers.clone(),
+        regions: floor.regions.clone(),
+        routes: floor.routes.clone(),
     }
 }
 

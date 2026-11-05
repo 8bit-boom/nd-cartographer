@@ -1,8 +1,9 @@
 # nd-cartographer — a standalone TTRPG map creator & editor, with deep nd-world integration
 
-**Status (2026-11-05, revised): M0 skeleton is built and M1a is under way — see
-[ARCHITECTURE.md](ARCHITECTURE.md) for what exists. This document is the design; §19
-records the review pass that revised the milestone order and corrected nd-world facts.**
+**Status (2026-11-05, revised): M0 and M1 are complete, M2 is mostly built — see
+[ARCHITECTURE.md](ARCHITECTURE.md) for what exists and §20 below for the done/remaining
+table. This document is the design; §19 records the review pass that revised the milestone
+order and corrected nd-world facts.**
 
 Plan for a Rust desktop + Docker application that is a **full map creator in its own
 right** — battle-map painting in the Dungeondraft class, world/region map-making in the
@@ -1077,6 +1078,24 @@ downscaling for publish.
 - Crash-safe saves (temp file + fsync + rename) — implemented.
 - Doc/plan drift: the code uses `manifest.json`, PNG tiles at `{x}_{y}`, port 8300;
   the plan's `manifest.toml` / `.webp` / port 8000 are the eventual `.ndmap` shape.
+
+---
+
+## 20. Where the work stands
+
+| Milestone | State | Built | Still to do |
+|---|---|---|---|
+| **M0 skeleton** | done except three items | document model, append-only linear-history journal, sparse room grid, walls-from-rooms (stable ids), tile baker, browser viewport, token gate, atomic saves, Docker, `bench` | WebGL viewport (Canvas2D today), WebSocket change feed, the 100k-object/60 fps and kill -9 acceptance tests; Tauri shell is parked for M5 |
+| **M1 battle-map studio** | **done** | materials + edge blending, brush engine (round/scatter, pressure/tilt, eraser), stamps with shadows, doors/windows, linter v1, outliner v1, split exports, UVTT in/out, publish A (verified on the Python app and the Rust-only gateway), first-party starter pack, PNG/WebP/AVIF | lossy WebP (needs libwebp), pattern-stamp brushes and fill/line/rect variants |
+| **M2 overland studio** | **mostly done** | heightmap terrain (sparse chunks, brush + river carving, exact undo), shading with global grading, seeded world generator, markers/regions/routes, publish B (verified on both images), world-map UI | typography (text-along-path needs a bundled OFL font and a glyph rasterizer), mass scatter (density fields), biome brushes, hex/square overlay, spline rivers/roads |
+| **M3 structure & scale** | not started | — | multi-floor + onion skin (the journal needs a floor id per entry first), zones, bulk ops, symmetry, prefabs, checkpoints, project gallery, generators (dungeon/cave/building/city), batch publish, full linter |
+| **M4 play & AI** | not started | — | player-visibility preview, MapSpec + proposals, LLM/imagegen clients through nd-world's queue, AI asset synthesis, lore grounding |
+| **M5 ecosystem & 1.0** | not started | — | art-pack import, Foundry export/import, PDF/print, table remote, `ndcart doctor`, installers, docs set, release |
+
+Known costs worth knowing before M3: `save_doc` rewrites the whole journal on every op (a
+terrain-heavy document grows MBs of undo snapshots; the append-only segment format planned for
+`.ndmap` fixes it); prepared strokes are rebuilt per tile; underlays are bilinear without
+mip-maps. The Docker image has not been built since the AVIF/TLS/terrain crates were added.
 
 ---
 

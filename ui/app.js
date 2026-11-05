@@ -202,7 +202,8 @@ function render() {
   drawStrokePreview();
   drawLiveStroke();
   drawTerrainOverlay();
-  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); drawTerrainOverlay(); });
+  drawOverlayDraft();
+  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); drawTerrainOverlay(); drawOverlayDraft(); });
 }
 
 const tileCache = new Map(); // url -> Image
@@ -247,7 +248,7 @@ const TERRAIN_TOOLS = ['raise', 'lower', 'smooth', 'flatten', 'roughen'];
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river']) {
+  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'region', 'route']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
@@ -261,6 +262,9 @@ function setTool(tool) {
     : tool === 'stamp' ? `Stamp: click to place a ${state.stamp?.name || 'prop'} (, . rotate · F flip)`
     : TERRAIN_TOOLS.includes(tool) ? `${tool[0].toUpperCase()}${tool.slice(1)}: drag over the map`
     : tool === 'river' ? 'River: click points from source to mouth · Enter finishes · Esc cancels'
+    : tool === 'marker' ? 'Marker: click to place a point of interest'
+    : tool === 'region' ? 'Region: click the corners · Enter finishes · Esc cancels'
+    : tool === 'route' ? 'Route: click points along the way · Enter finishes · Esc cancels'
     : tool in EDGE_TOOLS ? `Click a cell edge to place a ${tool}; click it again to remove`
     : 'Pan (drag) · wheel zooms';
 }
@@ -582,9 +586,9 @@ function addRiverPoint(wx, wy) {
 
 async function finishRiver() {
   const pts = riverDraft;
-  riverDraft = null;
   if (state.tool !== 'river') return;
-  if (!pts || pts.length < 2) { render(); return; }
+  if (!pts || pts.length < 2) { render(); return; }   // too few points: keep drawing
+  riverDraft = null;
   const n = (state.doc.floors[0].rivers || []).length + 1;
   await postOps([{ t: 'add_river', river: {
     id: 'rv_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
@@ -651,6 +655,67 @@ document.getElementById('ts-regen').onclick = () => {
   }
 };
 
+// ---------- overlay: markers, regions, routes ----------
+
+let overlayDraft = null;    // [[x,y]] for a region or route in progress
+const newId = (p) => p + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+
+async function placeMarker(wx, wy) {
+  const label = window.prompt('Marker name', 'New place');
+  if (label === null) return;
+  const s = ppc();
+  await postOps([{ t: 'put_overlay', item: {
+    kind: 'marker', id: newId('mk'), x: +(wx / s).toFixed(3), y: +(wy / s).toFixed(3), label: label.trim().slice(0, 80),
+  } }]);
+}
+
+function addOverlayPoint(wx, wy) {
+  const s = ppc();
+  (overlayDraft ||= []).push([+(wx / s).toFixed(3), +(wy / s).toFixed(3)]);
+  render();
+}
+
+function finishDraft() {
+  if (state.tool === 'river') return finishRiver();
+  if (state.tool === 'region' || state.tool === 'route') return finishOverlayShape();
+}
+
+async function finishOverlayShape() {
+  const pts = overlayDraft;
+  const kind = state.tool;
+  if (!pts || pts.length < (kind === 'region' ? 3 : 2)) { render(); return; }   // too few: keep drawing
+  overlayDraft = null;
+  const name = window.prompt(kind === 'region' ? 'Region name' : 'Route name', kind === 'region' ? 'New region' : 'New route');
+  if (name === null) { render(); return; }
+  const item = kind === 'region'
+    ? { kind, id: newId('rg'), name: name.trim().slice(0, 80), points: pts, color: '#c0504d', opacity: 0.28 }
+    : { kind, id: newId('rt'), name: name.trim().slice(0, 80), points: pts, dashed: true };
+  await postOps([{ t: 'put_overlay', item }]);
+}
+
+function drawOverlayDraft() {
+  if (!overlayDraft || !overlayDraft.length) return;
+  const s = ppc();
+  ctx.save();
+  ctx.strokeStyle = state.tool === 'region' ? 'rgba(255,120,110,0.95)' : 'rgba(255,230,140,0.95)';
+  ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  overlayDraft.forEach((p, i) => { const [x, y] = worldToScreen(p[0] * s, p[1] * s); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  if (state.hover) { const [x, y] = worldToScreen(state.hover[0] * s, state.hover[1] * s); ctx.lineTo(x, y); }
+  ctx.stroke();
+  for (const p of overlayDraft) { const [x, y] = worldToScreen(p[0] * s, p[1] * s); ctx.fillStyle = '#fff'; ctx.fillRect(x - 3, y - 3, 6, 6); }
+  ctx.restore();
+}
+
+// A double-click finishes a polyline only if the two clicks landed on the same
+// spot; fast clicks at different corners are just fast clicks.
+let lastClick = { x: -99, y: -99, t: 0 };
+function isDoubleClick(e) {
+  const near = Math.hypot(e.offsetX - lastClick.x, e.offsetY - lastClick.y) < 8 && e.timeStamp - lastClick.t < 500;
+  lastClick = { x: e.offsetX, y: e.offsetY, t: e.timeStamp };
+  return near;
+}
+
 // ---------- input ----------
 
 let dragging = null; // {sx, sy, px, py, moved}
@@ -669,8 +734,18 @@ canvas.addEventListener('pointerdown', (e) => {
     dragging = { terrain: true };
     return;
   }
+  if (state.tool === 'marker' && e.button === 0) {
+    placeMarker(wx, wy);
+    dragging = null;
+    return;
+  }
+  if ((state.tool === 'region' || state.tool === 'route') && e.button === 0) {
+    if (isDoubleClick(e)) finishOverlayShape(); else addOverlayPoint(wx, wy);
+    dragging = null;
+    return;
+  }
   if (state.tool === 'river' && e.button === 0) {
-    if (e.detail >= 2) finishRiver(); else addRiverPoint(wx, wy);
+    if (isDoubleClick(e)) finishRiver(); else addRiverPoint(wx, wy);
     dragging = null;
     return;
   }
@@ -701,7 +776,7 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
   const [hx, hy] = screenToWorld(e.offsetX, e.offsetY);
   state.hover = [hx / ppc(), hy / ppc()];
-  if (TERRAIN_TOOLS.includes(state.tool) || state.tool === 'river') render();
+  if (TERRAIN_TOOLS.includes(state.tool) || ['river', 'region', 'route'].includes(state.tool)) render();
   if (!dragging) return;
   if (dragging.terrain) {
     const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
@@ -767,7 +842,9 @@ const KEYS = [
   { key: 'g', label: 'Flatten land (world maps)', run: () => regionOnly('flatten') },
   { key: 'x', label: 'Roughen land (world maps)', run: () => regionOnly('roughen') },
   { key: 'i', label: 'River tool (world maps)', run: () => regionOnly('river') },
-  { key: 'Enter', label: 'Finish the river', run: () => finishRiver() },
+  { key: 'k', label: 'Marker tool (world maps)', run: () => regionOnly('marker') },
+  { key: 'u', label: 'Route tool (world maps)', run: () => regionOnly('route') },
+  { key: 'Enter', label: 'Finish the river / region / route', run: () => finishDraft() },
   { key: 's', label: 'Stamp tool', run: () => setTool('stamp') },
   { key: ',', label: 'Rotate stamp left', run: () => rotateStamp(-15) },
   { key: '.', label: 'Rotate stamp right', run: () => rotateStamp(15) },
@@ -781,14 +858,22 @@ const KEYS = [
   { key: 'o', label: 'Outline (focus the tree)', run: () => toggleOutline() },
   { key: 'z', ctrl: true, label: 'Undo', run: () => undo() },
   { key: 'F1', label: 'This help', run: () => toggleHelp() },
-  { key: 'Escape', label: 'Pan tool / close panels', run: () => { riverDraft = null; toggleHelp(false); setTool('pan'); } },
+  { key: 'Escape', label: 'Pan tool / close panels', run: () => { riverDraft = null; overlayDraft = null; toggleHelp(false); setTool('pan'); } },
 ];
 
 function keyLabel(k) { return (k.ctrl ? 'Ctrl+' : '') + (k.key.length === 1 ? k.key.toUpperCase() : k.key); }
 
 window.addEventListener('keydown', (e) => {
   // Inside the outline tree (or any text field) letters belong to it, not to the tools.
-  if (e.target.closest && e.target.closest('#outliner, input, textarea') && !['F1', 'Escape'].includes(e.key)) return;
+  if (e.target.closest) {
+    const inField = e.target.closest('input, textarea');
+    const inTree = e.target.closest('#outliner');
+    const combo = e.ctrlKey || e.metaKey;
+    // Text fields keep every key (including their own Ctrl+Z); the tree keeps plain
+    // keys for itself but lets Ctrl-combinations (undo) through.
+    if (inField && !['F1', 'Escape'].includes(e.key)) return;
+    if (inTree && !combo && !['F1', 'Escape'].includes(e.key)) return;
+  }
   const k = KEYS.find(x => x.key.toLowerCase() === e.key.toLowerCase() && !!x.ctrl === (e.ctrlKey || e.metaKey));
   if (!k) return;
   e.preventDefault();
@@ -865,7 +950,7 @@ async function refreshProblems() {
 // Delete = remove a light or note. Data comes from the server's `outline`.
 
 const treeEl = document.getElementById('tree');
-const treeOpen = { rooms: true, lights: true, labels: true, stamps: true };
+const treeOpen = { rooms: true, lights: true, labels: true, stamps: true, markers: true, regions: true, routes: true };
 let treeFocus = null;   // data-key of the focused row, kept across rebuilds
 
 function toggleOutline(force) {
@@ -911,6 +996,9 @@ function buildOutline() {
     ['lights', 'Lights', o.lights.length],
     ['labels', 'Notes', o.labels.length],
     ['stamps', 'Props', (o.stamps || []).length],
+    ['markers', 'Markers', (state.doc.floors[0].markers || []).length],
+    ['regions', 'Regions', (state.doc.floors[0].regions || []).length],
+    ['routes', 'Routes', (state.doc.floors[0].routes || []).length],
   ];
   for (const [g, title, n] of groups) {
     const head = addRow(treeEl, `g:${g}`, 1, `${esc(title)} <span class="meta">${n}</span>`, `${title}, ${n}`);
@@ -933,6 +1021,25 @@ function buildOutline() {
       r.onclick = () => { focusRow(r); centerOn({ x: l.cell[0], y: l.cell[1] }); };
       r.ondeleterequest = () => postOps([{ t: 'remove_light', id: l.id }]);
       r.cell = l.cell;
+    }
+    if (g === 'markers' || g === 'regions' || g === 'routes') {
+      const f = state.doc.floors[0];
+      const kind = g === 'markers' ? 'marker' : g === 'regions' ? 'region' : 'route';
+      for (const it of f[g]) {
+        const name = it.label ?? it.name ?? it.id;
+        const where = kind === 'marker' ? `${it.x.toFixed(1)}, ${it.y.toFixed(1)}` : `${it.points.length} points`;
+        const r = addRow(treeEl, `o:${kind}:${it.id}`, 2, `${esc(name)}<span class="meta">${where}</span>`, `${kind} ${name}, ${where}`);
+        r.dataset.kind = kind;
+        const pt = kind === 'marker' ? { x: it.x, y: it.y } : { x: it.points[0][0], y: it.points[0][1] };
+        r.onclick = () => { focusRow(r); centerOn(pt); };
+        r.ondeleterequest = () => postOps([{ t: 'remove_overlay', kind, id: it.id }]);
+        r.onrenamerequest = () => {
+          const n = window.prompt(`Rename ${kind}`, name);
+          if (n === null || !n.trim() || n.trim() === name) return;
+          const next = { ...it, kind, ...(kind === 'marker' ? { label: n.trim().slice(0, 80) } : { name: n.trim().slice(0, 80) }) };
+          postOps([{ t: 'put_overlay', item: next }]);
+        };
+      }
     }
     if (g === 'stamps') for (const st of (o.stamps || [])) {
       const name = STAMPS.find(x => x.id === st.asset)?.name || st.asset;
@@ -1029,6 +1136,11 @@ document.getElementById('tool-erase').onclick = () => setTool('erase');
 document.getElementById('tool-stamp').onclick = () => setTool('stamp');
 document.getElementById('tool-door').onclick = () => setTool('door');
 document.getElementById('tool-window').onclick = () => setTool('window');
+// Every other tool button (terrain, river, marker, region, route, …) is wired the
+// same way, by its id (`tool-raise` -> `raise`), so a new button cannot be left dead.
+for (const btn of document.querySelectorAll('button.tool')) {
+  if (!btn.onclick) btn.onclick = () => setTool(btn.id.slice('tool-'.length));
+}
 document.getElementById('btn-problems').onclick = () => toggleProblems();
 document.getElementById('btn-outline').onclick = () => toggleOutline();
 document.getElementById('problems-close').onclick = () => toggleProblems(false);
