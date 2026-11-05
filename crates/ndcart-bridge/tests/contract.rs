@@ -1,7 +1,7 @@
 //! Contract tests against a faked nd-world (plan §12: wiremock per route).
 //! They pin the request shapes read out of nd-world's own handlers.
 
-use ndcart_bridge::{Bridge, BridgeError, DirectChat, PublishMap, PublishRegion};
+use ndcart_bridge::{Bridge, BridgeError, DirectChat, ImageRequest, PublishMap, PublishRegion};
 use ndcart_core::{Light, Wall, WallKind};
 use serde_json::json;
 use wiremock::matchers::{body_json, method, path, query_param};
@@ -622,4 +622,111 @@ async fn direct_chat_failures_are_told_apart() {
         .unwrap_err()
         .to_string()
         .contains("cannot reach"));
+}
+
+fn image_req() -> ImageRequest {
+    ImageRequest {
+        prompt: "weathered flagstones, top down".into(),
+        negative: String::new(),
+        width: 512,
+        height: 512,
+        steps: 20,
+        seed: 7,
+        init_image: None,
+        init_strength: 0.6,
+    }
+}
+
+#[tokio::test]
+async fn imagegen_job_lifecycle_start_poll_fetch() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/ai/imagegen/jobs"))
+        .and(query_param("w", "neon"))
+        .and(body_json(json!({"prompt": "weathered flagstones, top down", "negative": "", "width": 512, "height": 512, "steps": 20, "seed": 7})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"job_id": 41})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/ai/imagegen/jobs/41"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 41, "status": "done", "error": null, "urls": ["/uploads/ai-images/a.png"]})))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/uploads/ai-images/a.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1u8, 2, 3]))
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    let id = b.imagegen_start(&image_req()).await.unwrap();
+    assert_eq!(id, 41);
+    let job = b.imagegen_status(id).await.unwrap();
+    assert_eq!(
+        (job.status.as_str(), job.urls.len(), job.error),
+        ("done", 1, None)
+    );
+    assert_eq!(b.fetch_image(&job.urls[0]).await.unwrap(), vec![1, 2, 3]);
+    // Only same-server paths are fetched.
+    for bad in [
+        "http://evil.example/x.png",
+        "//evil.example/x.png",
+        "/uploads/../etc/passwd",
+        "uploads/a.png",
+    ] {
+        assert!(
+            b.fetch_image(bad)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected image address"),
+            "{bad}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn imagegen_init_image_and_failures() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/ai/imagegen/jobs"))
+        .and(body_json(json!({"prompt": "weathered flagstones, top down", "negative": "", "width": 512, "height": 512, "steps": 20, "seed": 7, "init_image": "/uploads/ai-images/seed.png", "init_strength": 0.6})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"job_id": 5})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    let mut r = image_req();
+    r.init_image = Some("/uploads/ai-images/seed.png".into());
+    assert_eq!(b.imagegen_start(&r).await.unwrap(), 5);
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&s)
+        .await;
+    assert!(Bridge::new(&s.uri(), None)
+        .unwrap()
+        .imagegen_start(&image_req())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not logged in"));
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/ai/imagegen/jobs/9"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"status": "error", "error": "no GPU", "urls": []})),
+        )
+        .mount(&s)
+        .await;
+    let job = Bridge::new(&s.uri(), None)
+        .unwrap()
+        .imagegen_status(9)
+        .await
+        .unwrap();
+    assert_eq!(
+        (job.status.as_str(), job.error.as_deref()),
+        ("error", Some("no GPU"))
+    );
 }

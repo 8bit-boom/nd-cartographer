@@ -36,6 +36,21 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
 
 | POST | `/api/docs/{id}/generate-map` | `{floor?, kind: dungeon\|cave\|building\|deck\|district, seed, width, height}` | 16–120 squares a side. Adds to the floor as one undoable step; same seed, same map. |
+| POST | `/api/docs/{id}/furnish` | `{floor?, spaces:[room ids], seed, only_empty?}` | Props from each room's name/kind, never in a doorway. One undo step. |
+| GET | `/api/search?q=` | – | Rooms, notes, markers, zones, regions, routes, floors and projects whose text holds every word typed. ≤100 hits with where they are. |
+| POST | `/api/docs/{id}/propose-world` | `{spec: WorldSpec, seed?}` | An overland map as a proposal (land/rivers, biome masks on dry ground, places, regions). World-map projects only. |
+| GET | `/api/docs/{id}/world-proposals/{pid}/preview?ppc=` | – | PNG. |
+| POST | `/api/docs/{id}/world-proposals/{pid}/accept` | – | Replaces the first floor's terrain/rivers; one undo step. DELETE the same path to reject. |
+| POST | `/api/docs/{id}/refine` | `{floor?, pins:[room ids], instruction}` | AI revises the floor (described as a spec) keeping the pinned rooms; returns `{spec}` to preview as a new floor. Needs an AI configured. |
+| POST | `/api/docs/{id}/style` | `{tone, palette:[#rrggbb…]}` | The project's house style (fed to drafts; the palette colours generated rooms). Empty clears. |
+| POST | `/api/draft-world` | `{prompt, doc?, lore?}` | Like `/api/draft` for a WorldSpec. `lore:true` reuses the world's location names (nd-world). |
+| GET | `/api/ai/status` | – | `{mode: nd-world\|standalone\|off, detail}`. Standalone = `ND_CARTO_LLM_URL` + `ND_CARTO_LLM_MODEL` (+ `ND_CARTO_LLM_KEY[_FILE]`), an OpenAI-compatible endpoint. |
+| POST | `/api/ai/image` | `{kind: underlay\|material\|prop, prompt, width?, height?, count?, seed?}` | Queue pictures through nd-world's imagegen in the background → `{job}`. nd-world only. |
+| GET | `/api/ai/jobs/{id}` | – | `{status: running\|done\|error\|cancelled, message, assets:[ids], seeds}`; POST `…/cancel`. |
+| POST | `/api/assets/{id}/make-material` | `{name, size?, seamless?, prompt?, seed?, ai?}` | Make the picture seamless and add it to the palette (`mat_…`). |
+| POST | `/api/assets/{id}/make-stamp` | `{name, size?, key?, tolerance?, prompt?, seed?, ai?}` | Cut the prop out of its flat background, trim it, add it to the props (`stp_…`). |
+| POST | `/api/stamps/{id}/tags` | `{tags}` | The GM's confirmed tags for a custom prop; `…/suggest-tags` asks the AI (suggestions only). |
+| POST | `/api/docs/{id}/underlay` | `{floor?, asset, x, y, w, h, opacity?}` | A stored picture behind the floor, one undo step. |
 | POST | `/api/docs/{id}/propose` | `{spec: MapSpec, seed?}` | Lay a room-graph spec out and hold it as a proposal (nothing changes). 400 with a fix-it message if the spec breaks a rule. |
 | GET | `/api/docs/{id}/proposals/{pid}/preview?floor=N&ppc=` | – | PNG of one proposed floor. |
 | POST | `/api/docs/{id}/proposals/{pid}/accept` | – | Adds the floors (and stairs) as new floors; undo with `undo-structure` once per floor. |

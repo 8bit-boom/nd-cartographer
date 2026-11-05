@@ -2,6 +2,7 @@
 //! run it (plan §4): `ndcart serve` (desktop/docker), `ndcart bench`.
 //! Desktop is the Tauri shell wrapping this same server (M0 ships serve).
 
+mod aijobs;
 mod assets;
 mod auth;
 mod convert;
@@ -10,6 +11,7 @@ mod draft;
 #[cfg(feature = "bridge")]
 mod publish;
 mod store;
+mod synth;
 mod text;
 mod tiles;
 mod worldspec;
@@ -283,14 +285,38 @@ fn pick_format(q: &ExportQuery) -> Result<tiles::ImageFormat, ApiError> {
 
 /// `GET /api/materials` — the starter pack: id, name and the base colour for swatches.
 async fn list_materials() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "pack": "starter",
-        "materials": ndcart_paint::starter().iter().map(|m| serde_json::json!({
-            "id": m.id,
-            "name": m.name,
-            "color": format!("#{:02x}{:02x}{:02x}", m.base[0], m.base[1], m.base[2]),
-        })).collect::<Vec<_>>(),
-    }))
+    let mut mats: Vec<serde_json::Value> = ndcart_paint::starter()
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id,
+                "name": m.name,
+                "color": format!("#{:02x}{:02x}{:02x}", m.base[0], m.base[1], m.base[2]),
+            })
+        })
+        .collect();
+    let a = assets::global();
+    for c in a.customs("material") {
+        // The swatch colour is the picture's average.
+        let colour = a
+            .get_pixmap(&c.asset)
+            .map(|p| {
+                let n = (p.pixels().len() as u64).max(1);
+                let (mut r, mut g, mut b) = (0u64, 0u64, 0u64);
+                for px in p.pixels() {
+                    let d = px.demultiply();
+                    r += u64::from(d.red());
+                    g += u64::from(d.green());
+                    b += u64::from(d.blue());
+                }
+                format!("#{:02x}{:02x}{:02x}", r / n, g / n, b / n)
+            })
+            .unwrap_or_else(|| "#888888".into());
+        mats.push(serde_json::json!({
+            "id": c.id, "name": c.name, "color": colour, "custom": true, "origin": c.origin,
+        }));
+    }
+    Json(serde_json::json!({ "pack": "starter", "materials": mats }))
 }
 
 /// `POST /api/assets` — raw image bytes in; `{id}` (their SHA-256) out. Anything
@@ -905,6 +931,163 @@ async fn search_maps(
     Ok(Json(serde_json::json!({ "hits": hits })))
 }
 
+#[derive(Deserialize)]
+struct AiImageBody {
+    /// `underlay`, `material` or `prop`.
+    kind: String,
+    prompt: String,
+    #[serde(default = "d_img")]
+    width: u32,
+    #[serde(default = "d_img")]
+    height: u32,
+    /// How many variants (1-4; a set shares a seed family).
+    #[serde(default = "one_usize")]
+    count: usize,
+    #[serde(default = "minus_one")]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    seed: i64,
+}
+fn d_img() -> u32 {
+    512
+}
+fn one_usize() -> usize {
+    1
+}
+
+/// `POST /api/ai/image` `{kind, prompt, width?, height?, count?, seed?}` — queue
+/// pictures through nd-world's imagegen in the background. Returns the job; poll
+/// `GET /api/ai/jobs/{id}`. Nothing is added anywhere until the GM accepts a picture.
+async fn ai_image(
+    body: Result<Json<AiImageBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    if !["underlay", "material", "prop"].contains(&b.kind.as_str()) {
+        return Err(ApiError(CoreError::Invalid(
+            "kind must be underlay, material or prop".into(),
+        )));
+    }
+    let prompt = b.prompt.trim().to_string();
+    if prompt.is_empty() || prompt.chars().count() > 1_000 {
+        return Err(ApiError(CoreError::Invalid(
+            "describe the picture in 1-1000 characters".into(),
+        )));
+    }
+    if !(64..=1536).contains(&b.width) || !(64..=1536).contains(&b.height) {
+        return Err(ApiError(CoreError::Invalid(
+            "width and height must be 64-1536 px".into(),
+        )));
+    }
+    let count = if b.kind == "underlay" {
+        1
+    } else {
+        b.count.clamp(1, 4)
+    };
+    #[cfg(feature = "bridge")]
+    {
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        if cfg.direct.is_some() {
+            return Err(ApiError(CoreError::Invalid(
+                "image generation needs nd-world's imagegen; a standalone text model cannot draw"
+                    .into(),
+            )));
+        }
+        let id = aijobs::register(&b.kind, &prompt, count)
+            .map_err(|m| ApiError(CoreError::CapExceeded(m)))?;
+        tokio::spawn(aijobs::run(
+            id.clone(),
+            cfg,
+            aijobs::Spec {
+                kind: b.kind,
+                prompt,
+                width: b.width,
+                height: b.height,
+                count,
+                seed: b.seed,
+            },
+        ));
+        Ok(Json(serde_json::json!({ "job": id })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = (count, prompt);
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
+}
+
+/// `GET /api/ai/jobs/{id}` — `{status, message, assets, seeds, …}`.
+async fn ai_job(Path(id): Path<String>) -> Result<Json<aijobs::AiJob>, ApiError> {
+    aijobs::get(&id)
+        .map(Json)
+        .ok_or_else(|| ApiError(CoreError::NotFound(format!("job {id}"))))
+}
+
+/// `POST /api/ai/jobs/{id}/cancel`.
+async fn ai_job_cancel(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    if aijobs::cancel(&id) {
+        Ok(Json(serde_json::json!({ "ok": true })))
+    } else {
+        Err(ApiError(CoreError::NotFound(format!(
+            "no running job {id}"
+        ))))
+    }
+}
+
+#[derive(Deserialize)]
+struct UnderlayBody {
+    #[serde(default)]
+    floor: Option<String>,
+    asset: String,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    #[serde(default = "one_f32")]
+    opacity: f32,
+}
+
+/// `POST /api/docs/{id}/underlay` `{floor?, asset, x, y, w, h, opacity?}` — put a
+/// stored picture behind the floor (cells), as one undoable step. A layer: it
+/// never changes walls or rooms.
+async fn set_underlay(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<UnderlayBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    if assets::global().get_bytes(&b.asset).is_none() {
+        return Err(ApiError(CoreError::NotFound(format!(
+            "picture {}",
+            b.asset
+        ))));
+    }
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor_id = match &b.floor {
+        Some(f) => f.clone(),
+        None => doc.floors[0].id.clone(),
+    };
+    let op = Op::SetUnderlay {
+        underlay: Some(ndcart_core::Underlay {
+            asset: b.asset,
+            x: b.x,
+            y: b.y,
+            w: b.w,
+            h: b.h,
+            opacity: b.opacity,
+        }),
+    };
+    doc.apply_ops(&floor_id, &[op])?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
+}
+
 /// `POST /api/docs/{id}/generate-map` `{floor?, kind, seed, width, height}` — a
 /// dungeon, cave, building, deck or city district drawn onto the floor as ONE
 /// undoable step (it adds to what is there; the same seed gives the same map).
@@ -1051,19 +1234,36 @@ async fn generate_world(
 
 /// `GET /api/stamps` — the starter stamp pack.
 async fn list_stamps() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
-        "pack": "starter",
-        "stamps": ndcart_paint::stamps().iter().map(|s| serde_json::json!({
-            "id": s.id, "name": s.name, "size": s.size,
-        })).collect::<Vec<_>>(),
-    }))
+    let mut stamps: Vec<serde_json::Value> = ndcart_paint::stamps()
+        .iter()
+        .map(|s| serde_json::json!({ "id": s.id, "name": s.name, "size": s.size }))
+        .collect();
+    let a = assets::global();
+    for c in a.customs("stamp") {
+        let aspect = a
+            .get_pixmap(&c.asset)
+            .map(|p| p.height() as f32 / p.width() as f32)
+            .unwrap_or(1.0);
+        stamps.push(serde_json::json!({
+            "id": c.id, "name": c.name, "size": [c.size, c.size * aspect],
+            "custom": true, "origin": c.origin, "tags": c.tags,
+        }));
+    }
+    Json(serde_json::json!({ "pack": "starter", "stamps": stamps }))
 }
 
 /// `GET /api/stamps/{id}/icon.png` — a 64 px icon for the palette.
 async fn stamp_icon_png(Path(id): Path<String>) -> Result<Response, ApiError> {
-    let def =
-        ndcart_paint::find_stamp(&id).ok_or_else(|| CoreError::NotFound(format!("stamp {id}")))?;
-    let png = tiles::stamp_icon(def, 64);
+    let png = if let Some(def) = ndcart_paint::find_stamp(&id) {
+        tiles::stamp_icon(def, 64)
+    } else if let Some(c) = assets::global().find_custom(&id, "stamp") {
+        let pm = assets::global()
+            .get_pixmap(&c.asset)
+            .ok_or_else(|| CoreError::NotFound(format!("stamp {id}")))?;
+        tiles::picture_icon(&pm, 64)
+    } else {
+        return Err(ApiError(CoreError::NotFound(format!("stamp {id}"))));
+    };
     Ok((
         [
             (header::CONTENT_TYPE, "image/png"),
@@ -1072,6 +1272,214 @@ async fn stamp_icon_png(Path(id): Path<String>) -> Result<Response, ApiError> {
         png,
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+struct MakeBody {
+    name: String,
+    /// Material: cells per repeat (default 2). Stamp: width in cells (default 1.5).
+    #[serde(default)]
+    size: Option<f32>,
+    /// Material: blend the picture so it tiles (default true).
+    #[serde(default = "yes_bool")]
+    seamless: bool,
+    /// Stamp: the background colour to remove (default: guessed from the corners).
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    tolerance: Option<f32>,
+    /// Where it came from, kept with it.
+    #[serde(default)]
+    prompt: String,
+    #[serde(default = "minus_one")]
+    seed: i64,
+    #[serde(default)]
+    ai: bool,
+}
+fn minus_one() -> i64 {
+    -1
+}
+
+fn provenance(b: &MakeBody) -> assets::Provenance {
+    assets::Provenance {
+        source: if b.ai { "ai" } else { "imported" }.into(),
+        prompt: b.prompt.chars().take(500).collect(),
+        seed: b.seed,
+        date: ndcart_core::doc::now_iso(),
+    }
+}
+
+fn check_name(name: &str) -> Result<String, ApiError> {
+    let n = name.trim();
+    if n.is_empty() || n.chars().count() > 60 {
+        return Err(ApiError(CoreError::Invalid(
+            "a name is 1-60 characters".into(),
+        )));
+    }
+    Ok(n.to_string())
+}
+
+#[derive(Deserialize)]
+struct TagsBody {
+    tags: Vec<String>,
+}
+
+/// `POST /api/stamps/{id}/tags` `{tags}` — the GM's confirmed tags for a custom prop
+/// (lowercase words, at most 8; invalid ones are refused, not silently dropped).
+async fn set_stamp_tags(
+    Path(id): Path<String>,
+    body: Result<Json<TagsBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let cleaned = clean_tags_strict(&b.tags)?;
+    assets::global()
+        .find_custom(&id, "stamp")
+        .ok_or_else(|| CoreError::NotFound(format!("custom prop {id}")))?;
+    assets::global()
+        .set_tags(&id, cleaned.clone())
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok(Json(serde_json::json!({ "ok": true, "tags": cleaned })))
+}
+
+fn clean_tags_strict(raw: &[String]) -> Result<Vec<String>, ApiError> {
+    if raw.len() > 8 {
+        return Err(ApiError(CoreError::Invalid("at most 8 tags".into())));
+    }
+    let mut out: Vec<String> = Vec::new();
+    for t in raw {
+        let t = t.trim().to_lowercase();
+        let ok = !t.is_empty()
+            && t.chars().count() <= 24
+            && t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-');
+        if !ok {
+            return Err(ApiError(CoreError::Invalid(format!(
+                "tag {t:?} must be 1-24 characters: letters, digits, spaces, hyphens"
+            ))));
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+    }
+    Ok(out)
+}
+
+/// `POST /api/stamps/{id}/suggest-tags` — ask the AI for tags from the prop's
+/// name and the prompt that made it. Returns suggestions only; nothing is saved.
+async fn suggest_stamp_tags(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+    let c = assets::global()
+        .find_custom(&id, "stamp")
+        .ok_or_else(|| CoreError::NotFound(format!("custom prop {id}")))?;
+    #[cfg(feature = "bridge")]
+    {
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let tags = draft::suggest_tags(&cfg, &c.name, &c.origin.prompt)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        Ok(Json(serde_json::json!({ "tags": tags })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = c;
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
+}
+
+/// `POST /api/assets/{id}/make-material` `{name, size?, seamless?, prompt?, seed?, ai?}` —
+/// turn a picture into a paintable material: made seamless (unless told not
+/// to), stored, and added to the palette. Provenance is kept.
+async fn make_material(
+    Path(id): Path<String>,
+    body: Result<Json<MakeBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let name = check_name(&b.name)?;
+    let size = b.size.unwrap_or(2.0);
+    if !size.is_finite() || !(0.25..=40.0).contains(&size) {
+        return Err(ApiError(CoreError::Invalid(
+            "size must be 0.25-40 cells".into(),
+        )));
+    }
+    let origin = provenance(&b);
+    let seamless = b.seamless;
+    let out = tokio::task::spawn_blocking(move || -> Result<(String, String), String> {
+        let a = assets::global();
+        let bytes = a.get_bytes(&id).ok_or("no such picture")?;
+        let (rgba, w, h) = convert::decode_rgba(&bytes)?;
+        let png = if seamless {
+            synth::encode_png(&synth::make_tileable(&rgba, w, h, 0.3)?, w, h)?
+        } else {
+            synth::encode_png(&rgba, w, h)?
+        };
+        let asset = a.put(&png)?;
+        let mid = format!("mat_{}", &asset[..12]);
+        a.register(assets::Custom {
+            id: mid.clone(),
+            name,
+            kind: "material".into(),
+            asset: asset.clone(),
+            size,
+            origin,
+            tags: Vec::new(),
+        })?;
+        Ok((mid, asset))
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("failed: {e}"))))?
+    .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok(Json(serde_json::json!({ "id": out.0, "asset": out.1 })))
+}
+
+/// `POST /api/assets/{id}/make-stamp` `{name, size?, key?, tolerance?, prompt?, seed?, ai?}` —
+/// cut a prop out of its flat background (colour guessed from the corners
+/// unless given), trim it, store it and add it to the stamp palette.
+async fn make_stamp(
+    Path(id): Path<String>,
+    body: Result<Json<MakeBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let name = check_name(&b.name)?;
+    let size = b.size.unwrap_or(1.5);
+    if !size.is_finite() || !(0.3..=12.0).contains(&size) {
+        return Err(ApiError(CoreError::Invalid(
+            "width must be 0.3-12 cells".into(),
+        )));
+    }
+    let key = match &b.key {
+        Some(k) => {
+            let t = k.as_bytes();
+            if !(t.len() == 7 && t[0] == b'#' && t[1..].iter().all(u8::is_ascii_hexdigit)) {
+                return Err(ApiError(CoreError::Invalid("key must be #rrggbb".into())));
+            }
+            Some(tiles::parse_hex(k))
+        }
+        None => None,
+    };
+    let tolerance = b.tolerance.unwrap_or(60.0);
+    let origin = provenance(&b);
+    let out = tokio::task::spawn_blocking(move || -> Result<(String, String), String> {
+        let a = assets::global();
+        let bytes = a.get_bytes(&id).ok_or("no such picture")?;
+        let (rgba, w, h) = convert::decode_rgba(&bytes)?;
+        let key = key.unwrap_or_else(|| synth::guess_key(&rgba, w, h));
+        let (cut, cw, ch) = synth::cut_out(&rgba, w, h, key, tolerance)?;
+        let asset = a.put(&synth::encode_png(&cut, cw, ch)?)?;
+        let sid = format!("stp_{}", &asset[..12]);
+        a.register(assets::Custom {
+            id: sid.clone(),
+            name,
+            kind: "stamp".into(),
+            asset: asset.clone(),
+            size,
+            origin,
+            tags: Vec::new(),
+        })?;
+        Ok((sid, asset))
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("failed: {e}"))))?
+    .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok(Json(serde_json::json!({ "id": out.0, "asset": out.1 })))
 }
 
 /// `GET /api/docs/{id}/lint[?floor=ID]` — the Problems panel: deterministic
@@ -1937,6 +2345,10 @@ fn build_router(app: App) -> Router {
         .route("/api/materials", get(list_materials))
         .route("/api/assets", post(put_asset))
         .route("/api/assets/{id}", get(get_asset))
+        .route("/api/assets/{id}/make-material", post(make_material))
+        .route("/api/assets/{id}/make-stamp", post(make_stamp))
+        .route("/api/stamps/{id}/tags", post(set_stamp_tags))
+        .route("/api/stamps/{id}/suggest-tags", post(suggest_stamp_tags))
         .route("/api/import/uvtt", post(import_uvtt))
         .route("/api/stamps", get(list_stamps))
         .route("/api/stamps/{id}/icon.png", get(stamp_icon_png))
@@ -1948,6 +2360,10 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/floors", post(floors_route))
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
         .route("/api/docs/{id}/generate-map", post(generate_map))
+        .route("/api/ai/image", post(ai_image))
+        .route("/api/ai/jobs/{id}", get(ai_job))
+        .route("/api/ai/jobs/{id}/cancel", post(ai_job_cancel))
+        .route("/api/docs/{id}/underlay", post(set_underlay))
         .route("/api/docs/{id}/furnish", post(furnish_rooms))
         .route("/api/search", get(search_maps))
         .route("/api/docs/{id}/scatter", post(scatter_props))
@@ -3489,6 +3905,208 @@ mod tests {
             .0,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn pictures_become_materials_and_props_with_provenance_tags_and_an_underlay() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        // A magenta picture with a red square: the "prop".
+        let mut pm = tiny_skia::Pixmap::new(40, 40).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(255, 0, 255, 255));
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(200, 30, 30, 255);
+        pm.fill_rect(
+            tiny_skia::Rect::from_xywh(10.0, 10.0, 20.0, 20.0).unwrap(),
+            &paint,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        let (st, b) = call(&router, "POST", "/api/assets", pm.encode_png().unwrap()).await;
+        assert_eq!(st, StatusCode::OK);
+        let asset = json(b)["id"].as_str().unwrap().to_string();
+
+        let (st, b) = call(
+            &router,
+            "POST",
+            &format!("/api/assets/{asset}/make-stamp"),
+            br#"{"name":"Red block","size":2,"prompt":"a red block","seed":7,"ai":true}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        let stamp = json(b)["id"].as_str().unwrap().to_string();
+        assert!(stamp.starts_with("stp_"));
+        let (st, b) = call(
+            &router,
+            "POST",
+            &format!("/api/assets/{asset}/make-material"),
+            br#"{"name":"Red tiles","size":3}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let mat = json(b)["id"].as_str().unwrap().to_string();
+        assert!(mat.starts_with("mat_"));
+        // Both show up in the palettes with where they came from.
+        let (_, b) = call(&router, "GET", "/api/stamps", vec![]).await;
+        let list = json(b)["stamps"].as_array().unwrap().clone();
+        let c = list
+            .iter()
+            .find(|s| s["id"] == stamp.as_str())
+            .expect("custom stamp listed");
+        assert_eq!(
+            (
+                c["custom"].as_bool(),
+                c["origin"]["source"].as_str(),
+                c["origin"]["seed"].as_i64()
+            ),
+            (Some(true), Some("ai"), Some(7))
+        );
+        assert_eq!(c["origin"]["prompt"], "a red block");
+        let (_, b) = call(&router, "GET", "/api/materials", vec![]).await;
+        assert!(json(b)["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == mat.as_str() && m["custom"] == true));
+        let (st, icon) = call(
+            &router,
+            "GET",
+            &format!("/api/stamps/{stamp}/icon.png"),
+            vec![],
+        )
+        .await;
+        assert_eq!((st, &icon[1..4]), (StatusCode::OK, &b"PNG"[..]));
+        // Tags: the GM's confirmed words are cleaned strictly and stored.
+        let tag = |body: &str| {
+            let (router, uri, body) = (
+                router.clone(),
+                format!("/api/stamps/{stamp}/tags"),
+                body.as_bytes().to_vec(),
+            );
+            async move { call(&router, "POST", &uri, body).await }
+        };
+        assert_eq!(
+            tag(r#"{"tags":["Block","red","storage"]}"#).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            tag(r#"{"tags":["bad_tag!"]}"#).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            tag(r#"{"tags":["a","b","c","d","e","f","g","h","i"]}"#)
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (_, b) = call(&router, "GET", "/api/stamps", vec![]).await;
+        let list = json(b)["stamps"].as_array().unwrap().clone();
+        assert_eq!(
+            list.iter().find(|s| s["id"] == stamp.as_str()).unwrap()["tags"],
+            serde_json::json!(["block", "red", "storage"])
+        );
+        // Refusals: an unknown picture, a bad name or size, a missing prop.
+        for (path, body) in [
+            ("/api/assets/0000000000000000000000000000000000000000000000000000000000000000/make-stamp", r#"{"name":"x"}"#),
+            (&format!("/api/assets/{asset}/make-stamp"), r#"{"name":" "}"#),
+            (&format!("/api/assets/{asset}/make-stamp"), r#"{"name":"x","size":99}"#),
+            (&format!("/api/assets/{asset}/make-stamp"), r##"{"name":"x","key":"red"}"##),
+            (&format!("/api/assets/{asset}/make-material"), r#"{"name":"x","size":0}"#),
+        ] {
+            let (st, _) = call(&router, "POST", path, body.as_bytes().to_vec()).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{path} {body}");
+        }
+        assert_eq!(tag(r#"{"tags":[]}"#).await.0, StatusCode::OK);
+        let (st, _) = call(
+            &router,
+            "POST",
+            "/api/stamps/stp_nope/tags",
+            br#"{"tags":["a"]}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        // The underlay route puts a stored picture behind the floor, one undo step.
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"U"}"#.to_vec()).await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let floor = json(d)["floors"][0]["id"].as_str().unwrap().to_string();
+        let under =
+            |asset: &str| format!(r#"{{"asset":"{asset}","x":0,"y":0,"w":10,"h":8}}"#).into_bytes();
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/underlay"),
+                under(&asset)
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(json(d)["floors"][0]["underlay"]["w"], 10.0);
+        call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/undo"),
+            format!(r#"{{"floor":"{floor}"}}"#).into_bytes(),
+        )
+        .await;
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert!(json(d)["floors"][0]["underlay"].is_null());
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/underlay"),
+                under(&"0".repeat(64))
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn the_image_job_route_checks_its_input_and_unknown_jobs_are_not_found() {
+        let router = build_router(test_app());
+        let post = |body: &str| {
+            let (router, body) = (router.clone(), body.as_bytes().to_vec());
+            async move { call(&router, "POST", "/api/ai/image", body).await.0 }
+        };
+        assert_eq!(
+            post(r#"{"kind":"video","prompt":"x"}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(r#"{"kind":"prop","prompt":" "}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(r#"{"kind":"prop","prompt":"x","width":8}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            post(r#"{"kind":"prop","prompt":"x","height":9999}"#).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&router, "GET", "/api/ai/jobs/aj_nope", vec![]).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&router, "POST", "/api/ai/jobs/aj_nope/cancel", vec![])
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        if std::env::var("ND_CARTO_SERVER").is_err() && std::env::var("ND_CARTO_LLM_URL").is_err() {
+            // Valid input, but no nd-world configured: says what to set rather than failing silently.
+            assert_eq!(
+                post(r#"{"kind":"prop","prompt":"a crate"}"#).await,
+                StatusCode::NOT_FOUND
+            );
+        }
     }
 
     #[tokio::test]

@@ -14,6 +14,7 @@
   <button id="btn-spec" title="Describe a map as rooms and how they connect, preview the layout, accept or reject it">✨ From a spec…</button>
   <span id="searchwrap"><input id="search-box" type="search" placeholder="Search all maps…" aria-label="Search all maps" autocomplete="off"><ul id="search-results" role="listbox" hidden></ul></span>
   <button id="btn-style" title="The look of this project: a few words and a room palette, used by AI drafts and generators">🎨 Style…</button>
+  <button id="btn-art" title="Make pictures with nd-world's AI: a map underlay, a tiling material, or a set of props">🖼 Make art…</button>
   <button id="btn-gallery" title="All projects as thumbnails">🗂 Projects</button>
   <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
   <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
@@ -122,6 +123,28 @@
       </div>
     </details>
   </div>
+  <dialog id="art-dialog">
+    <h3>Make art</h3>
+    <p id="art-ai" class="dim" role="status"></p>
+    <div class="row">
+      <label>Make <select id="art-kind">
+        <option value="material">a material (tiling texture)</option>
+        <option value="prop">props (cut out, one per picture)</option>
+        <option value="underlay">a map underlay (one picture)</option>
+      </select></label>
+      <label>How many <input type="number" id="art-count" min="1" max="4" value="3" style="width:3.5em"></label>
+      <label>Size <select id="art-size"><option>512</option><option>768</option><option>1024</option></select> px</label>
+    </div>
+    <input id="art-prompt" type="text" maxlength="1000" placeholder="mossy flagstones, hand-painted" aria-label="Describe the picture" style="width:100%;box-sizing:border-box">
+    <div class="row">
+      <button id="art-go" type="button" class="primary">Generate</button>
+      <button id="art-cancel" type="button" hidden>Cancel</button>
+      <span id="art-msg" class="dim" role="status"></span>
+    </div>
+    <div id="art-results" class="art-grid"></div>
+    <p class="dim">Nothing is kept until you press a button under a picture. Kept pictures remember their prompt and seed.</p>
+    <menu><button id="art-close" type="button">Close</button></menu>
+  </dialog>
   <dialog id="spec-dialog">
     <h3>Map from a spec</h3>
     <div class="row" role="radiogroup" aria-label="What to make">

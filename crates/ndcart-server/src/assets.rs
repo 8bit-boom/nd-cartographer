@@ -4,12 +4,43 @@
 //! directory is configured, and kept in memory otherwise. Decoded pixmaps are
 //! cached for the baker.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Where a custom asset came from (kept with it, plan §8.5 provenance).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Provenance {
+    /// `ai` or `imported`.
+    pub source: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub seed: i64,
+    pub date: String,
+}
+
+/// A picture the GM turned into a paintable material or a placeable prop.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Custom {
+    /// `mat_<12 hex>` or `stp_<12 hex>`: usable as a space's material or a stamp's asset.
+    pub id: String,
+    pub name: String,
+    /// `material` or `stamp`.
+    pub kind: String,
+    pub asset: String,
+    /// A material: cells per repeat of the picture. A stamp: width in cells.
+    pub size: f32,
+    pub origin: Provenance,
+    /// Short search words the GM has confirmed (suggested by the AI, never applied unasked).
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
 pub struct Assets {
     dir: Option<PathBuf>,
+    custom: Mutex<Vec<Custom>>,
     bytes: Mutex<HashMap<String, Arc<Vec<u8>>>>,
     decoded: Mutex<HashMap<String, Arc<tiny_skia::Pixmap>>>,
 }
@@ -22,8 +53,14 @@ pub fn init(dir: Option<PathBuf>) -> &'static Assets {
         if let Some(d) = &dir {
             let _ = std::fs::create_dir_all(d);
         }
+        let custom = dir
+            .as_ref()
+            .and_then(|d| std::fs::read_to_string(d.join("custom.json")).ok())
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
         Assets {
             dir,
+            custom: Mutex::new(custom),
             bytes: Mutex::new(HashMap::new()),
             decoded: Mutex::new(HashMap::new()),
         }
@@ -53,6 +90,57 @@ impl Assets {
             .expect("assets")
             .insert(id.clone(), Arc::new(data.to_vec()));
         Ok(id)
+    }
+
+    /// Add (or replace) a custom material/stamp and save the list.
+    pub fn register(&self, c: Custom) -> Result<(), String> {
+        if !ndcart_core::hash::is_asset_id(&c.asset) || self.get_bytes(&c.asset).is_none() {
+            return Err("that picture is not in the asset store".into());
+        }
+        let mut list = self.custom.lock().expect("custom");
+        list.retain(|x| x.id != c.id);
+        list.push(c);
+        if list.len() > 500 {
+            list.remove(0);
+        }
+        if let Some(dir) = &self.dir {
+            let body = serde_json::to_string(&*list).map_err(|e| e.to_string())?;
+            crate::store::write_atomic(&dir.join("custom.json"), body.as_bytes())
+                .map_err(|e| format!("cannot save the library: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Replace a custom item's tags (already validated) and save.
+    pub fn set_tags(&self, id: &str, tags: Vec<String>) -> Result<(), String> {
+        let mut list = self.custom.lock().expect("custom");
+        let c = list.iter_mut().find(|c| c.id == id).ok_or("no such item")?;
+        c.tags = tags;
+        if let Some(dir) = &self.dir {
+            let body = serde_json::to_string(&*list).map_err(|e| e.to_string())?;
+            crate::store::write_atomic(&dir.join("custom.json"), body.as_bytes())
+                .map_err(|e| format!("cannot save the library: {e}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn customs(&self, kind: &str) -> Vec<Custom> {
+        self.custom
+            .lock()
+            .expect("custom")
+            .iter()
+            .filter(|c| c.kind == kind)
+            .cloned()
+            .collect()
+    }
+
+    pub fn find_custom(&self, id: &str, kind: &str) -> Option<Custom> {
+        self.custom
+            .lock()
+            .expect("custom")
+            .iter()
+            .find(|c| c.id == id && c.kind == kind)
+            .cloned()
     }
 
     pub fn get_bytes(&self, id: &str) -> Option<Arc<Vec<u8>>> {
@@ -106,6 +194,7 @@ mod tests {
     fn put_hashes_dedupes_and_round_trips() {
         let a = Assets {
             dir: None,
+            custom: Mutex::new(Vec::new()),
             bytes: Mutex::new(HashMap::new()),
             decoded: Mutex::new(HashMap::new()),
         };
@@ -123,6 +212,7 @@ mod tests {
     fn junk_and_traversal_are_refused() {
         let a = Assets {
             dir: None,
+            custom: Mutex::new(Vec::new()),
             bytes: Mutex::new(HashMap::new()),
             decoded: Mutex::new(HashMap::new()),
         };
@@ -145,12 +235,14 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let a = Assets {
             dir: Some(dir.clone()),
+            custom: Mutex::new(Vec::new()),
             bytes: Mutex::new(HashMap::new()),
             decoded: Mutex::new(HashMap::new()),
         };
         let id = a.put(&red_png(2, 2)).unwrap();
         let b = Assets {
             dir: Some(dir.clone()),
+            custom: Mutex::new(Vec::new()),
             bytes: Mutex::new(HashMap::new()),
             decoded: Mutex::new(HashMap::new()),
         };

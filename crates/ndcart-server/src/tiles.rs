@@ -35,7 +35,7 @@ fn wall_style(kind: ndcart_core::WallKind) -> ([u8; 3], f32) {
     }
 }
 
-fn parse_hex(color: &str) -> [u8; 3] {
+pub(crate) fn parse_hex(color: &str) -> [u8; 3] {
     let h = color.trim_start_matches('#');
     if h.len() != 7 && h.len() != 6 {
         return [0x33, 0x44, 0x55];
@@ -201,10 +201,13 @@ pub fn grid_extent(floor: &FloorDoc) -> (u32, u32) {
 const PAINT_SEED: u32 = 0x6e64;
 const FALLBACK: Surface = Surface::Flat([0x33, 0x44, 0x55]);
 
-/// What a space paints: a pack material, or a flat colour.
-#[derive(Clone, Copy)]
+/// What a space paints: a pack material, a picture-based custom material, or a flat colour.
+#[derive(Clone)]
 enum Surface {
     Mat(&'static ndcart_paint::Material),
+    /// A picture repeated every `tile` cells (world coordinates, so tiles and
+    /// the full render agree), looked up per pixel.
+    Img(std::sync::Arc<tiny_skia::Pixmap>, f32, String),
     Flat([u8; 3]),
 }
 
@@ -212,34 +215,53 @@ impl Surface {
     fn sample(&self, u: f32, v: f32) -> [u8; 3] {
         match self {
             Surface::Mat(m) => m.sample(u, v, PAINT_SEED),
+            Surface::Img(pm, tile, _) => {
+                let (w, h) = (pm.width() as i64, pm.height() as i64);
+                let x = ((u / tile) * w as f32).floor() as i64;
+                let y = ((v / tile) * h as f32).floor() as i64;
+                let p = pm
+                    .pixel(x.rem_euclid(w) as u32, y.rem_euclid(h) as u32)
+                    .map(|p| p.demultiply());
+                p.map(|c| [c.red(), c.green(), c.blue()])
+                    .unwrap_or([0x33, 0x44, 0x55])
+            }
             Surface::Flat(c) => *c,
         }
     }
     fn same_as(&self, o: &Surface) -> bool {
         match (self, o) {
             (Surface::Mat(a), Surface::Mat(b)) => a.id == b.id,
+            (Surface::Img(_, _, a), Surface::Img(_, _, b)) => a == b,
             (Surface::Flat(a), Surface::Flat(b)) => a == b,
             _ => false,
         }
     }
 }
 
-/// Resolve every space once per bake. An unknown material id falls back to the
-/// space's flat colour.
+/// The surface a space paints: its pack material, else a custom picture
+/// material, else its flat colour (an unknown material id falls back to the colour).
+fn surface_for(material: Option<&str>, colour: &str) -> Surface {
+    if let Some(id) = material {
+        if let Some(m) = ndcart_paint::find(id) {
+            return Surface::Mat(m);
+        }
+        let assets = crate::assets::global();
+        if let Some(c) = assets.find_custom(id, "material") {
+            if let Some(pm) = assets.get_pixmap(&c.asset) {
+                return Surface::Img(pm, c.size.max(0.25), c.id);
+            }
+        }
+    }
+    Surface::Flat(parse_hex(colour))
+}
+
+/// Resolve every space once per bake.
 fn surfaces_of(floor: &FloorDoc) -> std::collections::HashMap<&str, Surface> {
     floor
         .grid
         .spaces
         .iter()
-        .map(|(id, s)| {
-            let surface = s
-                .material
-                .as_deref()
-                .and_then(ndcart_paint::find)
-                .map(Surface::Mat)
-                .unwrap_or_else(|| Surface::Flat(parse_hex(&s.color)));
-            (id.as_str(), surface)
-        })
+        .map(|(id, s)| (id.as_str(), surface_for(s.material.as_deref(), &s.color)))
         .collect()
 }
 
@@ -367,6 +389,86 @@ fn draw_stamp(
     }
 }
 
+/// A picture-based (custom) stamp: its picture, scaled to `size` cells wide,
+/// rotated and flipped like a built-in one, with a soft drop shadow. Same
+/// sprite-at-an-integer-offset scheme, so a tile equals the full render's crop.
+/// (A tint is not applied to pictures.)
+fn apply_custom_stamp(
+    pixmap: &mut tiny_skia::Pixmap,
+    st: &ndcart_core::Stamp,
+    scale: f32,
+    x0: i64,
+    y0: i64,
+) {
+    let assets = crate::assets::global();
+    let Some(c) = assets.find_custom(&st.asset, "stamp") else {
+        return;
+    };
+    let Some(img) = assets.get_pixmap(&c.asset) else {
+        return;
+    };
+    let (iw, ih) = (img.width() as f32, img.height() as f32);
+    let pw = c.size * st.scale * scale;
+    let ph = pw * ih / iw;
+    let throw = if st.shadow { pw.min(ph) * 0.1 } else { 0.0 };
+    let reach = (pw * pw + ph * ph).sqrt() * 0.5 + throw * 2.0 + 2.0;
+    let (wx, wy) = (st.x * scale, st.y * scale);
+    let (ox, oy) = ((wx - reach).floor() as i64, (wy - reach).floor() as i64);
+    let side = (reach * 2.0).ceil() as i64 + 2;
+    let (w, h) = (i64::from(pixmap.width()), i64::from(pixmap.height()));
+    if ox + side < x0
+        || oy + side < y0
+        || ox > x0 + w
+        || oy > y0 + h
+        || side * side > MAX_SPRITE_PIXELS
+    {
+        return;
+    }
+    let Some(mut sprite) = tiny_skia::Pixmap::new(side as u32, side as u32) else {
+        return;
+    };
+    let (cx, cy) = (wx - ox as f32, wy - oy as f32);
+    let sx = pw / iw * if st.flip { -1.0 } else { 1.0 };
+    let place = |dx: f32, dy: f32| {
+        tiny_skia::Transform::from_translate(cx + dx, cy + dy)
+            .pre_rotate(st.rotation.to_degrees())
+            .pre_scale(sx, ph / ih)
+            .pre_translate(-iw / 2.0, -ih / 2.0)
+    };
+    let mut paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    if throw > 0.0 {
+        // The silhouette in soft black, thrown down and to the right.
+        if let Some(mut shadow) = tiny_skia::Pixmap::new(img.width(), img.height()) {
+            for (d, p) in shadow.pixels_mut().iter_mut().zip(img.pixels()) {
+                *d =
+                    tiny_skia::ColorU8::from_rgba(0, 0, 0, (u16::from(p.alpha()) * 70 / 255) as u8)
+                        .premultiply();
+            }
+            sprite.draw_pixmap(
+                0,
+                0,
+                shadow.as_ref(),
+                &paint,
+                place(throw * 0.6, throw),
+                None,
+            );
+        }
+    }
+    paint.opacity = 1.0;
+    sprite.draw_pixmap(0, 0, (*img).as_ref(), &paint, place(0.0, 0.0), None);
+    pixmap.draw_pixmap(
+        (ox - x0) as i32,
+        (oy - y0) as i32,
+        sprite.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        tiny_skia::Transform::identity(),
+        None,
+    );
+}
+
 /// Largest sprite (pixels) rasterized for one stamp; bigger ones (a huge stamp
 /// at high zoom) are drawn straight onto the region instead.
 const MAX_SPRITE_PIXELS: i64 = 16_000_000;
@@ -386,6 +488,9 @@ fn apply_stamps(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: 
     let (w, h) = (i64::from(pixmap.width()), i64::from(pixmap.height()));
     for st in &floor.stamps {
         let Some(def) = ndcart_paint::find_stamp(&st.asset) else {
+            if st.asset.starts_with("stp_") {
+                apply_custom_stamp(pixmap, st, scale, x0, y0);
+            }
             continue;
         };
         let (pw, ph) = (
@@ -447,6 +552,23 @@ fn apply_stamps(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: 
 }
 
 /// A square icon of a stamp (for the palette), on a transparent background.
+/// A square icon of a picture (a custom stamp), fitted with a margin.
+pub fn picture_icon(img: &tiny_skia::Pixmap, px: u32) -> Vec<u8> {
+    let mut pm = tiny_skia::Pixmap::new(px, px).expect("icon pixmap");
+    let k = px as f32 * 0.86 / (img.width().max(img.height()) as f32);
+    let t = tiny_skia::Transform::from_translate(
+        (px as f32 - img.width() as f32 * k) / 2.0,
+        (px as f32 - img.height() as f32 * k) / 2.0,
+    )
+    .pre_scale(k, k);
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    pm.draw_pixmap(0, 0, img.as_ref(), &paint, t, None);
+    pm.encode_png().expect("png")
+}
+
 pub fn stamp_icon(def: &ndcart_paint::StampDef, px: u32) -> Vec<u8> {
     let mut pm = tiny_skia::Pixmap::new(px, px).expect("icon pixmap");
     let longest = def.size[0].max(def.size[1]);
@@ -1239,12 +1361,7 @@ fn apply_strokes(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0:
         .then(|| pixmap.data().to_vec());
     let stride = w as usize * 4;
     for (s, p) in &prepared {
-        let surface = s
-            .material
-            .as_deref()
-            .and_then(ndcart_paint::find)
-            .map(Surface::Mat)
-            .unwrap_or_else(|| Surface::Flat(parse_hex(&s.color)));
+        let surface = surface_for(s.material.as_deref(), &s.color);
         let px0 = ((p.bounds[0] * scale).floor() as i64 - x0).clamp(0, w);
         let px1 = ((p.bounds[2] * scale).ceil() as i64 - x0 + 1).clamp(0, w);
         let py0 = ((p.bounds[1] * scale).floor() as i64 - y0).clamp(0, h);
@@ -1446,13 +1563,13 @@ fn render_pixmap_onion(
         if cx < cx_from || cx > cx_to || cy < cy_from || cy > cy_to {
             continue;
         }
-        let own = surfaces.get(space_id).copied().unwrap_or(FALLBACK);
+        let own = surfaces.get(space_id).cloned().unwrap_or(FALLBACK);
         // The four neighbours' surfaces, only when painted and different.
         let nb = |c: CellKey| {
             floor
                 .grid
                 .cell_space(c)
-                .and_then(|id| surfaces.get(id).copied())
+                .and_then(|id| surfaces.get(id).cloned())
                 .filter(|n| !own.same_as(n))
         };
         let (west, east) = (nb(cell.west()), nb(cell.east()));
@@ -1476,17 +1593,17 @@ fn render_pixmap_onion(
                 let mut c = own.sample(u, v);
                 // Horizontal edge pair, then vertical; near a corner both apply.
                 let (hn, hd, hs) = if fx < 0.5 {
-                    (west, fx, Side::Far)
+                    (west.as_ref(), fx, Side::Far)
                 } else {
-                    (east, 1.0 - fx, Side::Near)
+                    (east.as_ref(), 1.0 - fx, Side::Near)
                 };
                 if let Some(n) = hn.filter(|_| hd < BLEND_WIDTH) {
                     c = edge_mix(c, n.sample(u, v), hd, hs, u, v, PAINT_SEED);
                 }
                 let (vn, vd, vs) = if fy < 0.5 {
-                    (north, fy, Side::Far)
+                    (north.as_ref(), fy, Side::Far)
                 } else {
-                    (south, 1.0 - fy, Side::Near)
+                    (south.as_ref(), 1.0 - fy, Side::Near)
                 };
                 if let Some(n) = vn.filter(|_| vd < BLEND_WIDTH) {
                     c = edge_mix(c, n.sample(u, v), vd, vs, u, v, PAINT_SEED);
@@ -2875,6 +2992,116 @@ mod tests {
             dark(&sq),
             dark(&hx)
         );
+    }
+
+    /// Register a custom material/stamp from a generated picture; returns its id.
+    fn custom_from(kind: &str, pm: &tiny_skia::Pixmap, size: f32) -> String {
+        let a = crate::assets::global();
+        let asset = a.put(&pm.encode_png().unwrap()).unwrap();
+        let id = format!(
+            "{}_{}",
+            if kind == "material" { "mat" } else { "stp" },
+            &asset[..12]
+        );
+        a.register(crate::assets::Custom {
+            id: id.clone(),
+            name: "test".into(),
+            kind: kind.into(),
+            asset,
+            size,
+            tags: Vec::new(),
+            origin: crate::assets::Provenance {
+                source: "imported".into(),
+                prompt: String::new(),
+                seed: -1,
+                date: "now".into(),
+            },
+        })
+        .unwrap();
+        id
+    }
+
+    #[test]
+    fn a_picture_material_and_a_picture_stamp_paint_and_tile_exactly() {
+        // A 4x4 picture: red/blue checks, repeated every 2 cells.
+        let mut pic = tiny_skia::Pixmap::new(4, 4).unwrap();
+        for y in 0..4 {
+            for x in 0..4 {
+                let c = if (x / 2 + y / 2) % 2 == 0 {
+                    (200, 20, 20)
+                } else {
+                    (20, 20, 200)
+                };
+                pic.pixels_mut()[y * 4 + x] =
+                    tiny_skia::ColorU8::from_rgba(c.0, c.1, c.2, 255).premultiply();
+            }
+        }
+        let mat = custom_from("material", &pic, 2.0);
+        // A prop: a green disc with a transparent corner.
+        let mut prop = tiny_skia::Pixmap::new(16, 16).unwrap();
+        let mut pb = tiny_skia::PathBuilder::new();
+        pb.push_circle(8.0, 8.0, 7.0);
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(20, 180, 20, 255);
+        prop.fill_path(
+            &pb.finish().unwrap(),
+            &paint,
+            tiny_skia::FillRule::Winding,
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        let stp = custom_from("stamp", &prop, 2.0);
+
+        let mut f = light_floor();
+        f.grid
+            .upsert_space(ndcart_core::grid::Space {
+                id: "a".into(),
+                name: "A".into(),
+                color: "#d0d0d0".into(),
+                kind: SpaceKind::Room,
+                material: Some(mat.clone()),
+            })
+            .unwrap();
+        f.add_stamp(mk_stamp("p", &stp, 3.5, 3.5), None).unwrap();
+        let pm = bake_stamped(&f, 32);
+        // 2 cells = 64 px per repeat of 4 picture px: the first 32 px are red, the next blue.
+        let c = rgb(&pm, 8, 8);
+        assert!(c[0] > 150 && c[2] < 80, "red check: {c:?}");
+        let c = rgb(&pm, 40, 8);
+        assert!(c[2] > 150 && c[0] < 80, "blue check: {c:?}");
+        // The prop is green at its centre (3.5 cells = 112 px), and the ground shows beyond it.
+        let g = rgb(&pm, 112, 112);
+        assert!(g[1] > 120 && g[0] < 90, "green prop: {g:?}");
+        // Tiles equal the crop of the full render.
+        let (png, ..) = bake_full_stroked(&f, 64);
+        let full = decode(&png);
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    assert_eq!(
+                        rgb(&tile, x, y),
+                        rgb(&full, tx as u32 * 256 + x, ty as u32 * 256 + y),
+                        "tile ({tx},{ty}) at ({x},{y})"
+                    );
+                }
+            }
+        }
+        // Without its registry entry a custom id falls back to the flat colour / draws nothing.
+        let mut g2 = light_floor();
+        g2.grid
+            .upsert_space(ndcart_core::grid::Space {
+                id: "a".into(),
+                name: "A".into(),
+                color: "#d0d0d0".into(),
+                kind: SpaceKind::Room,
+                material: Some("mat_000000000000".into()),
+            })
+            .unwrap();
+        g2.add_stamp(mk_stamp("q", "stp_000000000000", 3.5, 3.5), None)
+            .unwrap();
+        let flat = bake_stamped(&g2, 32);
+        assert_eq!(rgb(&flat, 112, 112), [0xd0, 0xd0, 0xd0]);
     }
 
     /// Count pixels close to `want` inside a pixel rectangle `[x0, y0, x1, y1)`.

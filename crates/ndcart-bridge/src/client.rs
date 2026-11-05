@@ -12,6 +12,29 @@ use reqwest::{multipart, redirect, Client, Method, RequestBuilder, Response, Sta
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// One image to make through nd-world's imagegen queue.
+#[derive(Clone, Debug)]
+pub struct ImageRequest {
+    pub prompt: String,
+    pub negative: String,
+    pub width: u32,
+    pub height: u32,
+    pub steps: u32,
+    /// -1 lets the server pick.
+    pub seed: i64,
+    /// An image path on the server to start from (never nd-world's own art).
+    pub init_image: Option<String>,
+    pub init_strength: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageJob {
+    /// pending, running, done, error, cancelled or interrupted.
+    pub status: String,
+    pub error: Option<String>,
+    pub urls: Vec<String>,
+}
+
 pub const WALL_CAP: usize = 5_000;
 pub const LIGHT_CAP: usize = 60;
 
@@ -346,6 +369,86 @@ impl Bridge {
             .filter_map(|e| e.get("name").and_then(Value::as_str))
             .map(str::to_string)
             .collect())
+    }
+
+    /// Queue an image on nd-world's durable imagegen jobs
+    /// (`POST /api/ai/imagegen/jobs` -> `{job_id}`); one GPU, so jobs run in turn.
+    pub async fn imagegen_start(&self, req: &ImageRequest) -> Result<i64, BridgeError> {
+        let mut body = json!({
+            "prompt": req.prompt, "negative": req.negative,
+            "width": req.width, "height": req.height,
+            "steps": req.steps, "seed": req.seed,
+        });
+        if let Some(init) = &req.init_image {
+            body["init_image"] = json!(init);
+            body["init_strength"] = json!(req.init_strength);
+        }
+        let resp = self
+            .send(self.req(Method::POST, "/api/ai/imagegen/jobs").json(&body))
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        let v: Value = check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("imagegen job answer: {e}")))?;
+        v.get("job_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| BridgeError::Protocol("imagegen answer had no job_id".into()))
+    }
+
+    /// `GET /api/ai/imagegen/jobs/{id}`.
+    pub async fn imagegen_status(&self, id: i64) -> Result<ImageJob, BridgeError> {
+        let resp = self
+            .send(self.req(Method::GET, &format!("/api/ai/imagegen/jobs/{id}")))
+            .await?;
+        let v: Value = check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("imagegen status: {e}")))?;
+        Ok(ImageJob {
+            status: v
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            error: v.get("error").and_then(Value::as_str).map(str::to_string),
+            urls: v
+                .get("urls")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|u| u.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Fetch a finished image (`/uploads/...`) with the session cookie. Only a
+    /// path on the same server is accepted, never another host.
+    pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>, BridgeError> {
+        if !url.starts_with('/') || url.starts_with("//") || url.contains("..") {
+            return Err(BridgeError::Protocol(format!(
+                "unexpected image address {url:?}"
+            )));
+        }
+        let resp = self
+            .send(self.http.get(format!("{}{}", self.base, url)))
+            .await?;
+        let bytes = check(resp)
+            .await?
+            .bytes()
+            .await
+            .map_err(|e| BridgeError::Protocol(e.to_string()))?;
+        if bytes.len() > 64 * 1024 * 1024 {
+            return Err(BridgeError::Protocol("the image is too large".into()));
+        }
+        Ok(bytes.to_vec())
     }
 
     fn precheck(map: &PublishMap) -> Result<(), BridgeError> {

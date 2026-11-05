@@ -418,6 +418,74 @@ pub async fn refine(
     ))
 }
 
+/// Clean a list of tags: lowercase, 1-24 characters of letters, digits, spaces and
+/// hyphens, no duplicates, at most 8. Anything else is dropped.
+pub fn clean_tags(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in raw {
+        let t = t.trim().to_lowercase();
+        let ok = !t.is_empty()
+            && t.chars().count() <= 24
+            && t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-');
+        if ok && !out.contains(&t) {
+            out.push(t);
+        }
+        if out.len() == 8 {
+            break;
+        }
+    }
+    out
+}
+
+pub const TAG_SYSTEM_PROMPT: &str = r##"You label props for a tabletop map editor so they can be found by search. Reply with ONE JSON object and nothing else: {"tags": ["word", ...]} with 3 to 8 short lowercase tags (1-24 characters: letters, digits, spaces, hyphens). Cover what it is, its material, its setting or mood, and where it would be placed (e.g. "crate", "wooden", "storage", "dungeon", "cargo")."##;
+
+fn judge_tags(reply: &str) -> Result<Vec<String>, String> {
+    let json = extract_json(reply)
+        .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("That was not valid JSON: {e}."))?;
+    let raw: Vec<String> = v
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .ok_or("The object needs a \"tags\" array of strings.")?
+        .iter()
+        .filter_map(|t| t.as_str().map(str::to_string))
+        .collect();
+    let tags = clean_tags(&raw);
+    if tags.len() < 2 {
+        return Err(
+            "Give at least 2 usable tags (1-24 characters: letters, digits, spaces, hyphens)."
+                .into(),
+        );
+    }
+    Ok(tags)
+}
+
+/// Suggest tags for a prop from its name and the prompt that made it. The GM
+/// confirms them; nothing is saved here.
+pub async fn suggest_tags(cfg: &Config, name: &str, prompt: &str) -> Result<Vec<String>, String> {
+    let backend = Backend::connect(cfg).await?;
+    let subject = format!(
+        "Prop name: {name}\nHow it was described: {}",
+        if prompt.is_empty() {
+            "(not recorded)"
+        } else {
+            prompt
+        }
+    );
+    draft_loop(
+        &subject,
+        1,
+        |user| {
+            let backend = &backend;
+            async move { backend.chat(TAG_SYSTEM_PROMPT, &user).await }
+        },
+        judge_tags,
+    )
+    .await
+}
+
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let (mut prompt, mut server, mut world, mut email, mut model, mut out) =
         (None, None, None, None, None, None);
@@ -614,6 +682,52 @@ mod tests {
             .contains("not a room"));
         let two = r#"{"name":"C","floors":[{"name":"G","rooms":[{"id":"a","name":"Nave","w":8,"h":6}],"links":[]},{"name":"H","rooms":[{"id":"a","name":"Nave","w":8,"h":6}],"links":[]}]}"#;
         assert!(judge(two).unwrap_err().contains("exactly one floor"));
+    }
+
+    #[tokio::test]
+    async fn suggested_tags_are_cleaned_and_a_bad_reply_is_repaired() {
+        assert_eq!(
+            clean_tags(&[
+                "Crate".into(),
+                " crate ".into(),
+                "WOODEN".into(),
+                "bad_tag!".into(),
+                "".into(),
+                "x".repeat(30)
+            ]),
+            ["crate", "wooden"]
+        );
+        assert_eq!(
+            clean_tags(&(0..20).map(|i| format!("t{i}")).collect::<Vec<_>>()).len(),
+            8
+        );
+        assert_eq!(
+            judge_tags("```{\"tags\":[\"Crate\",\"wooden\",\"storage\"]}```").unwrap(),
+            ["crate", "wooden", "storage"]
+        );
+        assert!(judge_tags("{\"tags\":[\"a!\"]}")
+            .unwrap_err()
+            .contains("at least 2"));
+        assert!(judge_tags("{\"nope\":1}").unwrap_err().contains("tags"));
+        let replies = [
+            "tags: crate, wooden".to_string(),
+            "{\"tags\":[\"crate\",\"cargo\"]}".to_string(),
+        ];
+        let mut i = 0;
+        let got = draft_loop(
+            "Prop name: Crate",
+            1,
+            |_| {
+                let r = replies[i].clone();
+                i += 1;
+                async move { Ok(r) }
+            },
+            judge_tags,
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, ["crate", "cargo"]);
+        assert!(TAG_SYSTEM_PROMPT.contains("\"tags\""));
     }
 
     #[tokio::test]

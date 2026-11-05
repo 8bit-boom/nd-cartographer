@@ -1495,6 +1495,101 @@ document.getElementById('spec-reject').onclick = async () => {
 };
 document.getElementById('spec-close').onclick = () => specDialog.close();
 
+// ---------- make art (AI pictures → materials, props, underlays) ----------
+const artDialog = document.getElementById('art-dialog');
+let artJob = null, artTimer = null;
+
+async function reloadPalettes() {
+  try {
+    const { materials } = await api('GET', '/api/materials');
+    if (materials.length) PALETTE = materials.map(m => ({ id: m.id, color: m.color, name: m.name }));
+    buildPalette();
+  } catch { /* keep the old palette */ }
+  await loadStamps();
+}
+
+function artItem(job, assetId, seed) {
+  const fig = document.createElement('figure');
+  const img = document.createElement('img');
+  img.alt = `Generated picture, seed ${seed}`;
+  img.src = `/api/assets/${assetId}`;
+  const cap = document.createElement('figcaption');
+  const prov = { prompt: job.prompt, seed, ai: true };
+  const mk = (label, run) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = async () => { b.disabled = true; try { await run(); b.textContent = '✓ ' + label; } catch (e) { b.disabled = false; document.getElementById('art-msg').textContent = e.message; } };
+    cap.appendChild(b);
+  };
+  if (job.kind === 'material') mk('Keep as material', async () => {
+    const name = window.prompt('Name this material', job.prompt.slice(0, 40)); if (!name) throw new Error('Cancelled.');
+    const r = await api('POST', `/api/assets/${assetId}/make-material`, { name, size: 2, ...prov });
+    await reloadPalettes();
+    document.getElementById('art-msg').textContent = `Added "${name}" to the palette (${r.id}). Paint with it like any material.`;
+  });
+  if (job.kind === 'prop') mk('Keep as prop', async () => {
+    const name = window.prompt('Name this prop', job.prompt.slice(0, 40)); if (!name) throw new Error('Cancelled.');
+    const r = await api('POST', `/api/assets/${assetId}/make-stamp`, { name, size: 1.5, ...prov });
+    await reloadPalettes();
+    document.getElementById('art-msg').textContent = `Added "${name}" to the props (${r.id}).`;
+  });
+  if (job.kind === 'underlay') mk('Use as underlay', async () => {
+    const f = curFloor(); const cols = Math.max(f.canvas?.[0] || 0, 20), rows = Math.max(f.canvas?.[1] || 0, 15);
+    await api('POST', `/api/docs/${state.docId}/underlay`, { floor: state.floorId, asset: assetId, x: 0, y: 0, w: cols, h: rows, opacity: 1 });
+    tileCache.clear(); await refresh();
+    document.getElementById('art-msg').textContent = 'Placed behind the map. Ctrl+Z takes it back.';
+  });
+  fig.append(img, cap);
+  return fig;
+}
+
+async function pollArt() {
+  if (!artJob) return;
+  let job;
+  try { job = await api('GET', `/api/ai/jobs/${artJob}`); } catch (e) { document.getElementById('art-msg').textContent = e.message; return; }
+  document.getElementById('art-msg').textContent = job.message;
+  const box = document.getElementById('art-results');
+  while (box.children.length < job.assets.length) {
+    const i = box.children.length;
+    box.appendChild(artItem(job, job.assets[i], job.seeds[i]));
+  }
+  if (job.status === 'running') { artTimer = setTimeout(pollArt, 2000); return; }
+  document.getElementById('art-go').disabled = false;
+  document.getElementById('art-cancel').hidden = true;
+  artJob = null;
+}
+
+document.getElementById('btn-art').onclick = async () => {
+  document.getElementById('art-msg').textContent = '';
+  artDialog.showModal();
+  try {
+    const st = await api('GET', '/api/ai/status');
+    const ok = st.mode === 'nd-world';
+    document.getElementById('art-ai').textContent = ok ? `🌐 Pictures come from nd-world's imagegen queue (${st.detail}).` : '⛔ Picture making needs nd-world: set ND_CARTO_SERVER and ND_CARTO_EMAIL (and the password) for the studio.';
+    document.getElementById('art-go').disabled = !ok || !!artJob;
+  } catch { /* leave as is */ }
+};
+document.getElementById('art-go').onclick = async () => {
+  const prompt = document.getElementById('art-prompt').value.trim();
+  const msg = document.getElementById('art-msg');
+  if (!prompt) { msg.textContent = 'Describe the picture first.'; return; }
+  const kind = document.getElementById('art-kind').value;
+  const size = Number(document.getElementById('art-size').value);
+  document.getElementById('art-results').textContent = '';
+  try {
+    const { job } = await api('POST', '/api/ai/image', { kind, prompt, width: size, height: size, count: Number(document.getElementById('art-count').value), seed: Math.floor(Math.random() * 1e6) });
+    artJob = job;
+    document.getElementById('art-go').disabled = true;
+    document.getElementById('art-cancel').hidden = false;
+    msg.textContent = 'Queued…';
+    pollArt();
+  } catch (e) { msg.textContent = e.message; }
+};
+document.getElementById('art-cancel').onclick = async () => {
+  if (artJob) { try { await api('POST', `/api/ai/jobs/${artJob}/cancel`); } catch { /* finished already */ } }
+};
+document.getElementById('art-close').onclick = () => artDialog.close();
+
 // ---------- house style ----------
 document.getElementById('btn-style').onclick = async () => {
   const cur = state.doc.manifest.style || { tone: '', palette: [] };
