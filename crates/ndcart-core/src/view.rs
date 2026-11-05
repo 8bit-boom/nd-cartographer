@@ -89,6 +89,10 @@ mod tests {
                 color: "#ffffff".into(),
                 bold: false,
                 gm_only,
+                path: vec![],
+                halo: true,
+                tracking: 0.0,
+                rotation: 0.0,
             })
             .unwrap();
         }

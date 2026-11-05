@@ -61,18 +61,59 @@ pub struct Light {
     pub label: Option<String>,
 }
 
+/// Text on the map (plan §7.2 typography). Position and size are in document
+/// **cells** (`size` is the font's height), so a label scales with the map. A
+/// label is either straight (centred on `x, y`, turned by `rotation`) or, with a
+/// `path`, set along that polyline — "a river's name follows the river".
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct Label {
     pub id: String,
     pub x: f64,
     pub y: f64,
     pub text: String,
+    /// Font height in cells, 0.1..=40.
     pub size: f64,
     pub color: String,
     pub bold: bool,
     /// A GM-only note: never leaves the studio in a player-facing output.
     #[serde(default)]
     pub gm_only: bool,
+    /// Set the text along this polyline (cells); empty means a straight label.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<[f32; 2]>,
+    /// A contrasting outline behind the letters so text reads over any ground.
+    #[serde(default = "halo_on")]
+    pub halo: bool,
+    /// Extra letter spacing in em, 0..=1 (small caps and regions look better spaced).
+    #[serde(default)]
+    pub tracking: f32,
+    /// Radians, clockwise on screen (straight labels only).
+    #[serde(default)]
+    pub rotation: f32,
+}
+
+fn halo_on() -> bool {
+    true
+}
+
+impl Label {
+    /// A label with sensible defaults (straight, haloed, regular weight).
+    pub fn new(id: &str, x: f64, y: f64, text: &str) -> Label {
+        Label {
+            id: id.into(),
+            x,
+            y,
+            text: text.into(),
+            size: 0.8,
+            color: "#222222".into(),
+            bold: false,
+            gm_only: false,
+            path: Vec::new(),
+            halo: true,
+            tracking: 0.0,
+            rotation: 0.0,
+        }
+    }
 }
 
 /// A raster picture behind everything (imported art, an opened `.dd2vtt`'s map
@@ -513,6 +554,35 @@ impl FloorDoc {
                 rows = rows.max(p[1] + r.width);
             }
         }
+        // Overlay items and labels: markers (with room for their name), region and
+        // route points, and text (a label's width is about half its size per character).
+        for m in &self.markers {
+            cols = cols.max(m.x + 1.0 + m.label.chars().count() as f32 * 0.3);
+            rows = rows.max(m.y + 1.0);
+        }
+        for r in &self.regions {
+            for p in &r.points {
+                cols = cols.max(p[0]);
+                rows = rows.max(p[1]);
+            }
+        }
+        for r in &self.routes {
+            for p in &r.points {
+                cols = cols.max(p[0] + r.width);
+                rows = rows.max(p[1] + r.width);
+            }
+        }
+        for l in &self.labels {
+            let half_w = (l.text.chars().count() as f64 * l.size * 0.3) as f32;
+            if l.path.is_empty() {
+                cols = cols.max(l.x as f32 + half_w);
+                rows = rows.max(l.y as f32 + l.size as f32);
+            }
+            for p in &l.path {
+                cols = cols.max(p[0] + l.size as f32);
+                rows = rows.max(p[1] + l.size as f32);
+            }
+        }
         // An explicit map size (region maps) is authoritative: it IS the map, and
         // content past it (terrain chunks are 16 cells wide and overshoot) is outside.
         if let Some([c, r]) = self.canvas {
@@ -620,19 +690,48 @@ impl FloorDoc {
     }
 
     pub fn validate_label(label: &Label) -> CoreResult<()> {
+        if label.id.is_empty() || label.id.len() > 64 {
+            return Err(CoreError::Invalid("label id must be 1-64 chars".into()));
+        }
         finite_ok(label.x, "label x")?;
         finite_ok(label.y, "label y")?;
         finite_ok(label.size, "label size")?;
-        if !(2.0..=400.0).contains(&label.size) {
-            return Err(CoreError::Invalid("size must be 2..=400".into()));
+        let lim = f64::from(crate::error::MAX_CELL);
+        if label.x.abs() > lim || label.y.abs() > lim {
+            return Err(CoreError::OutOfBounds("label position".into()));
         }
-        if label.text.len() > 200 {
+        if !(0.1..=40.0).contains(&label.size) {
+            return Err(CoreError::Invalid(
+                "label size must be 0.1..=40 cells".into(),
+            ));
+        }
+        if label.text.chars().count() > 200 {
             return Err(CoreError::Invalid(
                 "label text is capped at 200 chars".into(),
             ));
         }
-        if !label.color.starts_with('#') {
+        let c = label.color.as_bytes();
+        if !(c.len() == 7 && c[0] == b'#' && c[1..].iter().all(u8::is_ascii_hexdigit)) {
             return Err(CoreError::Invalid("label color must be #rrggbb".into()));
+        }
+        if !label.tracking.is_finite() || !(0.0..=1.0).contains(&label.tracking) {
+            return Err(CoreError::Invalid("label tracking must be 0..=1".into()));
+        }
+        if !label.rotation.is_finite() || label.rotation.abs() > 1000.0 {
+            return Err(CoreError::Invalid("label rotation must be finite".into()));
+        }
+        if !label.path.is_empty() {
+            if label.path.len() < 2 || label.path.len() > 400 {
+                return Err(CoreError::Invalid("a label path has 2..=400 points".into()));
+            }
+            for p in &label.path {
+                if !(p[0].is_finite() && p[1].is_finite())
+                    || f64::from(p[0]).abs() > lim
+                    || f64::from(p[1]).abs() > lim
+                {
+                    return Err(CoreError::OutOfBounds("label path point".into()));
+                }
+            }
         }
         Ok(())
     }
@@ -888,5 +987,108 @@ mod layer_tests {
         assert!(f.set_canvas(Some([0, 5])).is_err() && f.set_canvas(Some([5, 99_999])).is_err());
         f.set_canvas(None).unwrap();
         assert_eq!(f.extent(), grown);
+    }
+
+    #[test]
+    fn labels_are_validated_in_cells_and_old_json_still_loads() {
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.upsert_label(Label::new("a", 3.0, 4.0, "Kingdom"))
+            .unwrap();
+        let mut along = Label::new("r", 0.0, 0.0, "Silver River");
+        along.path = vec![[1.0, 1.0], [5.0, 2.0], [9.0, 2.5]];
+        along.tracking = 0.2;
+        f.upsert_label(along).unwrap();
+        type Mutator = fn(&mut Label);
+        let bad: Vec<(&str, Mutator)> = vec![
+            ("size 0", |l| l.size = 0.0),
+            ("size huge", |l| l.size = 400.0),
+            ("nan x", |l| l.x = f64::NAN),
+            ("far y", |l| l.y = 1e9),
+            ("colour", |l| l.color = "red".into()),
+            ("long text", |l| l.text = "x".repeat(201)),
+            ("tracking", |l| l.tracking = 5.0),
+            ("rotation", |l| l.rotation = f32::INFINITY),
+            ("one-point path", |l| l.path = vec![[0.0, 0.0]]),
+            ("nan in path", |l| {
+                l.path = vec![[0.0, 0.0], [f32::NAN, 1.0]]
+            }),
+            ("empty id", |l| l.id = String::new()),
+        ];
+        for (name, m) in bad {
+            let mut l = Label::new("z", 1.0, 1.0, "x");
+            m(&mut l);
+            assert!(f.upsert_label(l).is_err(), "{name}");
+        }
+        assert_eq!(f.labels.len(), 2, "refusals stored nothing");
+        // A label saved before paths, halos and tracking existed still loads, haloed and straight.
+        let old =
+            r##"{"id":"o","x":1.0,"y":2.0,"text":"Old","size":2.0,"color":"#112233","bold":true}"##;
+        let l: Label = serde_json::from_str(old).unwrap();
+        assert!(l.halo && l.path.is_empty() && l.tracking == 0.0 && !l.gm_only);
+        // Non-ASCII text counts characters, not bytes.
+        f.upsert_label(Label::new("u", 1.0, 1.0, &"é".repeat(150)))
+            .unwrap();
+    }
+
+    #[test]
+    fn extent_holds_markers_regions_routes_and_labels_too() {
+        use crate::overlay::{Marker, OverlayItem as I, Region, Route};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.put_overlay(
+            I::Marker(Marker {
+                id: "m".into(),
+                x: 10.0,
+                y: 4.0,
+                label: "Port".into(),
+                note: String::new(),
+                color: "#e8b030".into(),
+                link_schematic: None,
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(
+            f.extent().0 >= 12 && f.extent().1 >= 5,
+            "a marker and its name: {:?}",
+            f.extent()
+        );
+        f.put_overlay(
+            I::Region(Region {
+                id: "r".into(),
+                name: "R".into(),
+                points: vec![[0.0, 0.0], [30.0, 0.0], [30.0, 22.0]],
+                color: "#c0504d".into(),
+                opacity: 0.3,
+                hatch: false,
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(f.extent(), (30, 22));
+        f.put_overlay(
+            I::Route(Route {
+                id: "t".into(),
+                name: "T".into(),
+                points: vec![[1.0, 1.0], [40.0, 31.0]],
+                color: "#6b3f1d".into(),
+                width: 0.2,
+                dashed: false,
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(f.extent(), (41, 32));
+        let mut l = Label::new("l", 50.0, 3.0, "A long label");
+        l.size = 2.0;
+        f.upsert_label(l).unwrap();
+        assert!(
+            f.extent().0 >= 57,
+            "text extends past its anchor: {:?}",
+            f.extent()
+        );
+        let mut p = Label::new("p", 0.0, 0.0, "x");
+        p.path = vec![[2.0, 2.0], [3.0, 60.0]];
+        f.upsert_label(p).unwrap();
+        assert!(f.extent().1 >= 60);
     }
 }

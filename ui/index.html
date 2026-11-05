@@ -31,6 +31,8 @@
     <button id="tool-paint" class="tool battle-only" title="Paint cells (drag)">🖌 Paint</button>
     <button id="tool-brush" class="tool" title="Brush: freehand material (R). Pen pressure and tilt shape the line">🖍 Brush</button>
     <button id="tool-erase" class="tool" title="Eraser: reveals the room layer beneath (E)">🧽 Erase</button>
+    <button id="tool-label" class="tool" title="Label: click to place text (T)">🔤 Label</button>
+    <button id="tool-pathlabel" class="tool" title="Text along a path: click points, Enter to finish (Y)">〰 Text on path</button>
     <button id="tool-stamp" class="tool" title="Stamp: place a prop (S). , and . rotate, F flips">📦 Stamp</button>
     <button id="tool-door" class="tool battle-only" title="Door on a cell edge (click an edge again to remove)">🚪 Door</button>
     <button id="tool-window" class="tool battle-only" title="Window on a cell edge">🪟 Window</button>
@@ -108,6 +110,16 @@
     <label>Rough edge <input type="range" id="br-rough" min="0" max="1" step="0.05" value="0.2"></label>
     <label>Density <input type="range" id="br-density" min="0.05" max="1" step="0.05" value="0.6"></label>
     <span class="dim">[ ] size</span>
+  </div>
+  <div id="labelbar" hidden>
+    <label>Size <input type="range" id="lb-size" min="0.3" max="6" step="0.1" value="1"><output id="lb-size-o">1</output></label>
+    <label>Colour <input type="color" id="lb-color" value="#2a2018"></label>
+    <label><input type="checkbox" id="lb-bold"> bold</label>
+    <label><input type="checkbox" id="lb-halo" checked> halo</label>
+    <label>Spacing <input type="range" id="lb-track" min="0" max="0.6" step="0.05" value="0"></label>
+    <label>Turn <input type="range" id="lb-rot" min="-90" max="90" step="5" value="0"><output id="lb-rot-o">0°</output></label>
+    <label><input type="checkbox" id="lb-gm"> GM only</label>
+    <span class="dim" id="lb-hint"></span>
   </div>
   <div id="stampbar" hidden>
     <span id="stamp-palette"></span>

@@ -248,13 +248,15 @@ const TERRAIN_TOOLS = ['raise', 'lower', 'smooth', 'flatten', 'roughen'];
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'region', 'route']) {
+  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'region', 'route', 'label', 'pathlabel']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
   document.getElementById('brushbar').hidden = !(tool === 'brush' || tool === 'erase');
   document.getElementById('stampbar').hidden = tool !== 'stamp';
   setTerrainBar(tool);
+  document.getElementById('labelbar').hidden = !(tool === 'label' || tool === 'pathlabel');
+  document.getElementById('lb-hint').textContent = tool === 'pathlabel' ? 'click points along the path, Enter to finish' : tool === 'label' ? 'click to place' : '';
   statusEl.textContent =
     tool === 'paint' ? `Painting ${activeItem().name}`
     : tool === 'brush' ? `Brush: ${activeItem().name} — drag to paint (pressure and tilt count)`
@@ -263,6 +265,8 @@ function setTool(tool) {
     : TERRAIN_TOOLS.includes(tool) ? `${tool[0].toUpperCase()}${tool.slice(1)}: drag over the map`
     : tool === 'river' ? 'River: click points from source to mouth · Enter finishes · Esc cancels'
     : tool === 'marker' ? 'Marker: click to place a point of interest'
+    : tool === 'label' ? 'Label: click where the text goes'
+    : tool === 'pathlabel' ? 'Text on a path: click points along the way · Enter finishes · Esc cancels'
     : tool === 'region' ? 'Region: click the corners · Enter finishes · Esc cancels'
     : tool === 'route' ? 'Route: click points along the way · Enter finishes · Esc cancels'
     : tool in EDGE_TOOLS ? `Click a cell edge to place a ${tool}; click it again to remove`
@@ -655,6 +659,37 @@ document.getElementById('ts-regen').onclick = () => {
   }
 };
 
+// ---------- labels (typography) ----------
+
+const lbVal = (id) => parseFloat(document.getElementById(id).value);
+document.getElementById('lb-size').oninput = (e) => { document.getElementById('lb-size-o').textContent = e.target.value; };
+document.getElementById('lb-rot').oninput = (e) => { document.getElementById('lb-rot-o').textContent = `${e.target.value}°`; };
+
+function labelBase(text) {
+  return {
+    id: newId('lb'), text: text.trim().slice(0, 200), size: lbVal('lb-size'),
+    color: document.getElementById('lb-color').value, bold: document.getElementById('lb-bold').checked,
+    halo: document.getElementById('lb-halo').checked, tracking: lbVal('lb-track'),
+    rotation: (lbVal('lb-rot') * Math.PI) / 180, gm_only: document.getElementById('lb-gm').checked,
+  };
+}
+
+async function placeLabel(wx, wy) {
+  const text = window.prompt('Label text', '');
+  if (text === null || !text.trim()) return;
+  const s = ppc();
+  await postOps([{ t: 'upsert_label', label: { ...labelBase(text), x: +(wx / s).toFixed(3), y: +(wy / s).toFixed(3) } }]);
+}
+
+async function finishPathLabel() {
+  const pts = overlayDraft;
+  if (!pts || pts.length < 2) { render(); return; }   // too few points: keep drawing
+  overlayDraft = null;
+  const text = window.prompt('Text along the path', '');
+  if (text === null || !text.trim()) { render(); return; }
+  await postOps([{ t: 'upsert_label', label: { ...labelBase(text), x: pts[0][0], y: pts[0][1], rotation: 0, path: pts } }]);
+}
+
 // ---------- overlay: markers, regions, routes ----------
 
 let overlayDraft = null;    // [[x,y]] for a region or route in progress
@@ -678,6 +713,7 @@ function addOverlayPoint(wx, wy) {
 function finishDraft() {
   if (state.tool === 'river') return finishRiver();
   if (state.tool === 'region' || state.tool === 'route') return finishOverlayShape();
+  if (state.tool === 'pathlabel') return finishPathLabel();
 }
 
 async function finishOverlayShape() {
@@ -697,7 +733,7 @@ function drawOverlayDraft() {
   if (!overlayDraft || !overlayDraft.length) return;
   const s = ppc();
   ctx.save();
-  ctx.strokeStyle = state.tool === 'region' ? 'rgba(255,120,110,0.95)' : 'rgba(255,230,140,0.95)';
+  ctx.strokeStyle = state.tool === 'region' ? 'rgba(255,120,110,0.95)' : state.tool === 'pathlabel' ? 'rgba(160,220,255,0.95)' : 'rgba(255,230,140,0.95)';
   ctx.lineWidth = 2.5; ctx.lineJoin = 'round';
   ctx.beginPath();
   overlayDraft.forEach((p, i) => { const [x, y] = worldToScreen(p[0] * s, p[1] * s); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
@@ -732,6 +768,16 @@ canvas.addEventListener('pointerdown', (e) => {
   if (TERRAIN_TOOLS.includes(state.tool) && e.button === 0) {
     startTerrainStroke(wx, wy);
     dragging = { terrain: true };
+    return;
+  }
+  if (state.tool === 'label' && e.button === 0) {
+    placeLabel(wx, wy);
+    dragging = null;
+    return;
+  }
+  if (state.tool === 'pathlabel' && e.button === 0) {
+    if (isDoubleClick(e)) finishPathLabel(); else addOverlayPoint(wx, wy);
+    dragging = null;
     return;
   }
   if (state.tool === 'marker' && e.button === 0) {
@@ -776,7 +822,7 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointermove', (e) => {
   const [hx, hy] = screenToWorld(e.offsetX, e.offsetY);
   state.hover = [hx / ppc(), hy / ppc()];
-  if (TERRAIN_TOOLS.includes(state.tool) || ['river', 'region', 'route'].includes(state.tool)) render();
+  if (TERRAIN_TOOLS.includes(state.tool) || ['river', 'region', 'route', 'pathlabel'].includes(state.tool)) render();
   if (!dragging) return;
   if (dragging.terrain) {
     const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
@@ -842,6 +888,8 @@ const KEYS = [
   { key: 'g', label: 'Flatten land (world maps)', run: () => regionOnly('flatten') },
   { key: 'x', label: 'Roughen land (world maps)', run: () => regionOnly('roughen') },
   { key: 'i', label: 'River tool (world maps)', run: () => regionOnly('river') },
+  { key: 't', label: 'Label tool', run: () => setTool('label') },
+  { key: 'y', label: 'Text along a path', run: () => setTool('pathlabel') },
   { key: 'k', label: 'Marker tool (world maps)', run: () => regionOnly('marker') },
   { key: 'u', label: 'Route tool (world maps)', run: () => regionOnly('route') },
   { key: 'Enter', label: 'Finish the river / region / route', run: () => finishDraft() },
@@ -1054,6 +1102,12 @@ function buildOutline() {
       r.dataset.kind = 'label';
       r.onclick = () => { focusRow(r); centerOn({ x: l.cell[0], y: l.cell[1] }); };
       r.ondeleterequest = () => postOps([{ t: 'remove_label', id: l.id }]);
+      r.onrenamerequest = () => {
+        const full = (state.doc.floors[0].labels || []).find(x => x.id === l.id);
+        const n = window.prompt('Label text', l.text);
+        if (!full || n === null || !n.trim() || n.trim() === l.text) return;
+        postOps([{ t: 'upsert_label', label: { ...full, text: n.trim().slice(0, 200) } }]);
+      };
     }
   }
   const rows = visibleRows();

@@ -628,6 +628,280 @@ fn draw_overlay(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: 
     }
 }
 
+/// What a piece of map text is anchored to.
+enum Anchor {
+    Straight {
+        x: f32,
+        y: f32,
+        rotation: f32,
+        left: bool,
+    },
+    Path(Vec<[f32; 2]>),
+}
+
+struct TextItem {
+    text: String,
+    size_cells: f32,
+    color: [u8; 3],
+    bold: bool,
+    halo: bool,
+    tracking: f32,
+    anchor: Anchor,
+    min_scale: f32,
+    /// Lower is painted earlier (so under) and placed first when two names collide.
+    rank: u8,
+    /// A GM's own label: always drawn, never moved aside for a generated name.
+    user: bool,
+    /// Never wider than this many cells (a region's name stays inside the region).
+    fit_width_cells: Option<f32>,
+}
+
+fn polygon_centroid(pts: &[[f32; 2]]) -> ([f32; 2], f32) {
+    let (mut a, mut cx, mut cy) = (0.0f64, 0.0f64, 0.0f64);
+    for i in 0..pts.len() {
+        let (p, q) = (pts[i], pts[(i + 1) % pts.len()]);
+        let cross = f64::from(p[0]) * f64::from(q[1]) - f64::from(q[0]) * f64::from(p[1]);
+        a += cross;
+        cx += (f64::from(p[0]) + f64::from(q[0])) * cross;
+        cy += (f64::from(p[1]) + f64::from(q[1])) * cross;
+    }
+    if a.abs() < 1e-9 {
+        let n = pts.len() as f32;
+        return (
+            [
+                pts.iter().map(|p| p[0]).sum::<f32>() / n,
+                pts.iter().map(|p| p[1]).sum::<f32>() / n,
+            ],
+            0.0,
+        );
+    }
+    (
+        [(cx / (3.0 * a)) as f32, (cy / (3.0 * a)) as f32],
+        (a.abs() / 2.0) as f32,
+    )
+}
+
+/// Every piece of text on the floor, in placement priority order: the GM's own
+/// labels, then marker names, region names, river names, route names.
+fn text_items(floor: &FloorDoc) -> Vec<TextItem> {
+    let mut v = Vec::new();
+    for l in &floor.labels {
+        if l.text.trim().is_empty() {
+            continue;
+        }
+        v.push(TextItem {
+            text: l.text.clone(),
+            size_cells: l.size as f32,
+            color: parse_hex(&l.color),
+            bold: l.bold,
+            halo: l.halo,
+            tracking: l.tracking,
+            anchor: if l.path.is_empty() {
+                Anchor::Straight {
+                    x: l.x as f32,
+                    y: l.y as f32,
+                    rotation: l.rotation,
+                    left: false,
+                }
+            } else {
+                Anchor::Path(l.path.clone())
+            },
+            min_scale: 0.3,
+            rank: 9,
+            user: true,
+            fit_width_cells: None,
+        });
+    }
+    for m in &floor.markers {
+        if m.label.trim().is_empty() {
+            continue;
+        }
+        v.push(TextItem {
+            text: m.label.clone(),
+            size_cells: 0.5,
+            color: [0x1b, 0x1b, 0x1b],
+            bold: false,
+            halo: true,
+            tracking: 0.0,
+            anchor: Anchor::Straight {
+                x: m.x + 0.55,
+                y: m.y,
+                rotation: 0.0,
+                left: true,
+            },
+            min_scale: 1.0,
+            rank: 8,
+            user: false,
+            fit_width_cells: None,
+        });
+    }
+    for r in &floor.regions {
+        if r.name.trim().is_empty() {
+            continue;
+        }
+        let (c, area) = polygon_centroid(&r.points);
+        v.push(TextItem {
+            text: r.name.clone(),
+            size_cells: (0.16 * area.sqrt()).clamp(0.5, 2.4),
+            color: ndcart_paint::shade(parse_hex(&r.color), 0.55),
+            bold: true,
+            halo: true,
+            tracking: 0.3,
+            anchor: Anchor::Straight {
+                x: c[0],
+                y: c[1],
+                rotation: 0.0,
+                left: false,
+            },
+            min_scale: 1.0,
+            rank: 1,
+            user: false,
+            fit_width_cells: {
+                let xs = r.points.iter().map(|p| p[0]);
+                let (lo, hi) = (
+                    xs.clone().fold(f32::MAX, f32::min),
+                    xs.fold(f32::MIN, f32::max),
+                );
+                Some((hi - lo) * 0.9)
+            },
+        });
+    }
+    for r in &floor.rivers {
+        if r.name.trim().is_empty() {
+            continue;
+        }
+        v.push(TextItem {
+            text: r.name.clone(),
+            size_cells: (r.width * 0.65).clamp(0.35, 0.9),
+            color: [0x1d, 0x3f, 0x66],
+            bold: false,
+            halo: true,
+            tracking: 0.1,
+            anchor: Anchor::Path(r.points.clone()),
+            min_scale: 0.45,
+            rank: 3,
+            user: false,
+            fit_width_cells: None,
+        });
+    }
+    for r in &floor.routes {
+        if r.name.trim().is_empty() {
+            continue;
+        }
+        v.push(TextItem {
+            text: r.name.clone(),
+            size_cells: 0.38,
+            color: ndcart_paint::shade(parse_hex(&r.color), 0.7),
+            bold: false,
+            halo: true,
+            tracking: 0.1,
+            anchor: Anchor::Path(r.points.clone()),
+            min_scale: 0.5,
+            rank: 2,
+            user: false,
+            fit_width_cells: None,
+        });
+    }
+    v
+}
+
+/// Typography: the floor's labels and the names of its markers, regions, rivers
+/// and routes. Each is laid out in WORLD pixels, so collisions (generated names
+/// yield to ones already placed) are decided the same way in every tile; each is
+/// drawn into its own sprite and blitted at an integer offset, so a tile equals
+/// the matching crop of the full render exactly. Text under 5 px is not drawn.
+fn draw_labels(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+    let items = text_items(floor);
+    if items.is_empty() {
+        return;
+    }
+    let s = ppc as f32;
+    let (w, h) = (i64::from(pixmap.width()), i64::from(pixmap.height()));
+    let mut taken: Vec<[f32; 4]> = Vec::new();
+    type Drawn = (u8, usize, Vec<crate::text::Placed>, [f32; 4], f32); // rank, item, glyphs, box, size
+    let mut drawn: Vec<Drawn> = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        // A generated name that does not fit where it wants to go is tried smaller
+        // before it is dropped; a GM's own label is always placed at full size.
+        let tries: &[f32] = if it.user { &[1.0] } else { &[1.0, 0.8, 0.65] };
+        let mut chosen = None;
+        for &shrink in tries {
+            let mut size_px = it.size_cells * s * shrink;
+            if let Some(max_w) = it.fit_width_cells {
+                let natural = crate::text::layout(&it.text, it.bold, size_px, it.tracking).width;
+                if natural > max_w * s && natural > 0.0 {
+                    size_px *= max_w * s / natural; // shrink to the allowed width
+                }
+            }
+            if size_px < 5.0 {
+                continue;
+            }
+            let lay = crate::text::layout(&it.text, it.bold, size_px, it.tracking);
+            let placed = match &it.anchor {
+                Anchor::Straight {
+                    x,
+                    y,
+                    rotation,
+                    left,
+                } => crate::text::place_straight(&lay, x * s, y * s, *rotation, *left),
+                Anchor::Path(pts) => {
+                    let px: Vec<(f32, f32)> = pts.iter().map(|p| (p[0] * s, p[1] * s)).collect();
+                    match crate::text::place_along(&lay, &px, it.min_scale) {
+                        Some(p) => p,
+                        None => continue,
+                    }
+                }
+            };
+            let Some(b) = crate::text::bounds(&placed, size_px, size_px * 0.2) else {
+                continue;
+            };
+            let overlaps = |o: &[f32; 4]| b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1];
+            if it.user || !taken.iter().any(overlaps) {
+                chosen = Some((placed, b, size_px));
+                break;
+            }
+        }
+        let Some((placed, b, size_px)) = chosen else {
+            continue;
+        };
+        taken.push(b);
+        drawn.push((it.rank, i, placed, b, size_px));
+    }
+    drawn.sort_by_key(|(rank, i, ..)| (*rank, *i));
+    for (_, i, placed, b, size_px) in drawn {
+        let it = &items[i];
+        let (ox, oy) = (b[0].floor() as i64, b[1].floor() as i64);
+        let (sw, sh) = (
+            (b[2].ceil() as i64 - ox + 2).max(1),
+            (b[3].ceil() as i64 - oy + 2).max(1),
+        );
+        if ox + sw < x0 || oy + sh < y0 || ox > x0 + w || oy > y0 + h || sw * sh > MAX_SPRITE_PIXELS
+        {
+            continue;
+        }
+        let Some(mut sprite) = tiny_skia::Pixmap::new(sw as u32, sh as u32) else {
+            continue;
+        };
+        let local: Vec<crate::text::Placed> = placed
+            .iter()
+            .map(|p| crate::text::Placed {
+                x: p.x - ox as f32,
+                y: p.y - oy as f32,
+                ..p.clone()
+            })
+            .collect();
+        crate::text::draw(&mut sprite, &local, it.bold, size_px, it.color, it.halo);
+        pixmap.draw_pixmap(
+            (ox - x0) as i32,
+            (oy - y0) as i32,
+            sprite.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
+}
+
 /// Shade the heightmap into the region: every pixel is a pure function of its
 /// world position, so tiles and the full render agree exactly.
 fn draw_terrain(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
@@ -950,6 +1224,7 @@ fn render_pixmap(
     apply_strokes(&mut pixmap, floor, ppc, x0, y0);
     apply_stamps(&mut pixmap, floor, ppc, x0, y0);
     draw_overlay(&mut pixmap, floor, ppc, x0, y0);
+    draw_labels(&mut pixmap, floor, ppc, x0, y0);
 
     // Walls on top: stroke width grows with zoom, min 1px, so z0 reads.
     let mut wall_paint = tiny_skia::Paint {
@@ -1933,7 +2208,7 @@ mod tests {
         f.put_overlay(
             I::Region(Region {
                 id: "r".into(),
-                name: "Kingdom".into(),
+                name: String::new(), // unnamed: the old probes measure the fill, not text
                 points: vec![[1.0, 1.0], [4.0, 1.0], [4.0, 4.0], [1.0, 4.0]],
                 color: "#c0504d".into(),
                 opacity: 0.5,
@@ -2067,6 +2342,316 @@ mod tests {
                 }
             }
             assert_eq!(worst, 0, "tile ({tx},{ty}) differs by {worst}");
+        }
+    }
+
+    /// Count pixels close to `want` inside a pixel rectangle `[x0, y0, x1, y1)`.
+    fn ink(pm: &tiny_skia::Pixmap, want: [u8; 3], r: [u32; 4]) -> usize {
+        let mut n = 0;
+        for y in r[1]..r[3].min(pm.height()) {
+            for x in r[0]..r[2].min(pm.width()) {
+                let c = rgb(pm, x, y);
+                if (0..3).all(|k| c[k].abs_diff(want[k]) < 40) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn red_label(id: &str, x: f64, y: f64, text: &str) -> ndcart_core::Label {
+        let mut l = ndcart_core::Label::new(id, x, y, text);
+        l.color = "#c00000".into();
+        l.size = 1.2;
+        l.bold = true;
+        l
+    }
+
+    #[test]
+    fn a_straight_label_is_drawn_at_its_anchor_with_a_halo_and_nowhere_else() {
+        let mut f = light_floor(); // 8x8 light-grey room
+        f.upsert_label(red_label("t", 4.0, 3.0, "Hue")).unwrap();
+        let pm = bake_stamped(&f, 48);
+        // Text is centred on (4, 3) cells = (192, 144) px; ~1.2 cells high = 58 px.
+        assert!(
+            ink(&pm, [0xc0, 0, 0], [150, 110, 240, 180]) > 200,
+            "the letters are there"
+        );
+        assert_eq!(
+            ink(&pm, [0xc0, 0, 0], [0, 0, 100, 100]),
+            0,
+            "and not elsewhere"
+        );
+        // A dark-red label gets a light halo: near-white pixels appear around the letters.
+        let halo = ink(&pm, [0xfd, 0xfa, 0xef], [150, 110, 240, 180]);
+        assert!(halo > 80, "halo pixels: {halo}");
+        let mut plain = light_floor();
+        let mut l = red_label("t", 4.0, 3.0, "Hue");
+        l.halo = false;
+        plain.upsert_label(l).unwrap();
+        assert!(
+            ink(
+                &bake_stamped(&plain, 48),
+                [0xfd, 0xfa, 0xef],
+                [150, 110, 240, 180]
+            ) < halo,
+            "halo: false draws none"
+        );
+        // Empty text draws nothing at all.
+        let mut e = light_floor();
+        e.upsert_label(red_label("t", 4.0, 3.0, "  ")).unwrap();
+        assert_eq!(
+            bake_stamped(&e, 48).data(),
+            bake_stamped(&light_floor(), 48).data()
+        );
+    }
+
+    #[test]
+    fn marker_names_region_names_and_path_names_appear_where_they_belong() {
+        use ndcart_core::overlay::{Marker, OverlayItem as I, Region, Route};
+        let mut f = light_floor();
+        f.put_overlay(
+            I::Marker(Marker {
+                id: "m".into(),
+                x: 2.0,
+                y: 1.5,
+                label: "Port".into(),
+                note: String::new(),
+                color: "#e8b030".into(),
+                link_schematic: None,
+            }),
+            None,
+        )
+        .unwrap();
+        f.put_overlay(
+            I::Region(Region {
+                id: "r".into(),
+                name: "Kingdom".into(),
+                points: vec![[3.0, 3.0], [7.0, 3.0], [7.0, 6.0], [3.0, 6.0]],
+                color: "#8040c0".into(),
+                opacity: 0.0,
+                hatch: false,
+            }),
+            None,
+        )
+        .unwrap();
+        f.put_overlay(
+            I::Route(Route {
+                id: "t".into(),
+                name: "Road".into(),
+                points: vec![[0.5, 7.5], [7.5, 7.5]],
+                color: "#c00000".into(),
+                width: 0.05,
+                dashed: false,
+            }),
+            None,
+        )
+        .unwrap();
+        let near = bake_stamped(&f, 48);
+        // The marker name sits right of the pin (pin at x=96..., name starts ~0.55 cells right).
+        let dark = [0x1b, 0x1b, 0x1b];
+        assert!(
+            ink(&near, dark, [120, 56, 220, 92]) > 60,
+            "marker name right of the pin"
+        );
+        assert_eq!(ink(&near, dark, [0, 56, 60, 92]), 0, "none to its left");
+        // The region name is centred in the polygon (centre 5, 4.5 cells = 240, 216).
+        let purple = ndcart_paint::shade([0x80, 0x40, 0xc0], 0.55);
+        assert!(
+            ink(&near, purple, [170, 190, 310, 240]) > 80,
+            "region name at the centroid"
+        );
+        // The route name follows the route: a reddish line along y = 7.5 cells (360 px).
+        assert!(
+            ink(
+                &near,
+                ndcart_paint::shade([0xc0, 0, 0], 0.7),
+                [60, 330, 330, 380]
+            ) > 40,
+            "route name along the road"
+        );
+        // Zoomed far out the text would be unreadable, so it is not drawn at all.
+        let far = bake_stamped(&f, 8);
+        assert_eq!(
+            // (inside the 8x8-cell floor; below it is void, which is also "dark")
+            ink(&far, dark, [0, 0, 64, 64]),
+            0,
+            "marker text under 5 px is hidden"
+        );
+    }
+
+    #[test]
+    fn a_users_label_wins_a_collision_and_generated_names_yield() {
+        use ndcart_core::overlay::{Marker, OverlayItem as I};
+        let mk = |id: &str, y: f32, label: &str| {
+            I::Marker(Marker {
+                id: id.into(),
+                x: 2.0,
+                y,
+                label: label.into(),
+                note: String::new(),
+                color: "#e8b030".into(),
+                link_schematic: None,
+            })
+        };
+        let mut f = light_floor();
+        f.put_overlay(mk("a", 2.0, "Alpha"), None).unwrap();
+        f.put_overlay(mk("b", 2.1, "Bravo"), None).unwrap(); // its name would sit on Alpha's
+        let pm = bake_stamped(&f, 48);
+        let dark = [0x1b, 0x1b, 0x1b];
+        let both = ink(&pm, dark, [110, 70, 330, 140]);
+        let mut only_a = light_floor();
+        only_a.put_overlay(mk("a", 2.0, "Alpha"), None).unwrap();
+        let alone = ink(&bake_stamped(&only_a, 48), dark, [110, 70, 330, 140]);
+        assert!(
+            both <= alone + 5,
+            "the second name was skipped, not drawn over the first: {both} vs {alone}"
+        );
+        // A GM's own label in the same place is drawn, and pushes the marker names aside.
+        f.upsert_label(red_label("mine", 4.0, 2.05, "Mine"))
+            .unwrap();
+        let pm = bake_stamped(&f, 48);
+        assert!(
+            ink(&pm, [0xc0, 0, 0], [150, 50, 270, 150]) > 150,
+            "the user's label is always drawn"
+        );
+    }
+
+    #[test]
+    fn a_region_name_stays_inside_its_region_and_retries_smaller_beside_a_label() {
+        use ndcart_core::overlay::{OverlayItem as I, Region};
+        let purple = ndcart_paint::shade([0x80, 0x40, 0xc0], 0.55);
+        let region = |pts: Vec<[f32; 2]>| {
+            I::Region(Region {
+                id: "r".into(),
+                name: "Kingdom of Hue".into(),
+                points: pts,
+                color: "#8040c0".into(),
+                opacity: 0.0,
+                hatch: false,
+            })
+        };
+        // A narrow region (3 cells wide at 48 px = 144 px): the long name is shrunk to fit it.
+        let mut f = light_floor();
+        f.put_overlay(
+            region(vec![[2.0, 1.0], [5.0, 1.0], [5.0, 7.0], [2.0, 7.0]]),
+            None,
+        )
+        .unwrap();
+        let pm = bake_stamped(&f, 48);
+        let (inside, left_of, right_of) = (
+            ink(&pm, purple, [96, 0, 240, 384]),
+            ink(&pm, purple, [0, 0, 80, 384]),
+            ink(&pm, purple, [256, 0, 384, 384]),
+        );
+        assert!(inside > 150, "the name is drawn: {inside}");
+        assert_eq!(
+            (left_of, right_of),
+            (0, 0),
+            "and does not spill out of the region"
+        );
+        // A user label crowding the right end: the region name is still there, only smaller.
+        let mut g = light_floor();
+        g.put_overlay(
+            region(vec![[1.0, 2.0], [7.0, 2.0], [7.0, 6.0], [1.0, 6.0]]),
+            None,
+        )
+        .unwrap();
+        let alone = ink(&bake_stamped(&g, 48), purple, [0, 0, 400, 400]);
+        g.upsert_label(red_label("crowd", 6.2, 4.0, "Crowd"))
+            .unwrap();
+        let crowded = ink(&bake_stamped(&g, 48), purple, [0, 0, 400, 400]);
+        assert!(
+            crowded > 0,
+            "the name survived the collision (retried smaller)"
+        );
+        assert!(crowded < alone, "…at a smaller size: {crowded} vs {alone}");
+    }
+
+    #[test]
+    fn a_label_on_a_path_follows_it_and_reads_left_to_right() {
+        let mut f = light_floor();
+        let mut l = red_label("p", 0.0, 0.0, "Silverwater");
+        l.size = 0.9;
+        l.path = vec![[1.0, 6.5], [3.0, 5.0], [6.0, 2.0]]; // rising to the right
+        f.upsert_label(l).unwrap();
+        let pm = bake_stamped(&f, 48);
+        // Ink hugs the path: lower left near (1..3, 6..5) and upper right near (5..6, 3..2),
+        // and none in the opposite corners.
+        assert!(
+            ink(&pm, [0xc0, 0, 0], [40, 220, 190, 340]) > 40,
+            "lower left of the path"
+        );
+        assert!(
+            ink(&pm, [0xc0, 0, 0], [220, 90, 340, 190]) > 40,
+            "upper right of the path"
+        );
+        assert_eq!(
+            ink(&pm, [0xc0, 0, 0], [250, 250, 380, 380]),
+            0,
+            "none off the path"
+        );
+        // The same path given in the other direction reads identically (not mirrored).
+        let mut g = light_floor();
+        let mut r = red_label("p", 0.0, 0.0, "Silverwater");
+        r.size = 0.9;
+        r.path = vec![[6.0, 2.0], [3.0, 5.0], [1.0, 6.5]];
+        g.upsert_label(r).unwrap();
+        assert_eq!(
+            bake_stamped(&g, 48).data(),
+            pm.data(),
+            "path direction does not change the text"
+        );
+    }
+
+    #[test]
+    fn typography_bakes_the_same_in_tiles_and_in_the_full_render() {
+        use ndcart_core::overlay::{Marker, OverlayItem as I, Region};
+        let mut f = light_floor();
+        f.upsert_label(red_label("a", 2.2, 2.0, "Alpha Keep"))
+            .unwrap();
+        let mut p = red_label("b", 0.0, 0.0, "Winding river name");
+        p.path = vec![[0.5, 7.0], [3.0, 4.5], [7.5, 5.0]];
+        f.upsert_label(p).unwrap();
+        f.put_overlay(
+            I::Marker(Marker {
+                id: "m".into(),
+                x: 5.5,
+                y: 1.5,
+                label: "Port Neon".into(),
+                note: String::new(),
+                color: "#e8b030".into(),
+                link_schematic: None,
+            }),
+            None,
+        )
+        .unwrap();
+        f.put_overlay(
+            I::Region(Region {
+                id: "r".into(),
+                name: "Hue".into(),
+                points: vec![[1.0, 1.0], [7.0, 1.0], [7.0, 7.0]],
+                color: "#3050c0".into(),
+                opacity: 0.2,
+                hatch: false,
+            }),
+            None,
+        )
+        .unwrap();
+        let (png, ..) = bake_full_stroked(&f, 64);
+        let full = decode(&png);
+        // (only tiles that lie inside the image: Pixmap::pixel does not bounds-check x)
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    assert_eq!(
+                        tile.pixel(x, y),
+                        full.pixel(tx as u32 * 256 + x, ty as u32 * 256 + y),
+                        "tile ({tx},{ty}) pixel ({x},{y})"
+                    );
+                }
+            }
         }
     }
 

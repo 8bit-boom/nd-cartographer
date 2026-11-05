@@ -8,6 +8,7 @@ mod convert;
 #[cfg(feature = "bridge")]
 mod publish;
 mod store;
+mod text;
 mod tiles;
 
 use axum::extract::{Path, State};
@@ -1851,6 +1852,53 @@ mod tests {
         ] {
             assert_eq!(ops(bad).await, StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[tokio::test]
+    async fn a_gm_only_label_never_reaches_a_player_export() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let (id, floor) = {
+            let mut st = app.store.write().await;
+            let m = st.create("Notes", DocKind::Battle).clone();
+            let d = st.docs.get_mut(&m.id).unwrap();
+            let fid = d.floors[0].id.clone();
+            let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+                {"t":"upsert_space","space":{"id":"a","name":"A","color":"#d0d0d0","kind":"room"}},
+                {"t":"paint_cells","cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0},{"x":3,"y":0},{"x":0,"y":1},{"x":1,"y":1},{"x":2,"y":1},{"x":3,"y":1}],"space":"a"},
+                {"t":"upsert_label","label":{"id":"open","x":2.0,"y":0.5,"text":"Hall","size":0.7,"color":"#c00000","bold":true,"gm_only":false}},
+                {"t":"upsert_label","label":{"id":"secret","x":2.0,"y":1.5,"text":"Trapdoor","size":0.7,"color":"#0000c0","bold":true,"gm_only":true}}
+            ]))
+            .unwrap();
+            d.apply_ops(&fid, &ops).unwrap();
+            (m.id, fid)
+        };
+        let count = |png: &[u8], want: [u8; 3]| {
+            let pm = tiny_skia::Pixmap::decode_png(png).unwrap();
+            pm.pixels()
+                .iter()
+                .filter(|p| {
+                    p.red().abs_diff(want[0]) < 40
+                        && p.green().abs_diff(want[1]) < 40
+                        && p.blue().abs_diff(want[2]) < 40
+                })
+                .count()
+        };
+        let get = |aud: &'static str| {
+            let router = router.clone();
+            let uri = format!("/api/docs/{id}/export/png?floor={floor}&ppc=48&audience={aud}");
+            async move { call(&router, "GET", &uri, vec![]).await.1 }
+        };
+        let (gm, player) = (get("gm").await, get("player").await);
+        assert!(
+            count(&gm, [0xc0, 0, 0]) > 100 && count(&gm, [0, 0, 0xc0]) > 100,
+            "the GM sees both labels"
+        );
+        assert!(
+            count(&player, [0xc0, 0, 0]) > 100,
+            "players see the open label"
+        );
+        assert_eq!(count(&player, [0, 0, 0xc0]), 0, "and not the GM's note");
     }
 
     #[tokio::test]

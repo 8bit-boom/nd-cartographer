@@ -236,6 +236,27 @@ cannot express), and `publish` started a nested tokio runtime.
   nd-world in Python mode and the Rust-only gateway (markers at exactly the right
   `lat`/`lng`, region intact, AVIF picture swapped, no duplicates on re-publish).
 
+- **Typography** (plan §7.2). The bundled font is Crimson Pro (SIL OFL 1.1; the licence
+  text ships in `crates/ndcart-server/assets/fonts/`), read with `ab_glyph`. A **label**
+  is text in document *cells* (position and font size scale with the map): straight
+  (centred, turned by `rotation`) or **along a path** — the line is read left to right
+  whichever way the path was drawn, follows bends glyph by glyph, and shrinks to fit a
+  short path (or is declined if it would have to shrink too far). Options: bold, colour,
+  tracking (letter-spacing), a halo that flips light/dark with the ink so text reads over
+  any ground, and `gm_only` (stripped by the same player filter as everything else —
+  tested end to end through the export route). Kerning is applied; a character the font
+  lacks leaves a gap instead of the missing-glyph box. Names are generated, too: a
+  marker's name beside its pin, a region's name at its centroid (letter-spaced, never wider
+  than the region), river and route names along their lines. A GM's own labels win every
+  collision; a generated name that collides is retried at 80% and 65% before it is
+  dropped; text under 5 px is not drawn (so a zoomed-out map is not covered in
+  illegible smudges). Glyph outlines are cached vector paths; each label is drawn into
+  its own sprite at an integer offset, so tiles equal the full render **exactly** (test).
+  UI: Label (`T`) and Text-on-path (`Y`) tools with size, colour, bold, halo, spacing, turn
+  and GM-only controls; F2 renames and Delete removes from the outliner's Notes group.
+  Fix found on the way: markers, regions, routes and labels now grow the export extent
+  (they were cropped from exports of maps without an explicit canvas).
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

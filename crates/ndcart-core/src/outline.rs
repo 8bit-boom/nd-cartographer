@@ -124,7 +124,8 @@ pub fn outline(floor: &FloorDoc, cell_size: f64) -> Outline {
                 id: l.id.clone(),
                 text: l.text.clone(),
                 gm_only: l.gm_only,
-                cell: cell_of(l.x, l.y, cell_size),
+                // Labels are in cells already (lights are in lattice pixels).
+                cell: [l.x.floor() as i32, l.y.floor() as i32],
             })
             .collect(),
     }
@@ -183,13 +184,17 @@ mod tests {
         .unwrap();
         f.upsert_label(Label {
             id: "t".into(),
-            x: 33.0,
-            y: 0.0,
+            x: 1.5,
+            y: 0.25,
             text: "Gate".into(),
             size: 12.0,
             color: "#ffffff".into(),
             bold: false,
             gm_only: true,
+            path: vec![],
+            halo: true,
+            tracking: 0.0,
+            rotation: 0.0,
         })
         .unwrap();
         let o = outline(&f, 32.0);
