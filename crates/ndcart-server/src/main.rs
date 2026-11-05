@@ -7,6 +7,7 @@ mod auth;
 mod convert;
 #[cfg(feature = "bridge")]
 mod draft;
+#[cfg(feature = "bridge")]
 mod publish;
 mod store;
 mod text;
@@ -1117,6 +1118,7 @@ async fn reject_proposal(
 
 #[derive(Deserialize)]
 struct DraftBody {
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
     prompt: String,
 }
 
@@ -1130,11 +1132,21 @@ async fn draft_spec(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(b) =
         body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
-    let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
-    let spec = draft::draft(&cfg, &b.prompt)
-        .await
-        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
-    Ok(Json(serde_json::json!({ "spec": spec })))
+    #[cfg(feature = "bridge")]
+    {
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let spec = draft::draft(&cfg, &b.prompt)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        Ok(Json(serde_json::json!({ "spec": spec })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = b;
+        Err(ApiError(CoreError::NotFound(
+            "this build has no nd-world client (built without the bridge feature)".into(),
+        )))
+    }
 }
 
 /// `GET /api/docs/{id}/preview?x=&y=&radius=&darkness=&ppc=` — what the table
@@ -1700,6 +1712,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "bridge")]
         "publish" => {
             if let Err(m) = publish::run(args.collect()).await {
                 eprintln!("ndcart: {m}");
@@ -2695,7 +2708,11 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
-        assert!(String::from_utf8_lossy(&body).contains("ND_CARTO_SERVER"));
+        let said = String::from_utf8_lossy(&body).to_string();
+        assert!(
+            said.contains("ND_CARTO_SERVER") || said.contains("without the bridge"),
+            "{said}"
+        );
         let (st, _) = call(&router, "POST", "/api/draft", b"{}".to_vec()).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
     }
