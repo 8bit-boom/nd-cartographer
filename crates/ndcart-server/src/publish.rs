@@ -19,6 +19,12 @@ const MIN_PPC: i64 = 8; // nd-world's room grid needs cells of at least 8 px
 
 pub struct Args {
     pub all_floors: bool,
+    /// Publish every document in the data dir (`ndcart publish --all-docs`).
+    pub all_docs: bool,
+    /// Write what happened, per map, as JSON to this file.
+    pub report: Option<PathBuf>,
+    /// With `--all-docs`: carry on after a document fails (default: stop).
+    pub keep_going: bool,
     pub doc: String,
     pub server: String,
     pub world: Option<String>,
@@ -43,6 +49,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
     let mut audience = Audience::Gm;
     let mut keep_overlay = false;
     let mut all_floors = false;
+    let (mut all_docs, mut report, mut keep_going) = (false, None, false);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -60,6 +67,9 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
             "--data-dir" => data_dir = Some(PathBuf::from(val("--data-dir")?)),
             "--keep-overlay" => keep_overlay = true,
             "--all-floors" => all_floors = true,
+            "--all-docs" => all_docs = true,
+            "--keep-going" => keep_going = true,
+            "--report" => report = Some(PathBuf::from(val("--report")?)),
             "--audience" => {
                 audience =
                     Audience::parse(&val("--audience")?).ok_or("--audience must be gm or player")?
@@ -80,9 +90,24 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
     if all_floors && floor.is_some() {
         return Err("--all-floors and --floor exclude each other".into());
     }
+    if all_docs && doc.is_some() {
+        return Err("name a document or use --all-docs, not both".into());
+    }
+    if all_docs && floor.is_some() {
+        return Err("--floor names one floor; with --all-docs use --all-floors or nothing".into());
+    }
     Ok(Args {
         all_floors,
-        doc: doc.ok_or("name the document (id or exact name)")?,
+        all_docs,
+        report,
+        keep_going,
+        doc: match (doc, all_docs) {
+            (Some(d), _) => d,
+            (None, true) => String::new(),
+            (None, false) => {
+                return Err("name the document (id or exact name), or use --all-docs".into())
+            }
+        },
         server: server.ok_or("--server is required")?,
         world,
         email: email.ok_or("--email is required")?,
@@ -292,43 +317,44 @@ enum Payload {
     Region(PublishRegion),
 }
 
-pub async fn run(args: Vec<String>) -> Result<(), String> {
-    let a = parse(args)?;
-    let mut st = store::Store::default();
-    st.load_dir(&a.data_dir).map_err(|e| e.to_string())?;
-    let id = st
-        .docs
-        .values()
-        .find(|d| d.manifest.id == a.doc || d.manifest.name == a.doc)
-        .map(|d| d.manifest.id.clone())
-        .ok_or(format!(
-            "no document {:?} in {}",
-            a.doc,
-            a.data_dir.display()
-        ))?;
-    let is_region = st.docs[&id].manifest.kind == ndcart_core::DocKind::Region;
-    // Which floors go out: all of them, the named one, or the first.
-    let targets: Vec<String> = {
-        let doc = &st.docs[&id];
-        if a.all_floors {
-            doc.floors.iter().map(|f| f.id.clone()).collect()
-        } else {
-            let f = match a.floor.as_deref() {
-                Some(f) => doc.floors.iter().find(|x| x.id == f),
-                None => doc.floors.first(),
-            }
-            .ok_or("no such floor")?;
-            vec![f.id.clone()]
-        }
-    };
-    let first_floor = st.docs[&id].floors.first().map(|f| f.id.clone());
-    let cap = a.max_mb * 1_048_576;
+/// One map to send: built and checked before any network call.
+struct Job {
+    doc: String,
+    floor: String,
+    existing: Option<String>,
+    payload: Payload,
+}
 
-    // Build everything before any network call, so a bad floor fails the run
-    // before the first map is touched.
-    let mut jobs: Vec<(String, Option<String>, Payload)> = Vec::new();
+/// What happened to one map; the batch report is a list of these.
+#[derive(serde::Serialize)]
+struct Outcome {
+    doc: String,
+    floor: String,
+    status: &'static str, // created | updated | failed | not_sent
+    slug: Option<String>,
+    url: Option<String>,
+    message: Option<String>,
+    warnings: Vec<String>,
+}
+
+fn prepare(st: &store::Store, id: &str, a: &Args) -> Result<Vec<Job>, String> {
+    let doc = &st.docs[id];
+    let is_region = doc.manifest.kind == ndcart_core::DocKind::Region;
+    // Which floors go out: all of them, the named one, or the first.
+    let targets: Vec<String> = if a.all_floors {
+        doc.floors.iter().map(|f| f.id.clone()).collect()
+    } else {
+        let f = match a.floor.as_deref() {
+            Some(f) => doc.floors.iter().find(|x| x.id == f),
+            None => doc.floors.first(),
+        }
+        .ok_or("no such floor")?;
+        vec![f.id.clone()]
+    };
+    let first_floor = doc.floors.first().map(|f| f.id.clone());
+    let cap = a.max_mb * 1_048_576;
+    let mut jobs = Vec::new();
     for fid in &targets {
-        let doc = &st.docs[&id];
         let floor = doc.floors.iter().find(|x| &x.id == fid).expect("floor");
         let problems = ndcart_core::lint(floor, doc.manifest.cell_size);
         for p in &problems {
@@ -337,10 +363,24 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 doc.manifest.name, floor.name, p.severity, p.message
             );
         }
+        if problems.iter().any(|p| p.code == "empty_floor") {
+            // A blank floor has no picture; skip it when sending several.
+            if targets.len() > 1 {
+                println!(
+                    "skipping empty floor '{}' of '{}'",
+                    floor.name, doc.manifest.name
+                );
+                continue;
+            }
+            return Err(format!(
+                "floor '{}' of '{}' is empty; nothing to publish",
+                floor.name, doc.manifest.name
+            ));
+        }
         if ndcart_core::blocks_publish(&problems) {
             return Err(format!(
-                "fix the errors above first (nd-world would refuse floor '{}')",
-                floor.name
+                "fix the errors above first (nd-world would refuse '{}' floor '{}')",
+                doc.manifest.name, floor.name
             ));
         }
         let link = doc
@@ -373,7 +413,65 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 floor.name, a.ppc, a.max_mb
             );
         }
-        jobs.push((fid.clone(), existing, payload));
+        jobs.push(Job {
+            doc: id.to_string(),
+            floor: fid.clone(),
+            existing,
+            payload,
+        });
+    }
+    Ok(jobs)
+}
+
+pub async fn run(args: Vec<String>) -> Result<(), String> {
+    let a = parse(args)?;
+    let mut st = store::Store::default();
+    st.load_dir(&a.data_dir).map_err(|e| e.to_string())?;
+    let ids: Vec<String> = if a.all_docs {
+        let mut v: Vec<_> = st
+            .docs
+            .values()
+            .map(|d| (d.manifest.name.clone(), d.manifest.id.clone()))
+            .collect();
+        v.sort();
+        if v.is_empty() {
+            return Err(format!("no documents in {}", a.data_dir.display()));
+        }
+        v.into_iter().map(|(_, id)| id).collect()
+    } else {
+        vec![st
+            .docs
+            .values()
+            .find(|d| d.manifest.id == a.doc || d.manifest.name == a.doc)
+            .map(|d| d.manifest.id.clone())
+            .ok_or(format!(
+                "no document {:?} in {}",
+                a.doc,
+                a.data_dir.display()
+            ))?]
+    };
+
+    // Build and check everything first, so a bad map stops the run before the
+    // first one is touched (with --keep-going a bad document is skipped instead).
+    let mut jobs: Vec<Job> = Vec::new();
+    let mut outcomes: Vec<Outcome> = Vec::new();
+    for id in &ids {
+        match prepare(&st, id, &a) {
+            Ok(j) => jobs.extend(j),
+            Err(e) if a.all_docs && a.keep_going => {
+                println!("skipping '{}': {e}", st.docs[id].manifest.name);
+                outcomes.push(Outcome {
+                    doc: st.docs[id].manifest.name.clone(),
+                    floor: String::new(),
+                    status: "not_sent",
+                    slug: None,
+                    url: None,
+                    message: Some(e),
+                    warnings: vec![],
+                });
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     let pw = password()?;
@@ -390,75 +488,123 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let mut failed: Option<String> = None;
-    for (fid, existing, payload) in &jobs {
-        let outcome = match payload {
-            Payload::Battle(m) => bridge.publish(m, existing.as_deref()).await,
-            Payload::Region(m) => bridge.publish_region(m, existing.as_deref()).await,
+    for job in &jobs {
+        let is_region = matches!(job.payload, Payload::Region(_));
+        let outcome = match &job.payload {
+            Payload::Battle(m) => bridge.publish(m, job.existing.as_deref()).await,
+            Payload::Region(m) => bridge.publish_region(m, job.existing.as_deref()).await,
+        };
+        let doc_name = st.docs[&job.doc].manifest.name.clone();
+        let floor_name = st.docs[&job.doc]
+            .floors
+            .iter()
+            .find(|f| f.id == job.floor)
+            .map(|f| f.name.clone())
+            .unwrap_or_default();
+        let mut one = Outcome {
+            doc: doc_name,
+            floor: floor_name,
+            status: "failed",
+            slug: None,
+            url: None,
+            message: None,
+            warnings: vec![],
         };
         let (slug, report) = match outcome {
-            Ok(r) => (r.slug.clone(), Some(r)),
+            Ok(r) => (Some(r.slug.clone()), Some(r)),
             Err(BridgeError::Partial { slug, step, cause }) => {
                 // The map exists: remember it so the next run finishes this
                 // one instead of creating a duplicate.
-                failed = Some(format!(
+                let m = format!(
                     "map '{slug}' was created but the {step} step failed: {cause}. Run publish again to finish it."
-                ));
-                (slug, None)
+                );
+                one.message = Some(m.clone());
+                failed = Some(m);
+                (Some(slug), None)
             }
             Err(e) => {
+                one.message = Some(e.to_string());
                 failed = Some(e.to_string());
-                break;
+                (None, None)
             }
         };
-        // Save after every floor: a later failure must not lose earlier slugs.
-        let doc = st.docs.get_mut(&id).expect("doc");
-        let mut link = doc
-            .manifest
-            .nd_world
-            .clone()
-            .filter(|l| l.server == a.server && l.world == a.world)
-            .unwrap_or(NdWorldLink {
-                server: a.server.clone(),
-                world: a.world.clone(),
-                slug: slug.clone(),
-                floor_slugs: Default::default(),
-            });
-        if Some(fid) == first_floor.as_ref() {
-            link.slug = slug.clone();
-        }
-        link.floor_slugs.insert(fid.clone(), slug.clone());
-        doc.manifest.nd_world = Some(link);
-        store::save_doc(Some(&a.data_dir), doc);
-        if let Some(report) = report {
-            let name = doc
-                .floors
-                .iter()
-                .find(|f| &f.id == fid)
-                .map(|f| f.name.as_str())
-                .unwrap_or("");
-            println!(
-                "{} '{}' ({}) at {}/maps/{}{}",
-                if report.created {
-                    "published"
-                } else {
-                    "updated"
-                },
-                doc.manifest.name,
-                name,
+        if let Some(slug) = slug {
+            // Save after every map: a later failure must not lose earlier slugs.
+            let doc = st.docs.get_mut(&job.doc).expect("doc");
+            let first_floor = doc.floors.first().map(|f| f.id.clone());
+            let mut link = doc
+                .manifest
+                .nd_world
+                .clone()
+                .filter(|l| l.server == a.server && l.world == a.world)
+                .unwrap_or(NdWorldLink {
+                    server: a.server.clone(),
+                    world: a.world.clone(),
+                    slug: slug.clone(),
+                    floor_slugs: Default::default(),
+                });
+            if Some(&job.floor) == first_floor.as_ref() {
+                link.slug = slug.clone();
+            }
+            link.floor_slugs.insert(job.floor.clone(), slug.clone());
+            doc.manifest.nd_world = Some(link);
+            store::save_doc(Some(&a.data_dir), doc);
+            let url = format!(
+                "{}/maps/{}{}",
                 a.server.trim_end_matches('/'),
                 if is_region { "" } else { "schematic/" },
-                report.slug
+                slug
             );
-            for w in &report.warnings {
-                println!("warning: {w}");
+            one.slug = Some(slug);
+            one.url = Some(url.clone());
+            if let Some(report) = report {
+                one.status = if report.created { "created" } else { "updated" };
+                println!(
+                    "{} '{}' ({}) at {url}",
+                    if report.created {
+                        "published"
+                    } else {
+                        "updated"
+                    },
+                    one.doc,
+                    one.floor,
+                );
+                for w in &report.warnings {
+                    println!("warning: {w}");
+                }
+                one.warnings = report.warnings.clone();
             }
         }
-        if failed.is_some() {
+        outcomes.push(one);
+        if failed.is_some() && !(a.all_docs && a.keep_going) {
             break;
         }
     }
+    if let Some(path) = &a.report {
+        let body = serde_json::json!({
+            "server": a.server,
+            "world": a.world,
+            "created": outcomes.iter().filter(|o| o.status == "created").count(),
+            "updated": outcomes.iter().filter(|o| o.status == "updated").count(),
+            "failed": outcomes.iter().filter(|o| o.status == "failed" || o.status == "not_sent").count(),
+            "maps": outcomes,
+        });
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&body).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("cannot write the report to {}: {e}", path.display()))?;
+        println!("report written to {}", path.display());
+    }
     match failed {
-        Some(e) => Err(e),
+        Some(e) if !a.keep_going => Err(e),
+        Some(_) => Err(format!(
+            "{} map(s) did not go out; see the report",
+            outcomes
+                .iter()
+                .filter(|o| o.status == "failed" || o.status == "not_sent")
+                .count()
+        )),
         None => Ok(()),
     }
 }
@@ -497,6 +643,38 @@ mod tests {
         assert_eq!(m0.name, "Vault \u{2013} Ground");
         // The empty upper floor has no picture to publish, and says so.
         assert!(m1.is_err() || m1.unwrap().name == "Vault \u{2013} Upper");
+    }
+
+    #[test]
+    fn empty_floors_are_skipped_in_a_multi_floor_send_but_refused_alone() {
+        let mut st = store::Store::default();
+        let mut d = doc();
+        d.add_floor("Upper", None).unwrap();
+        let id = d.manifest.id.clone();
+        st.docs.insert(id.clone(), d);
+        let args = |extra: &[&str]| {
+            let mut v: Vec<String> = [
+                "Vault",
+                "--server",
+                "http://x",
+                "--email",
+                "e",
+                "--data-dir",
+                ".",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            v.extend(extra.iter().map(|s| s.to_string()));
+            parse(v).unwrap()
+        };
+        let jobs = prepare(&st, &id, &args(&["--all-floors"])).unwrap();
+        assert_eq!(jobs.len(), 1, "the empty Upper floor is skipped");
+        let upper = st.docs[&id].floors[1].id.clone();
+        let err = prepare(&st, &id, &args(&["--floor", &upper]))
+            .err()
+            .unwrap();
+        assert!(err.contains("is empty"), "{err}");
     }
 
     #[test]
