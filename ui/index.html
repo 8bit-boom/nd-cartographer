@@ -55,6 +55,7 @@
 <div id="floorbar" role="tablist" aria-label="Floors">
   <span id="floor-tabs"></span>
   <button id="fl-add" title="Add an empty floor">＋ Floor</button>
+  <button id="fl-gen" title="Generate a dungeon, cave, building, ship deck or city district onto this floor">🎲 Generate…</button>
   <button id="fl-dup" title="Duplicate this floor (placed right after it)">⧉ Copy</button>
   <button id="fl-rename" title="Rename this floor">✎ Rename</button>
   <button id="fl-left" title="Move this floor earlier">◀</button>
@@ -106,6 +107,26 @@
       </div>
     </details>
   </div>
+  <dialog id="gen-dialog">
+    <form method="dialog" id="gen-form">
+      <h3>Generate onto this floor</h3>
+      <label>Kind <select id="gn-kind">
+        <option value="dungeon">Dungeon (rooms, corridors, doors)</option>
+        <option value="cave">Cave</option>
+        <option value="building">Building (hall with rooms)</option>
+        <option value="deck">Ship deck (tapered hull)</option>
+        <option value="district">City district (streets and shops)</option>
+      </select></label>
+      <label>Width <input type="number" id="gn-w" min="16" max="120" value="64"> squares</label>
+      <label>Height <input type="number" id="gn-h" min="16" max="120" value="48"> squares</label>
+      <label>Seed <input type="number" id="gn-seed" min="0" max="4294967295" value="1"> <button type="button" id="gn-dice" title="Random seed">🎲</button></label>
+      <p class="dim">Adds to what is already on the floor. The same seed always gives the same map. Ctrl+Z takes it back in one step.</p>
+      <menu>
+        <button value="cancel" type="button" id="gn-cancel">Cancel</button>
+        <button value="ok" id="gn-ok" class="primary">Generate</button>
+      </menu>
+    </form>
+  </dialog>
   <dialog id="new-dialog">
     <form method="dialog" id="new-form">
       <h3>New project</h3>

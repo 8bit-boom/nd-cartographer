@@ -593,6 +593,62 @@ async fn restore_checkpoint(
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
+/// `POST /api/docs/{id}/generate-map` `{floor?, kind, seed, width, height}` — a
+/// dungeon, cave, building, deck or city district drawn onto the floor as ONE
+/// undoable step (it adds to what is there; the same seed gives the same map).
+async fn generate_map(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<GenMapBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let ops = ndcart_core::gen::generate(&ndcart_core::gen::GenParams {
+        kind: b.kind,
+        seed: b.seed,
+        width: b.width,
+        height: b.height,
+    })?;
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor_id = match &b.floor {
+        Some(f) => f.clone(),
+        None => doc
+            .floors
+            .first()
+            .map(|f| f.id.clone())
+            .ok_or_else(|| CoreError::NotFound("floor".into()))?,
+    };
+    doc.apply_ops(&floor_id, &ops)?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
+}
+
+#[derive(Deserialize)]
+struct GenMapBody {
+    #[serde(default)]
+    floor: Option<String>,
+    kind: ndcart_core::gen::GenKind,
+    #[serde(default)]
+    seed: u64,
+    #[serde(default = "default_gen_w")]
+    width: i32,
+    #[serde(default = "default_gen_h")]
+    height: i32,
+}
+fn default_gen_w() -> i32 {
+    64
+}
+fn default_gen_h() -> i32 {
+    48
+}
+
 /// `POST /api/docs/{id}/generate` — a seeded world (continents, mountains, a sea
 /// level for the requested land fraction, rivers to the sea) replaces the
 /// floor's terrain and rivers as ONE undoable step. Size is capped at 512x512
@@ -1036,6 +1092,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/generate", post(generate_world))
         .route("/api/docs/{id}/floors", post(floors_route))
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
+        .route("/api/docs/{id}/generate-map", post(generate_map))
         .route(
             "/api/docs/{id}/checkpoints",
             get(list_checkpoints).post(create_checkpoint),
@@ -2113,6 +2170,55 @@ mod tests {
             "players see the open label"
         );
         assert_eq!(count(&player, [0, 0, 0xc0]), 0, "and not the GM's note");
+    }
+
+    #[tokio::test]
+    async fn a_generated_map_is_one_undo_step_and_bad_sizes_are_refused() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"G"}"#.to_vec()).await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let floor = json(d)["floors"][0]["id"].as_str().unwrap().to_string();
+        let gen = |body: &str| {
+            (
+                format!("/api/docs/{id}/generate-map"),
+                body.as_bytes().to_vec(),
+            )
+        };
+        let (u, bd) = gen(r#"{"kind":"dungeon","seed":5,"width":48,"height":36}"#);
+        assert_eq!(call(&router, "POST", &u, bd).await.0, StatusCode::OK);
+        let cells = || {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}"));
+            async move {
+                json(call(&router, "GET", &uri, vec![]).await.1)["floors"][0]["grid"]["cells"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+            }
+        };
+        assert!(cells().await > 100);
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/undo"),
+            format!(r#"{{"floor":"{floor}"}}"#).into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(cells().await, 0);
+        for bad in [
+            r#"{"kind":"dungeon","width":4,"height":40}"#,
+            r#"{"kind":"nonsense"}"#,
+            r#"{"kind":"cave","width":40,"height":9999}"#,
+        ] {
+            let (u, bd) = gen(bad);
+            assert_eq!(
+                call(&router, "POST", &u, bd).await.0,
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
     }
 
     #[tokio::test]

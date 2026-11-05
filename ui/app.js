@@ -1301,6 +1301,29 @@ function buildOutline() {
   }
 }
 
+// ---------- generate onto a floor ----------
+const genDialog = document.getElementById('gen-dialog');
+document.getElementById('fl-gen').onclick = () => {
+  document.getElementById('gn-seed').value = Math.floor(Math.random() * 1e6);
+  genDialog.showModal();
+};
+document.getElementById('gn-dice').onclick = () => { document.getElementById('gn-seed').value = Math.floor(Math.random() * 4294967295); };
+document.getElementById('gn-cancel').onclick = () => genDialog.close();
+document.getElementById('gen-form').onsubmit = async () => {
+  const body = {
+    floor: state.floorId,
+    kind: document.getElementById('gn-kind').value,
+    seed: Math.max(0, Math.floor(Number(document.getElementById('gn-seed').value) || 0)),
+    width: Number(document.getElementById('gn-w').value),
+    height: Number(document.getElementById('gn-h').value),
+  };
+  try {
+    const res = await api('POST', `/api/docs/${state.docId}/generate-map`, body);
+    state.rev = res.rev; tileCache.clear(); await refresh();
+    statusEl.textContent = `Generated a ${body.kind} (seed ${body.seed}). Ctrl+Z takes it back.`;
+  } catch (e) { statusEl.textContent = `Error: ${e.message}`; }
+};
+
 // ---------- checkpoints ----------
 async function loadCheckpoints() {
   const list = document.getElementById('cp-list');
