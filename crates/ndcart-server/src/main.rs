@@ -229,6 +229,34 @@ fn pick_format(q: &ExportQuery) -> Result<tiles::ImageFormat, ApiError> {
     }
 }
 
+/// `GET /api/docs/{id}/lint[?floor=ID]` — the Problems panel: deterministic
+/// checks with undoable fixes (`fix` is an op you can POST to `/ops`).
+async fn lint_doc(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let floor = doc
+        .floors
+        .get(idx)
+        .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+    let problems = ndcart_core::lint(floor, doc.manifest.cell_size);
+    Ok(Json(serde_json::json!({
+        "floor": floor.id,
+        "blocks_publish": ndcart_core::blocks_publish(&problems),
+        "problems": problems,
+    })))
+}
+
 /// `GET /api/docs/{id}/export/png[?floor=ID&ppc=N]` — the whole floor as one PNG.
 async fn export_png(
     State(app): State<App>,
@@ -492,6 +520,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}", get(get_doc))
         .route("/api/docs/{id}/export/uvtt", get(export_uvtt))
         .route("/api/docs/{id}/export/png", get(export_png))
+        .route("/api/docs/{id}/lint", get(lint_doc))
         .route("/api/convert", post(convert_image))
         .layer(axum::extract::DefaultBodyLimit::max(
             convert::MAX_INPUT_BYTES,
@@ -942,6 +971,63 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn lint_route_reports_and_offers_a_fix_that_applies() {
+        let app = test_app();
+        let (doc_id, floor_id) = {
+            let mut st = app.store.write().await;
+            let m = st.create("Vault", DocKind::Battle).clone();
+            let d = st.docs.get_mut(&m.id).unwrap();
+            let fid = d.floors[0].id.clone();
+            let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+                {"t":"upsert_space","space":{"id":"a","name":"Hall","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","cells":[{"x":0,"y":0},{"x":1,"y":0}],"space":"a"},
+                {"t":"set_mark","edge":{"cell":{"x":0,"y":0},"edge":"east"},"mark":{"kind":"door","state":"closed"}}
+            ]))
+            .unwrap();
+            d.apply_ops(&fid, &ops).unwrap();
+            (m.id, fid)
+        };
+        let router = build_router(app);
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/docs/{doc_id}/lint?floor={floor_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(v["blocks_publish"], false);
+        assert_eq!(v["problems"][0]["code"], "mark_inside_room");
+        // The fix is an op the ops route accepts, and it clears the problem.
+        let fix = v["problems"][0]["fix"].clone();
+        let body = serde_json::json!({"floor": floor_id, "ops": [fix]});
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/api/docs/{doc_id}/ops"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = router
+            .oneshot(
+                Request::get(format!("/api/docs/{doc_id}/lint"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert!(v["problems"].as_array().unwrap().is_empty(), "{v}");
     }
 
     #[tokio::test]

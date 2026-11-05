@@ -135,6 +135,22 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             a.doc,
             a.data_dir.display()
         ))?;
+    // Lint first: errors are things nd-world would refuse; warnings are shown, not blocking.
+    {
+        let doc = &st.docs[&id];
+        let floor = match a.floor.as_deref() {
+            Some(f) => doc.floors.iter().find(|x| x.id == f),
+            None => doc.floors.first(),
+        }
+        .ok_or("no such floor")?;
+        let problems = ndcart_core::lint(floor, doc.manifest.cell_size);
+        for p in &problems {
+            println!("{:?}: {}", p.severity, p.message);
+        }
+        if ndcart_core::blocks_publish(&problems) {
+            return Err("fix the errors above first (nd-world would refuse this map)".into());
+        }
+    }
     let map = build_map(&st.docs[&id], a.floor.as_deref(), a.ppc, a.format)?;
     if map.image.len() > DEFAULT_UPLOAD_CAP {
         return Err(format!(
