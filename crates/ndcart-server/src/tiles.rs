@@ -17,6 +17,21 @@ pub const MAX_Z: u32 = 4;
 
 const VOID: [u8; 4] = [0x14, 0x16, 0x1a, 0xff];
 const WALL_RGB: [u8; 3] = [0xd8, 0xe2, 0xec];
+const DOOR_RGB: [u8; 3] = [0xe8, 0xa8, 0x30];
+const WINDOW_RGB: [u8; 3] = [0x4f, 0xc3, 0xe8];
+const SECRET_RGB: [u8; 3] = [0xb0, 0x6a, 0xd8];
+
+/// Doors, windows and secret doors read at a glance: each kind its own colour
+/// and a heavier stroke than a plain wall.
+fn wall_style(kind: ndcart_core::WallKind) -> ([u8; 3], f32) {
+    use ndcart_core::WallKind::*;
+    match kind {
+        Wall => (WALL_RGB, 1.0),
+        Door => (DOOR_RGB, 2.0),
+        Window => (WINDOW_RGB, 1.5),
+        Secret => (SECRET_RGB, 2.0),
+    }
+}
 
 fn parse_hex(color: &str) -> [u8; 3] {
     let h = color.trim_start_matches('#');
@@ -238,12 +253,8 @@ fn render_pixmap(
         anti_alias: true,
         ..Default::default()
     };
-    wall_paint.set_color_rgba8(WALL_RGB[0], WALL_RGB[1], WALL_RGB[2], 0xff);
-    let width = ((ppc as f32) / 16.0).max(1.0);
-    let stroke = tiny_skia::Stroke {
-        width,
-        ..Default::default()
-    };
+    let base_width = ((ppc as f32) / 16.0).max(1.0);
+    let width = base_width * 2.0; // the largest stroke, for the cheap reject below
     for wall in walls {
         if wall.pts.len() != 2 {
             continue;
@@ -260,6 +271,12 @@ fn render_pixmap(
         {
             continue;
         }
+        let (rgb, mult) = wall_style(wall.kind);
+        wall_paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], 0xff);
+        let stroke = tiny_skia::Stroke {
+            width: base_width * mult,
+            ..Default::default()
+        };
         let mut pb = tiny_skia::PathBuilder::new();
         pb.move_to(ax, ay);
         pb.line_to(bx, by);
@@ -351,6 +368,48 @@ mod tests {
         assert_eq!(back.as_raw().as_slice(), reference.data());
         let (avif, ..) = bake_full_as(&floor, &walls, 32.0, 8, ImageFormat::Avif, 80).unwrap();
         assert_eq!(&avif[4..12], b"ftypavif");
+    }
+
+    #[test]
+    fn doors_and_windows_are_drawn_in_their_own_colours() {
+        use ndcart_core::grid::{Edge, EdgeKey, Mark, MarkKind};
+        let mut floor = painted_floor(); // cells (0..4, 0)
+        floor
+            .grid
+            .set_mark(
+                EdgeKey {
+                    cell: CellKey::new(1, 0),
+                    edge: Edge::North,
+                },
+                Some(Mark::new(MarkKind::Door)),
+            )
+            .unwrap();
+        floor
+            .grid
+            .set_mark(
+                EdgeKey {
+                    cell: CellKey::new(3, 0),
+                    edge: Edge::South,
+                },
+                Some(Mark::new(MarkKind::Window)),
+            )
+            .unwrap();
+        let walls = derive_walls(&floor, 32.0);
+        let (png, ..) = bake_full(&floor, &walls, 32.0, 32).unwrap();
+        let pm = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let near = |x: u32, y: u32, want: [u8; 3]| {
+            (y.saturating_sub(2)..=y + 2).any(|yy| {
+                let p = pm.pixel(x, yy).unwrap();
+                let d = |a: u8, b: u8| (i32::from(a) - i32::from(b)).abs();
+                d(p.red(), want[0]) < 12 && d(p.green(), want[1]) < 12 && d(p.blue(), want[2]) < 12
+            })
+        };
+        assert!(near(48, 0, DOOR_RGB), "door on the north edge of cell 1");
+        assert!(
+            near(112, 32, WINDOW_RGB),
+            "window on the south edge of cell 3"
+        );
+        assert!(near(16, 0, WALL_RGB), "plain wall keeps the wall colour");
     }
 
     #[test]

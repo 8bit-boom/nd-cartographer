@@ -14,11 +14,30 @@
   <div class="tools">
     <button id="tool-pan" class="tool active" title="Pan (drag / middle mouse)">✋ Pan</button>
     <button id="tool-paint" class="tool" title="Paint cells (drag)">🖌 Paint</button>
+    <button id="tool-door" class="tool" title="Door on a cell edge (click an edge again to remove)">🚪 Door</button>
+    <button id="tool-window" class="tool" title="Window on a cell edge">🪟 Window</button>
     <span id="palette"></span>
     <button id="btn-undo" title="Undo (Ctrl+Z)">↩ Undo</button>
+    <button id="btn-problems" title="Problems (P)">⚠ Problems</button>
+    <span id="exports" class="dim">Export:
+      <a id="exp-png" download>PNG</a>
+      <a id="exp-webp" download>WebP</a>
+      <a id="exp-avif" download>AVIF</a>
+      <a id="exp-uvtt" download>UVTT</a>
+    </span>
+    <button id="btn-help" title="Keyboard help (F1)">?</button>
   </div>
 </header>
 <main><canvas id="canvas"></canvas>
+  <aside id="problems" hidden>
+    <h3>Problems <button id="problems-close" title="Close">×</button></h3>
+    <ul id="problem-list"></ul>
+  </aside>
+  <div id="help" hidden>
+    <h3>Keyboard</h3>
+    <table id="help-table"></table>
+    <p class="dim">Press F1 or Esc to close.</p>
+  </div>
   <div id="status" class="dim">loading…</div>
 </main>
 <script src="/app.js"></script>

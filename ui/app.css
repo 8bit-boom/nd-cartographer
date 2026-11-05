@@ -49,3 +49,30 @@ canvas#canvas.panning { cursor: grabbing; }
   background: rgba(29, 32, 38, 0.85); border: 1px solid var(--line);
   border-radius: 6px; padding: 4px 10px; pointer-events: none;
 }
+
+#exports a { color: var(--accent); cursor: pointer; margin-left: 6px; text-decoration: none; }
+#exports a:hover { text-decoration: underline; }
+#btn-problems.has-problems { border-color: #e8a830; color: #e8a830; }
+#btn-problems.has-errors { border-color: #e85a5a; color: #e85a5a; }
+#problems {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 340px; overflow: auto;
+  background: var(--panel); border-left: 1px solid var(--line); padding: 10px 12px;
+}
+#problems h3, #help h3 { margin: 0 0 8px; font-size: 14px; display: flex; justify-content: space-between; }
+#problems ul { list-style: none; margin: 0; padding: 0; }
+#problems li { padding: 8px 0; border-bottom: 1px solid var(--line); }
+#problems .sev { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+#problems .sev.error { background: #e85a5a; }
+#problems .sev.warning { background: #e8a830; }
+#problems .sev.info { background: var(--dim); }
+#problems .row-actions { margin-top: 4px; display: flex; gap: 6px; }
+#problems .row-actions button { padding: 2px 8px; font-size: 12px; }
+#problems .none { color: var(--dim); padding: 8px 0; }
+#help {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 18px; min-width: 280px; z-index: 5;
+}
+#help table { border-collapse: collapse; width: 100%; }
+#help td { padding: 3px 8px; }
+#help kbd { background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; }
