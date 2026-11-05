@@ -1161,7 +1161,7 @@ async function refreshProblems() {
 // Delete = remove a light or note. Data comes from the server's `outline`.
 
 const treeEl = document.getElementById('tree');
-const treeOpen = { rooms: true, lights: true, labels: true, stamps: true, markers: true, regions: true, routes: true };
+const treeOpen = { zones: true, rooms: true, lights: true, labels: true, stamps: true, markers: true, regions: true, routes: true };
 let treeFocus = null;   // data-key of the focused row, kept across rebuilds
 
 function toggleOutline(force) {
@@ -1203,6 +1203,7 @@ function buildOutline() {
   const hadFocus = treeEl.contains(document.activeElement);
   treeEl.textContent = '';
   const groups = [
+    ['zones', 'Zones', (curFloor().zones || []).length],
     ['rooms', 'Rooms', o.spaces.length],
     ['lights', 'Lights', o.lights.length],
     ['labels', 'Notes', o.labels.length],
@@ -1222,8 +1223,26 @@ function buildOutline() {
         `<span class="chip" style="background:${esc(s.color)}"></span>${esc(s.name)}<span class="meta">${where} · ${esc(s.kind)}</span>`,
         `Room ${s.name}, ${where}, ${s.kind}`);
       r.dataset.kind = 'space';
-      r.onclick = () => { focusRow(r); goToRoom(s); };
+      r.setAttribute('aria-selected', String(state.sel.has(s.id)));
+      r.onclick = (e) => {
+        if (e.ctrlKey || e.metaKey || e.shiftKey) { toggleSel(s.id); return; }
+        focusRow(r); goToRoom(s);
+      };
       r.onrenamerequest = () => renameRoom(s);
+    }
+    if (g === 'zones') for (const z of (curFloor().zones || [])) {
+      const live = z.spaces.filter(id => o.spaces.some(s => s.id === id)).length;
+      const r = addRow(treeEl, `z:${z.id}`, 2,
+        `<span class="chip" style="background:${esc(z.color)}"></span>${esc(z.name)}<span class="meta">${live} rooms</span>`,
+        `Zone ${z.name}, ${live} rooms`);
+      r.dataset.kind = 'zone';
+      r.onclick = () => { focusRow(r); setSel(z.spaces.filter(id => o.spaces.some(s => s.id === id))); };
+      r.ondeleterequest = () => postOps([{ t: 'remove_zone', id: z.id }]);
+      r.onrenamerequest = () => {
+        const n = window.prompt('Rename zone', z.name);
+        if (n === null || !n.trim() || n.trim() === z.name) return;
+        postOps([{ t: 'upsert_zone', zone: { ...z, name: n.trim().slice(0, 80) } }]);
+      };
     }
     if (g === 'lights') for (const l of o.lights) {
       const r = addRow(treeEl, `l:${l.id}`, 2, `${esc(l.label)}<span class="meta">${l.on ? 'on' : 'off'}</span>`,
@@ -1273,6 +1292,7 @@ function buildOutline() {
       };
     }
   }
+  updateBulk();
   const rows = visibleRows();
   const keep = rows.find(r => r.dataset.key === treeFocus) || rows[0];
   if (keep) {
@@ -1280,6 +1300,89 @@ function buildOutline() {
     if (hadFocus) keep.focus();
   }
 }
+
+// ---------- selection and bulk edits ----------
+// A selection is a set of room ids. Every bulk edit is one batch op, so a
+// single Ctrl+Z puts everything back.
+state.sel = new Set();
+
+function setSel(ids) { state.sel = new Set(ids); buildOutline(); updateBulk(); }
+function toggleSel(id) {
+  if (state.sel.has(id)) state.sel.delete(id); else state.sel.add(id);
+  buildOutline(); updateBulk();
+}
+function selSpaces() {
+  const all = curFloor().outline.spaces;
+  return all.filter(s => state.sel.has(s.id));
+}
+function spaceOp(s, patch) {
+  const { id, name, color, kind, material } = { ...s, ...patch };
+  return { t: 'upsert_space', space: { id, name, color, kind, ...(material ? { material } : {}) } };
+}
+
+function updateBulk() {
+  // Drop ids of rooms that no longer exist.
+  const have = new Set(curFloor().outline.spaces.map(s => s.id));
+  for (const id of [...state.sel]) if (!have.has(id)) state.sel.delete(id);
+  const n = state.sel.size;
+  document.getElementById('sel-count').textContent = `${n} selected`;
+  for (const id of ['sel-none', 'bk-zone', 'bk-color', 'bk-kind', 'bk-prefix', 'bk-delete']) {
+    document.getElementById(id).disabled = n === 0;
+  }
+  const sel = document.getElementById('sel-by');
+  const o = curFloor().outline;
+  const opts = [['', 'Select by…'], ['all', 'All rooms']];
+  for (const m of new Set(o.spaces.map(s => s.material).filter(Boolean))) opts.push([`m:${m}`, `material: ${m}`]);
+  for (const k of new Set(o.spaces.map(s => s.kind))) opts.push([`k:${k}`, `kind: ${k}`]);
+  for (const c of new Set(o.spaces.map(s => s.color))) opts.push([`c:${c}`, `colour ${c}`]);
+  for (const z of (curFloor().zones || [])) opts.push([`z:${z.id}`, `zone: ${z.name}`]);
+  opts.push(['inv', 'Invert selection']);
+  sel.textContent = '';
+  for (const [v, t] of opts) { const op = document.createElement('option'); op.value = v; op.textContent = t; sel.appendChild(op); }
+}
+
+document.getElementById('sel-by').onchange = (e) => {
+  const v = e.target.value; e.target.value = '';
+  const sp = curFloor().outline.spaces;
+  let ids = [];
+  if (v === 'all') ids = sp.map(s => s.id);
+  else if (v === 'inv') ids = sp.filter(s => !state.sel.has(s.id)).map(s => s.id);
+  else if (v.startsWith('m:')) ids = sp.filter(s => s.material === v.slice(2)).map(s => s.id);
+  else if (v.startsWith('k:')) ids = sp.filter(s => s.kind === v.slice(2)).map(s => s.id);
+  else if (v.startsWith('c:')) ids = sp.filter(s => s.color === v.slice(2)).map(s => s.id);
+  else if (v.startsWith('z:')) ids = (curFloor().zones || []).find(z => z.id === v.slice(2))?.spaces || [];
+  else return;
+  setSel(ids);
+};
+document.getElementById('sel-none').onclick = () => setSel([]);
+document.getElementById('bk-zone').onclick = () => {
+  const name = window.prompt('Zone name', 'New zone');
+  if (name === null || !name.trim()) return;
+  const color = selSpaces()[0]?.color || '#8a8f98';
+  postOps([{ t: 'upsert_zone', zone: { id: newId('zn'), name: name.trim().slice(0, 80), color, spaces: [...state.sel] } }]);
+};
+document.getElementById('bk-color').onclick = () => {
+  const c = window.prompt('Colour for the selected rooms (#rrggbb)', selSpaces()[0]?.color || '#7f5539');
+  if (c === null) return;
+  if (!/^#[0-9a-fA-F]{6}$/.test(c.trim())) { statusEl.textContent = 'Colour must look like #7f5539'; return; }
+  postOps([{ t: 'batch', ops: selSpaces().map(s => spaceOp(s, { color: c.trim() })) }]);
+};
+document.getElementById('bk-kind').onclick = () => {
+  const k = window.prompt('Kind for the selected rooms (room, corridor or area)', selSpaces()[0]?.kind || 'room');
+  if (k === null || !k.trim()) return;
+  postOps([{ t: 'batch', ops: selSpaces().map(s => spaceOp(s, { kind: k.trim() })) }]);
+};
+document.getElementById('bk-prefix').onclick = () => {
+  const p = window.prompt('Text to put before each name', 'East – ');
+  if (p === null || !p) return;
+  postOps([{ t: 'batch', ops: selSpaces().map(s => spaceOp(s, { name: (p + s.name).slice(0, 60) })) }]);
+};
+document.getElementById('bk-delete').onclick = () => {
+  const n = state.sel.size;
+  if (!window.confirm(`Delete ${n} room${n === 1 ? '' : 's'}? Ctrl+Z brings them back.`)) return;
+  postOps([{ t: 'batch', ops: [...state.sel].map(id => ({ t: 'remove_space', id })) }]);
+  state.sel = new Set();
+};
 
 function focusKey(key) { focusRow(visibleRows().find(r => r.dataset.key === key)); }
 

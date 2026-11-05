@@ -22,6 +22,7 @@ pub mod structure;
 pub mod terrain;
 pub mod view;
 pub mod walls;
+pub mod zone;
 
 pub use doc::{DocKind, FloorDoc, ImportedWall, Label, Light, Manifest, NdWorldLink, Underlay};
 pub use error::{CoreError, CoreResult, MAX_CELL, MAX_LIGHTS};
@@ -36,3 +37,4 @@ pub use structure::{DocOp, StructEntry, StructJournal, MAX_FLOORS};
 pub use terrain::{ChunkData, River, Terrain, TerrainMode, TerrainStroke, TerrainStyle};
 pub use view::{for_audience, Audience};
 pub use walls::{floor_walls, walls_from_grid, Wall, WallKind, WallState, ND_WORLD_WALL_CAP};
+pub use zone::Zone;

@@ -41,6 +41,12 @@ pub enum Op {
     RemoveLight {
         id: String,
     },
+    UpsertZone {
+        zone: crate::zone::Zone,
+    },
+    RemoveZone {
+        id: String,
+    },
     UpsertLabel {
         label: crate::doc::Label,
     },
@@ -210,6 +216,20 @@ impl Op {
                 Ok(Op::AddLight {
                     light: light.clone(),
                 })
+            }
+            Op::UpsertZone { zone } => match floor.zones.iter().find(|z| z.id == zone.id) {
+                Some(prev) => Ok(Op::UpsertZone { zone: prev.clone() }),
+                None => Ok(Op::RemoveZone {
+                    id: zone.id.clone(),
+                }),
+            },
+            Op::RemoveZone { id } => {
+                let zone = floor
+                    .zones
+                    .iter()
+                    .find(|z| z.id == *id)
+                    .ok_or_else(|| CoreError::NotFound(format!("zone {id}")))?;
+                Ok(Op::UpsertZone { zone: zone.clone() })
             }
             Op::UpsertLabel { label } => {
                 if let Some(prev) = floor.labels.iter().find(|l| l.id == label.id) {
@@ -389,6 +409,8 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::SetMark { edge, mark } => floor.grid.set_mark(*edge, *mark)?,
         Op::AddLight { light } => floor.add_light(light.clone())?,
         Op::RemoveLight { id } => floor.remove_light(id)?,
+        Op::UpsertZone { zone } => floor.upsert_zone(zone.clone())?,
+        Op::RemoveZone { id } => floor.remove_zone(id)?,
         Op::UpsertLabel { label } => floor.upsert_label(label.clone())?,
         Op::RemoveLabel { id } => floor.remove_label(id)?,
         Op::AddStroke { stroke, index } => floor.add_stroke(stroke.clone(), *index)?,
@@ -1419,6 +1441,44 @@ mod tests {
         });
         f.put_overlay(again, None).unwrap();
         assert_eq!(f.markers[3].label, "moved");
+    }
+
+    #[test]
+    fn zones_undo_exactly_and_refuse_bad_input() {
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        let zone = |name: &str, spaces: &[&str]| crate::zone::Zone {
+            id: "z1".into(),
+            name: name.into(),
+            color: "#aabbcc".into(),
+            spaces: spaces.iter().map(|s| s.to_string()).collect(),
+        };
+        let mut j = Journal::default();
+        j.push(
+            &mut f,
+            &Op::UpsertZone {
+                zone: zone("East wing", &["a", "b"]),
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut f,
+            &Op::UpsertZone {
+                zone: zone("West wing", &["c"]),
+            },
+        )
+        .unwrap();
+        assert_eq!(f.zones.len(), 1);
+        assert_eq!(f.zones[0].name, "West wing");
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(f.zones[0].spaces, ["a", "b"]);
+        j.push(&mut f, &Op::RemoveZone { id: "z1".into() }).unwrap();
+        assert!(f.zones.is_empty());
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(f.zones[0].name, "East wing");
+        j.undo_last(&mut f).unwrap();
+        assert!(f.zones.is_empty());
+        assert!(f.upsert_zone(zone("", &[])).is_err());
+        assert!(f.upsert_zone(zone("x", &["a", "a"])).is_err());
     }
 
     #[test]

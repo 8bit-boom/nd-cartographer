@@ -66,8 +66,18 @@
 <main>
   <nav id="outliner" aria-label="Map outline">
     <h3>Outline</h3>
+    <div id="bulkbar" aria-label="Bulk edit selected rooms">
+      <select id="sel-by" aria-label="Select rooms by"><option value="">Select by…</option></select>
+      <button id="sel-none" title="Clear the selection">Clear</button>
+      <span id="sel-count" class="dim" aria-live="polite">0 selected</span>
+      <button id="bk-zone" title="Group the selected rooms into a zone">Zone</button>
+      <button id="bk-color" title="Give the selected rooms one colour">Colour</button>
+      <button id="bk-kind" title="Change what the selected rooms are">Kind</button>
+      <button id="bk-prefix" title="Add text before every selected room's name">Prefix</button>
+      <button id="bk-delete" title="Delete the selected rooms (undoable)">Delete</button>
+    </div>
     <ul id="tree" role="tree" aria-label="Rooms, lights and notes"></ul>
-    <p class="dim hint">↑↓ move · ←→ fold · Enter go to · F2 rename · Del remove</p>
+    <p class="dim hint">↑↓ move · ←→ fold · Enter go to · Ctrl/Shift+click selects rooms · F2 rename · Del remove</p>
   </nav>
   <div id="stage"><canvas id="canvas"></canvas>
   <div id="terrainbar" hidden>

@@ -218,6 +218,8 @@ pub struct FloorDoc {
     pub lights: Vec<Light>,
     #[serde(default)]
     pub labels: Vec<Label>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<crate::zone::Zone>,
     /// Paint strokes in z-order (later draws over earlier). Cosmetic: they
     /// shape the baked picture, never walls or rooms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -279,6 +281,7 @@ impl FloorDoc {
             grid: RoomGrid::default(),
             lights: Vec::new(),
             labels: Vec::new(),
+            zones: Vec::new(),
             strokes: Vec::new(),
             stamps: Vec::new(),
             underlay: None,
@@ -749,6 +752,31 @@ impl FloorDoc {
                 return Err(CoreError::CapExceeded("at most 2000 labels".into()));
             }
             self.labels.push(label);
+        }
+        Ok(())
+    }
+
+    pub fn upsert_zone(&mut self, zone: crate::zone::Zone) -> CoreResult<()> {
+        zone.validate()?;
+        if let Some(z) = self.zones.iter_mut().find(|z| z.id == zone.id) {
+            *z = zone;
+        } else {
+            if self.zones.len() >= crate::zone::MAX_ZONES {
+                return Err(CoreError::CapExceeded(format!(
+                    "at most {} zones",
+                    crate::zone::MAX_ZONES
+                )));
+            }
+            self.zones.push(zone);
+        }
+        Ok(())
+    }
+
+    pub fn remove_zone(&mut self, id: &str) -> CoreResult<()> {
+        let before = self.zones.len();
+        self.zones.retain(|z| z.id != id);
+        if self.zones.len() == before {
+            return Err(CoreError::NotFound(format!("zone {id}")));
         }
         Ok(())
     }

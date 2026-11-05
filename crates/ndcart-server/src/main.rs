@@ -91,6 +91,7 @@ struct FloorView {
     markers: Vec<ndcart_core::Marker>,
     regions: Vec<ndcart_core::Region>,
     routes: Vec<ndcart_core::Route>,
+    zones: Vec<ndcart_core::Zone>,
 }
 
 #[derive(Serialize)]
@@ -134,6 +135,7 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         markers: floor.markers.clone(),
         regions: floor.regions.clone(),
         routes: floor.routes.clone(),
+        zones: floor.zones.clone(),
     }
 }
 
