@@ -108,6 +108,9 @@ pub struct Route {
     pub width: f32,
     #[serde(default)]
     pub dashed: bool,
+    /// Draw a smooth curve through the points instead of straight segments.
+    #[serde(default)]
+    pub smooth: bool,
 }
 
 fn brown() -> String {
@@ -185,7 +188,43 @@ impl Region {
     }
 }
 
+/// A smooth curve through `pts` (Catmull-Rom, `steps` samples per segment).
+/// Only + - * on f32, so it is the same on every platform. The curve passes
+/// through every control point; fewer than 3 points stay as they are.
+pub fn smooth_path(pts: &[[f32; 2]], steps: usize) -> Vec<[f32; 2]> {
+    if pts.len() < 3 || steps < 2 {
+        return pts.to_vec();
+    }
+    let at = |i: isize| pts[i.clamp(0, pts.len() as isize - 1) as usize];
+    let mut out = Vec::with_capacity((pts.len() - 1) * steps + 1);
+    for i in 0..pts.len() as isize - 1 {
+        let (p0, p1, p2, p3) = (at(i - 1), at(i), at(i + 1), at(i + 2));
+        for k in 0..steps {
+            let t = k as f32 / steps as f32;
+            let (t2, t3) = (t * t, t * t * t);
+            let f = |a: f32, b: f32, c: f32, d: f32| {
+                0.5 * (2.0 * b
+                    + (c - a) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+                    + (3.0 * b - a - 3.0 * c + d) * t3)
+            };
+            out.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1])]);
+        }
+    }
+    out.push(pts[pts.len() - 1]);
+    out
+}
+
 impl Route {
+    /// The points as drawn: curved when `smooth`.
+    pub fn drawn_points(&self) -> Vec<[f32; 2]> {
+        if self.smooth {
+            smooth_path(&self.points, 8)
+        } else {
+            self.points.clone()
+        }
+    }
+
     pub fn validate(&self) -> CoreResult<()> {
         if !id_ok(&self.id) {
             return Err(CoreError::Invalid(
@@ -253,6 +292,22 @@ impl OverlayItem {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_smooth_path_passes_through_its_points_and_is_deterministic() {
+        let pts = [[0.0, 0.0], [4.0, 3.0], [8.0, 0.0], [12.0, 5.0]];
+        let a = super::smooth_path(&pts, 8);
+        assert_eq!(a, super::smooth_path(&pts, 8));
+        assert_eq!(a.len(), 3 * 8 + 1);
+        for p in pts {
+            assert!(a.contains(&p), "{p:?} on the curve");
+        }
+        // It bends: it is not the straight polyline.
+        assert!(a
+            .iter()
+            .any(|q| (q[1] - 1.5).abs() > 0.2 && q[0] > 1.0 && q[0] < 3.0));
+        assert_eq!(super::smooth_path(&pts[..2], 8), pts[..2].to_vec());
+    }
+
     use super::*;
 
     pub(crate) fn marker(id: &str) -> Marker {
@@ -285,6 +340,7 @@ mod tests {
             color: "#6b3f1d".into(),
             width: 0.15,
             dashed: true,
+            smooth: false,
         }
     }
 

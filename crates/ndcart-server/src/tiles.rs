@@ -692,14 +692,15 @@ fn draw_overlay(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: 
     }
 
     for r in &floor.routes {
-        let (lo, hi) = bounds(&r.points);
+        let pts = r.drawn_points();
+        let (lo, hi) = bounds(&pts);
         if !on_screen(lo, hi, s) {
             continue;
         }
         let mut pb = PathBuilder::new();
-        let (fx, fy) = world(&r.points[0]);
+        let (fx, fy) = world(&pts[0]);
         pb.move_to(fx, fy);
-        for p in &r.points[1..] {
+        for p in &pts[1..] {
             let (x, y) = world(p);
             pb.line_to(x, y);
         }
@@ -719,7 +720,7 @@ fn draw_overlay(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: 
         // Waymarks: a dot every 3 cells along the route, measured from its start.
         let every = 3.0 * s;
         let (mut walked, mut next) = (0.0f32, every);
-        for seg in r.points.windows(2) {
+        for seg in pts.windows(2) {
             let (a, b) = (world(&seg[0]), world(&seg[1]));
             let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
             while next <= walked + len && len > 0.0 {
@@ -946,7 +947,7 @@ fn text_items(floor: &FloorDoc) -> Vec<TextItem> {
             bold: false,
             halo: true,
             tracking: 0.1,
-            anchor: Anchor::Path(r.points.clone()),
+            anchor: Anchor::Path(r.drawn_points()),
             min_scale: 0.5,
             rank: 2,
             user: false,
@@ -2414,6 +2415,7 @@ mod tests {
                 color: "#202020".into(),
                 width: 0.2,
                 dashed: true,
+                smooth: false,
             }),
             None,
         )
@@ -2589,6 +2591,58 @@ mod tests {
     }
 
     #[test]
+    fn a_smooth_route_curves_through_its_points_and_still_tiles_exactly() {
+        use ndcart_core::overlay::{OverlayItem as I, Route};
+        let mk = |smooth: bool| {
+            let mut f = light_floor();
+            f.put_overlay(
+                I::Route(Route {
+                    id: "r".into(),
+                    name: String::new(),
+                    points: vec![[0.5, 4.0], [3.0, 1.0], [5.0, 6.5], [7.5, 3.0]],
+                    color: "#000000".into(),
+                    width: 0.2,
+                    dashed: false,
+                    smooth,
+                }),
+                None,
+            )
+            .unwrap();
+            f
+        };
+        let (straight, curved) = (mk(false), mk(true));
+        assert_ne!(
+            bake_stamped(&straight, 32).data(),
+            bake_stamped(&curved, 32).data()
+        );
+        // A curve is many small segments with round joins; where it crosses a tile
+        // border the rasterizer clips and re-flattens those curves, so a handful of
+        // anti-aliased edge pixels may differ in coverage. Everything else is exact.
+        let (png, ..) = bake_full_stroked(&curved, 64);
+        let full = decode(&png);
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = decode(&bake_tile(&curved, &[], 32.0, 2, tx, ty));
+            let (mut differing, mut worst) = (0usize, 0u8);
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    let (a, b) = (
+                        rgb(&tile, x, y),
+                        rgb(&full, tx as u32 * 256 + x, ty as u32 * 256 + y),
+                    );
+                    if a != b {
+                        differing += 1;
+                        worst = worst.max(a[0].abs_diff(b[0]));
+                    }
+                }
+            }
+            assert!(
+                differing <= 40 && worst <= 32,
+                "tile ({tx},{ty}): {differing} pixels, worst {worst}"
+            );
+        }
+    }
+
+    #[test]
     fn a_map_grid_draws_lines_where_it_says_and_not_without_it() {
         use ndcart_core::MapGridKind::{Hex, Square};
         let plain = bake_stamped(&light_floor(), 32);
@@ -2711,6 +2765,7 @@ mod tests {
                 color: "#c00000".into(),
                 width: 0.05,
                 dashed: false,
+                smooth: false,
             }),
             None,
         )

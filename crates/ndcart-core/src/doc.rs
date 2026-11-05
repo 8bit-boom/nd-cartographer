@@ -1160,6 +1160,7 @@ mod layer_tests {
                 color: "#6b3f1d".into(),
                 width: 0.2,
                 dashed: false,
+                smooth: false,
             }),
             None,
         )

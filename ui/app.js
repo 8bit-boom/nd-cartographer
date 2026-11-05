@@ -714,15 +714,34 @@ function addRiverPoint(wx, wy) {
   render();
 }
 
+// Catmull-Rom curve through the clicked points (the same maths as the server's
+// route smoothing), so a river meanders instead of zig-zagging.
+function smoothPoints(pts, steps) {
+  if (pts.length < 3) return pts;
+  const at = (i) => pts[Math.max(0, Math.min(pts.length - 1, i))];
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [p0, p1, p2, p3] = [at(i - 1), at(i), at(i + 1), at(i + 2)];
+    for (let k = 0; k < steps; k++) {
+      const t = k / steps, t2 = t * t, t3 = t2 * t;
+      const f = (a, b, c, d) => 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (3 * b - a - 3 * c + d) * t3);
+      out.push([+f(p0[0], p1[0], p2[0], p3[0]).toFixed(3), +f(p0[1], p1[1], p2[1], p3[1]).toFixed(3)]);
+    }
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
 async function finishRiver() {
   const pts = riverDraft;
   if (state.tool !== 'river') return;
   if (!pts || pts.length < 2) { render(); return; }   // too few points: keep drawing
   riverDraft = null;
   const n = (curFloor().rivers || []).length + 1;
+  const curved = smoothPoints(pts, 4);
   await postOps([{ t: 'add_river', river: {
     id: 'rv_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
-    name: `River ${n}`, points: pts, width: trVal('tr-rwidth'),
+    name: `River ${n}`, points: curved, width: trVal('tr-rwidth'),
   } }]);
 }
 
@@ -888,7 +907,7 @@ async function finishOverlayShape() {
   if (name === null) { render(); return; }
   const item = kind === 'region'
     ? { kind, id: newId('rg'), name: name.trim().slice(0, 80), points: pts, color: '#c0504d', opacity: 0.28 }
-    : { kind, id: newId('rt'), name: name.trim().slice(0, 80), points: pts, dashed: true };
+    : { kind, id: newId('rt'), name: name.trim().slice(0, 80), points: pts, dashed: true, smooth: true };
   await postOps([{ t: 'put_overlay', item }]);
 }
 
