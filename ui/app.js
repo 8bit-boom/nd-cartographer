@@ -347,7 +347,7 @@ const TERRAIN_TOOLS = ['raise', 'lower', 'smooth', 'flatten', 'roughen'];
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'region', 'route', 'label', 'pathlabel']) {
+  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'stairs', 'region', 'route', 'label', 'pathlabel']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
@@ -364,6 +364,7 @@ function setTool(tool) {
     : TERRAIN_TOOLS.includes(tool) ? `${tool[0].toUpperCase()}${tool.slice(1)}: drag over the map`
     : tool === 'river' ? 'River: click points from source to mouth · Enter finishes · Esc cancels'
     : tool === 'marker' ? 'Marker: click to place a point of interest'
+    : tool === 'stairs' ? 'Stairs: click where they are, then say which floor they lead to'
     : tool === 'label' ? 'Label: click where the text goes'
     : tool === 'pathlabel' ? 'Text on a path: click points along the way · Enter finishes · Esc cancels'
     : tool === 'region' ? 'Region: click the corners · Enter finishes · Esc cancels'
@@ -803,6 +804,43 @@ async function placeMarker(wx, wy) {
   } }]);
 }
 
+// Stairs, ladders and lifts are markers that lead to another floor.
+async function placeStairs(wx, wy) {
+  const others = state.doc.floors.filter(f => f.id !== state.floorId);
+  if (others.length === 0) { statusEl.textContent = 'Add another floor first (the + in the floor bar).'; return; }
+  const label = window.prompt('Name (stairs, ladder, lift…)', 'Stairs');
+  if (label === null) return;
+  const list = others.map((f, i) => `${i + 1}) ${f.name}`).join('   ');
+  const pick = window.prompt(`Leads to which floor?  ${list}`, '1');
+  const target = others[Number(pick) - 1];
+  if (!target) { statusEl.textContent = 'No such floor; nothing placed.'; return; }
+  const s = ppc();
+  const at = { x: +(wx / s).toFixed(3), y: +(wy / s).toFixed(3) };
+  const here = state.floorId;
+  const name = label.trim().slice(0, 80) || 'Stairs';
+  await postOps([{ t: 'put_overlay', item: {
+    kind: 'marker', id: newId('st'), ...at, label: name, links_to: { floor: target.id },
+  } }]);
+  // The way back, at the same spot, so the two floors line up.
+  if (window.confirm(`Also add the way back on ${target.name}?`)) {
+    try {
+      const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: target.id, ops: [{ t: 'put_overlay', item: {
+        kind: 'marker', id: newId('st'), ...at, label: name, links_to: { floor: here },
+      } }] });
+      state.rev = res.rev; tileCache.clear(); await refresh();
+    } catch (e) { statusEl.textContent = `Error: ${e.message}`; }
+  }
+}
+
+// Double-click a stair with the pan tool to follow it.
+function followStairs(wx, wy) {
+  const s = ppc();
+  const hit = (curFloor().markers || []).find(m => m.links_to && Math.hypot(m.x * s - wx, m.y * s - wy) < 14);
+  if (!hit || !state.doc.floors.some(f => f.id === hit.links_to.floor)) return false;
+  selectFloor(hit.links_to.floor);
+  return true;
+}
+
 function addOverlayPoint(wx, wy) {
   const s = ppc();
   (overlayDraft ||= []).push([+(wx / s).toFixed(3), +(wy / s).toFixed(3)]);
@@ -876,6 +914,15 @@ canvas.addEventListener('pointerdown', (e) => {
   }
   if (state.tool === 'pathlabel' && e.button === 0) {
     if (isDoubleClick(e)) finishPathLabel(); else addOverlayPoint(wx, wy);
+    dragging = null;
+    return;
+  }
+  if (state.tool === 'stairs' && e.button === 0) {
+    placeStairs(wx, wy);
+    dragging = null;
+    return;
+  }
+  if (state.tool === 'pan' && e.button === 0 && isDoubleClick(e) && followStairs(wx, wy)) {
     dragging = null;
     return;
   }

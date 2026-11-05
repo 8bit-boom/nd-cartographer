@@ -68,6 +68,45 @@ fn neighbor(c: CellKey, e: Edge) -> CellKey {
     }
 }
 
+/// Stairs, ladders and lifts across the floors of one document: where a link
+/// points nowhere (a floor was removed) or nothing leads back.
+pub fn lint_links(floor: &FloorDoc, floors: &[FloorDoc]) -> Vec<Problem> {
+    let mut out = Vec::new();
+    for m in &floor.markers {
+        let Some(l) = &m.links_to else { continue };
+        let name = if m.label.is_empty() { &m.id } else { &m.label };
+        let Some(target) = floors.iter().find(|f| f.id == l.floor) else {
+            out.push(problem(
+                Severity::Warning,
+                "link_to_missing_floor",
+                format!("'{name}' leads to a floor that no longer exists."),
+            ));
+            continue;
+        };
+        if target.id == floor.id {
+            out.push(problem(
+                Severity::Warning,
+                "link_to_same_floor",
+                format!("'{name}' leads to the floor it is on."),
+            ));
+        } else if !target
+            .markers
+            .iter()
+            .any(|t| t.links_to.as_ref().is_some_and(|b| b.floor == floor.id))
+        {
+            out.push(problem(
+                Severity::Info,
+                "link_not_returned",
+                format!(
+                    "'{name}' leads to '{}', but nothing there leads back.",
+                    target.name
+                ),
+            ));
+        }
+    }
+    out
+}
+
 /// Lint one floor. `cell_size` is the lattice size lights are stored in.
 pub fn lint(floor: &FloorDoc, cell_size: f64) -> Vec<Problem> {
     let grid = &floor.grid;
@@ -284,6 +323,31 @@ pub fn blocks_publish(problems: &[Problem]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stairs_are_checked_against_the_other_floors() {
+        let stair = |to: &str| -> crate::overlay::Marker {
+            serde_json::from_value(serde_json::json!({
+                "id":"st","x":1.0,"y":1.0,"label":"Stairs","links_to":{"floor":to}
+            }))
+            .unwrap()
+        };
+        let mut a = FloorDoc::new("fl_a".into(), "Ground".into());
+        let mut b = FloorDoc::new("fl_b".into(), "Upper".into());
+        a.markers.push(stair("fl_b"));
+        let codes = |f: &FloorDoc, all: &[FloorDoc]| {
+            lint_links(f, all)
+                .iter()
+                .map(|p| p.code)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(codes(&a, &[a.clone(), b.clone()]), ["link_not_returned"]);
+        assert_eq!(codes(&a, &[a.clone()]), ["link_to_missing_floor"]);
+        b.markers.push(stair("fl_a"));
+        assert!(codes(&a, &[a.clone(), b.clone()]).is_empty());
+        a.markers[0] = stair("fl_a");
+        assert_eq!(codes(&a, &[a.clone(), b]), ["link_to_same_floor"]);
+    }
+
     use crate::grid::{default_space, EdgeKey, Mark, SpaceKind};
     use crate::journal::apply_op;
 

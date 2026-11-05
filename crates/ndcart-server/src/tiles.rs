@@ -2304,6 +2304,7 @@ mod tests {
                 note: String::new(),
                 color: "#e8b030".into(),
                 link_schematic: None,
+                links_to: None,
             }),
             None,
         )
@@ -2485,6 +2486,7 @@ mod tests {
                 note: String::new(),
                 color: "#e8b030".into(),
                 link_schematic: None,
+                links_to: None,
             }),
             None,
         )
@@ -2558,6 +2560,7 @@ mod tests {
                 note: String::new(),
                 color: "#e8b030".into(),
                 link_schematic: None,
+                links_to: None,
             })
         };
         let mut f = light_floor();
@@ -2688,6 +2691,7 @@ mod tests {
                 note: String::new(),
                 color: "#e8b030".into(),
                 link_schematic: None,
+                links_to: None,
             }),
             None,
         )

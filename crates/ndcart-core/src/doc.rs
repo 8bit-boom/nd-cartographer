@@ -1047,6 +1047,7 @@ mod layer_tests {
                 note: String::new(),
                 color: "#e8b030".into(),
                 link_schematic: None,
+                links_to: None,
             }),
             None,
         )

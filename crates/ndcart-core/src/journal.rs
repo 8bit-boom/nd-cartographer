@@ -1279,6 +1279,7 @@ mod tests {
             note: String::new(),
             color: "#e8b030".into(),
             link_schematic: None,
+            links_to: None,
         };
         let mut f = FloorDoc::new("f".into(), "G".into());
         let mut j = Journal::default();
@@ -1385,6 +1386,7 @@ mod tests {
                     note: String::new(),
                     color: "#e8b030".into(),
                     link_schematic: None,
+                    links_to: None,
                 }),
                 None,
             )
@@ -1398,6 +1400,7 @@ mod tests {
             note: String::new(),
             color: "#e8b030".into(),
             link_schematic: None,
+            links_to: None,
         });
         assert!(
             f.put_overlay(extra, None).is_err(),
@@ -1412,6 +1415,7 @@ mod tests {
             note: String::new(),
             color: "#e8b030".into(),
             link_schematic: None,
+            links_to: None,
         });
         f.put_overlay(again, None).unwrap();
         assert_eq!(f.markers[3].label, "moved");

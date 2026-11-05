@@ -29,7 +29,7 @@ pub use grid::{CellKey, Edge, EdgeKey, Mark, MarkKind, MarkState, RoomGrid, Spac
 pub use journal::{apply_op, Journal, Op};
 pub use lint::{blocks_publish, lint, Problem, Severity};
 pub use outline::{outline, Outline};
-pub use overlay::{Marker, OverlayItem, OverlayKind, Region, Route};
+pub use overlay::{FloorLink, Marker, OverlayItem, OverlayKind, Region, Route};
 pub use stamp::Stamp;
 pub use stroke::{BrushKind, Stroke, StrokeKind, StrokePoint};
 pub use structure::{DocOp, StructEntry, StructJournal, MAX_FLOORS};

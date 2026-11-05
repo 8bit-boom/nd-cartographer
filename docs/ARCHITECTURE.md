@@ -263,7 +263,7 @@ All floors share one journal; each entry carries `floor: Option<String>` and und
 (legacy entries without a floor match any floor). Floor structure (add / remove / rename / move) lives in a separate `StructJournal`
 (`structure.ndjson`) with its own undo; removing a floor snapshots it so undo restores it. `apply_ops` is atomic. The tile route can
 composite another floor underneath (`onion`, 30%). The UI floor bar offers add, duplicate, rename, reorder, remove, undo and onion skin.
-`ndcart publish --all-floors` publishes each floor as its own nd-world map ("Doc – Floor"); slugs are kept per floor in `NdWorldLink.floor_slugs` so re-publishing updates in place, and the legacy `slug` is the first floor's. Not yet: stairs links.
+`ndcart publish --all-floors` publishes each floor as its own nd-world map ("Doc – Floor"); slugs are kept per floor in `NdWorldLink.floor_slugs` so re-publishing updates in place, and the legacy `slug` is the first floor's. Stairs, ladders and lifts are markers with `links_to {floor, x?, y?}`; the Stairs tool places one (and optionally the way back on the other floor), double-clicking one with the pan tool follows it, and `lint_links` warns about links to a removed floor, to the same floor, or with nothing leading back.
 
 ## Still open in M0
 

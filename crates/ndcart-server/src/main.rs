@@ -631,7 +631,8 @@ async fn lint_doc(
         .floors
         .get(idx)
         .ok_or_else(|| CoreError::NotFound("floor".into()))?;
-    let problems = ndcart_core::lint(floor, doc.manifest.cell_size);
+    let mut problems = ndcart_core::lint(floor, doc.manifest.cell_size);
+    problems.extend(ndcart_core::lint::lint_links(floor, &doc.floors));
     Ok(Json(serde_json::json!({
         "floor": floor.id,
         "blocks_publish": ndcart_core::blocks_publish(&problems),

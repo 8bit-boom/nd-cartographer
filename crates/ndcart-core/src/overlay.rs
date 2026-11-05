@@ -53,6 +53,20 @@ pub struct Marker {
     /// The slug of an nd-world battle map this marker opens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_schematic: Option<String>,
+    /// Stairs, ladders and lifts: the floor this marker leads to, and where
+    /// you land there (cells; absent means "the same spot").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_to: Option<FloorLink>,
+}
+
+/// A vertical connection to another floor of the same document.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct FloorLink {
+    pub floor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub y: Option<f32>,
 }
 
 fn gold() -> String {
@@ -127,6 +141,22 @@ impl Marker {
             return Err(CoreError::Invalid(
                 "link_schematic must be a plain map slug".into(),
             ));
+        }
+        if let Some(l) = &self.links_to {
+            if !id_ok(&l.floor) {
+                return Err(CoreError::Invalid(
+                    "links_to.floor must be a floor id".into(),
+                ));
+            }
+            match (l.x, l.y) {
+                (None, None) => {}
+                (Some(x), Some(y)) => pts_ok(&[[x, y]], 1)?,
+                _ => {
+                    return Err(CoreError::Invalid(
+                        "links_to needs both x and y, or neither".into(),
+                    ))
+                }
+            }
         }
         Ok(())
     }
@@ -234,6 +264,7 @@ mod tests {
             note: "smugglers".into(),
             color: "#e8b030".into(),
             link_schematic: Some("harbour-map".into()),
+            links_to: None,
         }
     }
     pub(crate) fn region(id: &str) -> Region {
@@ -330,6 +361,7 @@ mod tests {
                 Box::new(|| {
                     OverlayItem::Marker(Marker {
                         link_schematic: Some("../x".into()),
+                        links_to: None,
                         ..marker("x")
                     })
                 }),
