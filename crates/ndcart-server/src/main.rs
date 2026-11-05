@@ -3,6 +3,7 @@
 //! Desktop is the Tauri shell wrapping this same server (M0 ships serve).
 
 mod auth;
+mod convert;
 mod store;
 mod tiles;
 
@@ -326,6 +327,42 @@ async fn export_uvtt(
 }
 
 #[derive(Deserialize)]
+struct ConvertQuery {
+    format: Option<String>,
+    quality: Option<u8>,
+}
+
+/// `POST /api/convert?format=webp|avif|png[&quality=N]` — raw image bytes in
+/// (PNG/JPEG/GIF/BMP/WebP), converted image out. Max 80 MB / 40 Mpx.
+async fn convert_image(
+    axum::extract::Query(q): axum::extract::Query<ConvertQuery>,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    let fmt = match q.format.as_deref() {
+        Some(f) => tiles::ImageFormat::parse(f).ok_or_else(|| {
+            ApiError(CoreError::Invalid(format!(
+                "unknown format {f:?} (png, webp or avif)"
+            )))
+        })?,
+        None => tiles::ImageFormat::Webp,
+    };
+    let quality = q.quality.unwrap_or(80);
+    let out = tokio::task::spawn_blocking(move || convert::convert(&body, fmt, quality))
+        .await
+        .map_err(|e| ApiError(CoreError::Invalid(format!("convert failed: {e}"))))?
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, fmt.mime().to_string()),
+            ("x-image-width".parse().unwrap(), out.width.to_string()),
+            ("x-image-height".parse().unwrap(), out.height.to_string()),
+        ],
+        out.bytes,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
 struct OpsBody {
     floor: String,
     ops: Vec<Op>,
@@ -453,6 +490,10 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}", get(get_doc))
         .route("/api/docs/{id}/export/uvtt", get(export_uvtt))
         .route("/api/docs/{id}/export/png", get(export_png))
+        .route("/api/convert", post(convert_image))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            convert::MAX_INPUT_BYTES,
+        ))
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
@@ -528,6 +569,62 @@ fn run_bench() {
     println!("  OK: replay reproduces the state exactly.");
 }
 
+// ---------- convert CLI ----------
+
+/// `ndcart convert IN OUT [--format webp|avif|png] [--quality N]` — the format
+/// defaults to OUT's extension.
+fn run_convert(args: Vec<String>) {
+    let (mut files, mut format, mut quality) = (Vec::new(), None, 80u8);
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--format" => format = it.next(),
+            "--quality" => quality = it.next().and_then(|q| q.parse().ok()).unwrap_or(80),
+            _ => files.push(a),
+        }
+    }
+    let usage = || {
+        eprintln!("usage: ndcart convert IN OUT [--format webp|avif|png] [--quality 1-100]");
+        std::process::exit(2);
+    };
+    let [input, output] = files.as_slice() else {
+        usage();
+        return;
+    };
+    let ext = std::path::Path::new(output)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    let Some(fmt) = tiles::ImageFormat::parse(format.as_deref().unwrap_or(ext)) else {
+        eprintln!("ndcart: pick --format png, webp or avif (or name OUT .png/.webp/.avif)");
+        std::process::exit(2);
+    };
+    let bytes = std::fs::read(input).unwrap_or_else(|e| {
+        eprintln!("ndcart: cannot read {input}: {e}");
+        std::process::exit(1);
+    });
+    match convert::convert(&bytes, fmt, quality) {
+        Ok(c) => {
+            std::fs::write(output, &c.bytes).unwrap_or_else(|e| {
+                eprintln!("ndcart: cannot write {output}: {e}");
+                std::process::exit(1);
+            });
+            println!(
+                "{input} -> {output}: {}x{} {} ({} -> {} bytes)",
+                c.width,
+                c.height,
+                fmt.ext(),
+                bytes.len(),
+                c.bytes.len()
+            );
+        }
+        Err(m) => {
+            eprintln!("ndcart: {m}");
+            std::process::exit(1);
+        }
+    }
+}
+
 // ---------- main ----------
 
 #[tokio::main]
@@ -536,6 +633,7 @@ async fn main() {
     let cmd = args.next().unwrap_or_else(|| "serve".into());
     match cmd.as_str() {
         "bench" => run_bench(),
+        "convert" => run_convert(args.collect()),
         "serve" => {
             let mut listen: Option<String> = None;
             let mut data_dir: Option<PathBuf> = None;
@@ -597,7 +695,9 @@ async fn main() {
                 .unwrap();
         }
         other => {
-            eprintln!("usage: ndcart [serve --listen ADDR --data-dir DIR | bench]");
+            eprintln!(
+                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT]"
+            );
             eprintln!("  unknown command: {other}");
             std::process::exit(2);
         }
@@ -801,6 +901,38 @@ mod tests {
         // matches it.
         assert!(v["image"].as_str().unwrap().starts_with("iVBOR"));
         assert_eq!(v["resolution"]["pixels_per_grid"], 32);
+    }
+
+    #[tokio::test]
+    async fn convert_route_webp_and_rejects_junk() {
+        let mut pm = tiny_skia::Pixmap::new(5, 5).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(1, 2, 3, 255));
+        let png = pm.encode_png().unwrap();
+        let router = build_router(test_app());
+        let post = |uri: &str, body: Vec<u8>| {
+            Request::post(uri.to_string())
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let r = router
+            .clone()
+            .oneshot(post("/api/convert?format=webp", png.clone()))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(r.headers()["content-type"], "image/webp");
+        assert_eq!(r.headers()["x-image-width"], "5");
+        let r = router
+            .clone()
+            .oneshot(post("/api/convert?format=avif", png))
+            .await
+            .unwrap();
+        assert_eq!(r.headers()["content-type"], "image/avif");
+        let r = router
+            .oneshot(post("/api/convert", b"junk".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

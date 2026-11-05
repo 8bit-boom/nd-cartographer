@@ -18,7 +18,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tiny-skia = "0.11"
-image = { version = "0.25", default-features = false, features = ["webp", "avif"] }
+image = { version = "0.25", default-features = false, features = ["webp", "avif", "png", "jpeg", "gif", "bmp"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
