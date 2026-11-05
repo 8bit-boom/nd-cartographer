@@ -66,6 +66,14 @@ pub enum Op {
     RemoveStamp {
         id: String,
     },
+    /// Set (or clear, with null) the picture behind everything.
+    SetUnderlay {
+        underlay: Option<crate::doc::Underlay>,
+    },
+    /// Replace the walls that are not derived from rooms.
+    SetImportedWalls {
+        walls: Vec<crate::doc::ImportedWall>,
+    },
     /// Several ops as one undoable step.
     Batch {
         ops: Vec<Op>,
@@ -215,6 +223,12 @@ impl Op {
                     index: Some(index),
                 })
             }
+            Op::SetUnderlay { .. } => Ok(Op::SetUnderlay {
+                underlay: floor.underlay.clone(),
+            }),
+            Op::SetImportedWalls { .. } => Ok(Op::SetImportedWalls {
+                walls: floor.imported_walls.clone(),
+            }),
             Op::Batch { ops } => {
                 // Compute the batch inverse by walking a scratch copy of the
                 // floor forward through the batch.
@@ -248,6 +262,8 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::AddStamp { stamp, index } => floor.add_stamp(stamp.clone(), *index)?,
         Op::UpdateStamp { stamp } => floor.update_stamp(stamp.clone())?,
         Op::RemoveStamp { id } => floor.remove_stamp(id)?,
+        Op::SetUnderlay { underlay } => floor.set_underlay(underlay.clone())?,
+        Op::SetImportedWalls { walls } => floor.set_imported_walls(walls.clone())?,
         Op::Batch { ops } => {
             for op in ops {
                 apply_op(floor, op)?;

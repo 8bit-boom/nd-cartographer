@@ -9,6 +9,10 @@
 <body>
 <header id="topbar">
   <strong id="doc-name">nd-cartographer</strong>
+  <select id="doc-select" title="Switch project" aria-label="Project"></select>
+  <button id="btn-new" title="New project">＋ New</button>
+  <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
+  <input type="file" id="file-open" accept=".dd2vtt,.uvtt,.df2vtt,application/json" hidden>
   <span id="doc-meta" class="dim"></span>
   <span class="spacer"></span>
   <div class="tools">

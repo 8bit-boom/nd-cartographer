@@ -186,7 +186,7 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let tmp = path.with_extension("tmp");
     {

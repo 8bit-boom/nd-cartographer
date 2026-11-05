@@ -49,12 +49,38 @@ pub struct Prepared {
     index: HashMap<(i32, i32), Vec<u32>>,
 }
 
+/// Drop samples that are closer together than a small fraction of the brush:
+/// segments much shorter than the brush add nothing visible but make every
+/// pixel check dozens of them. The first and last samples always stay, and so
+/// does any sample where pressure or tilt moves enough to change the width.
+/// Deterministic (a pure function of the points), so renders do not change run to run.
+fn thin(points: &[StrokePoint], size: f32) -> Vec<StrokePoint> {
+    let spacing = (size * 0.06).max(0.02);
+    let mut out: Vec<StrokePoint> = Vec::with_capacity(points.len().min(256));
+    for (i, p) in points.iter().enumerate() {
+        let keep = match out.last() {
+            None => true,
+            Some(q) => {
+                i == points.len() - 1
+                    || (p.x - q.x).hypot(p.y - q.y) >= spacing
+                    || (p.pressure - q.pressure).abs() > 0.08
+                    || (p.tilt - q.tilt).abs() > 0.08
+            }
+        };
+        if keep {
+            out.push(*p);
+        }
+    }
+    out
+}
+
 /// Scatter never lays more than this many dots per stroke.
 pub const MAX_DOTS: usize = 20_000;
 
 impl Prepared {
     pub fn new(stroke: &Stroke) -> Prepared {
-        let pts = &stroke.points;
+        let thinned = thin(&stroke.points, stroke.size);
+        let pts = &thinned;
         let rmax = pts
             .iter()
             .map(|p| width_at(stroke.size, p) * 0.5)
@@ -505,5 +531,60 @@ mod tests {
     fn the_salt_differs_per_id() {
         assert_ne!(stroke_salt("a"), stroke_salt("b"));
         assert_eq!(stroke_salt("same"), stroke_salt("same"));
+    }
+
+    #[test]
+    fn thinning_keeps_the_ends_and_barely_changes_the_picture() {
+        // A dense, wobbly polyline versus the same line: coverage must agree
+        // everywhere except within a hair of the edge.
+        let dense: Vec<(f32, f32, f32, f32)> = (0..600)
+            .map(|k| {
+                let t = k as f32 * 0.05;
+                (t, 3.0 + (t * 0.4).min(6.0) * 0.3, 1.0, 0.0)
+            })
+            .collect();
+        let mut st = stroke(BrushKind::Round, &dense);
+        st.size = 4.0;
+        let thinned = thin(&st.points, st.size);
+        assert!(
+            thinned.len() < st.points.len() / 3,
+            "{} -> {}",
+            st.points.len(),
+            thinned.len()
+        );
+        assert_eq!(
+            (thinned[0].x, thinned[0].y),
+            (st.points[0].x, st.points[0].y)
+        );
+        let (a, b) = (st.points.last().unwrap(), thinned.last().unwrap());
+        assert_eq!((a.x, a.y), (b.x, b.y));
+        // Compare against an unthinned preparation built by hand.
+        let thick = Prepared::new(&st);
+        let mut off_by_much = 0;
+        let mut total = 0;
+        for j in 0..160 {
+            for i in 0..640 {
+                let (u, v) = (i as f32 * 0.05, j as f32 * 0.05);
+                total += 1;
+                let exact = {
+                    // brute force: distance to the dense polyline
+                    let r = 2.0;
+                    st.points.windows(2).any(|w| {
+                        let (dx, dy) = (w[1].x - w[0].x, w[1].y - w[0].y);
+                        let l2 = dx * dx + dy * dy;
+                        let t = (((u - w[0].x) * dx + (v - w[0].y) * dy) / l2).clamp(0.0, 1.0);
+                        ((u - w[0].x - dx * t).powi(2) + (v - w[0].y - dy * t).powi(2)).sqrt() < r
+                    })
+                };
+                if exact != (thick.coverage(u, v) > 0.5) {
+                    off_by_much += 1;
+                }
+            }
+        }
+        // Only edge pixels may flip, and only a few of them.
+        assert!(
+            off_by_much * 200 < total,
+            "{off_by_much} of {total} pixels differ"
+        );
     }
 }

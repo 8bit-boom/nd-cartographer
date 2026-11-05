@@ -62,6 +62,55 @@ async function ensureDoc() {
   return manifest.id;
 }
 
+// ---------- projects ----------
+
+async function loadDocList() {
+  const { docs } = await api('GET', '/api/docs');
+  const sel = document.getElementById('doc-select');
+  sel.textContent = '';
+  for (const d of docs) {
+    const o = document.createElement('option');
+    o.value = d.id;
+    o.textContent = d.name;       // textContent: a project name is never HTML
+    o.selected = d.id === state.docId;
+    sel.appendChild(o);
+  }
+}
+
+async function openDoc(id) {
+  state.docId = id;
+  state.px = 0; state.py = 0; state.z = 0;
+  tileCache.clear();
+  await refresh();
+  await loadDocList();
+}
+
+document.getElementById('doc-select').onchange = (e) => openDoc(e.target.value);
+
+document.getElementById('btn-new').onclick = async () => {
+  const name = window.prompt('Name the new project', 'Untitled Battle Map');
+  if (name === null || !name.trim()) return;
+  const m = await api('POST', '/api/docs', { name: name.trim(), kind: 'battle' });
+  await openDoc(m.id);
+};
+
+document.getElementById('btn-open').onclick = () => document.getElementById('file-open').click();
+document.getElementById('file-open').onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  statusEl.textContent = `Opening ${file.name}…`;
+  try {
+    const res = await fetch(`/api/import/uvtt?name=${encodeURIComponent(file.name.replace(/\.(dd2vtt|uvtt|df2vtt)$/i, ''))}`, { method: 'POST', body: await file.arrayBuffer() });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || res.statusText);
+    await openDoc(out.manifest.id);
+    statusEl.textContent = `Opened ${file.name}: ${out.stats.walls} walls, ${out.stats.lights} lights`;
+  } catch (err) {
+    statusEl.textContent = `Could not open ${file.name}: ${err.message}`;
+  }
+};
+
 async function refresh() {
   state.doc = await api('GET', `/api/docs/${state.docId}`);
   state.rev = state.doc.rev;
@@ -835,6 +884,7 @@ window.addEventListener('resize', resizeCanvas);
   try {
     state.docId = await ensureDoc();
     await refresh();
+    await loadDocList();
     setTool('paint');
   } catch (e) {
     statusEl.textContent = `Cannot reach the server: ${e.message}`;

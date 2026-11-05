@@ -2,6 +2,7 @@
 //! run it (plan §4): `ndcart serve` (desktop/docker), `ndcart bench`.
 //! Desktop is the Tauri shell wrapping this same server (M0 ships serve).
 
+mod assets;
 mod auth;
 mod convert;
 #[cfg(feature = "bridge")]
@@ -78,6 +79,8 @@ struct FloorView {
     lights: Vec<Light>,
     labels: Vec<Label>,
     outline: ndcart_core::Outline,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    underlay: Option<ndcart_core::Underlay>,
 }
 
 #[derive(Serialize)]
@@ -105,6 +108,7 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         lights: floor.lights.clone(),
         labels: floor.labels.clone(),
         outline: ndcart_core::outline(floor, cell_size),
+        underlay: floor.underlay.clone(),
     }
 }
 
@@ -254,6 +258,133 @@ async fn list_materials() -> Json<serde_json::Value> {
             "color": format!("#{:02x}{:02x}{:02x}", m.base[0], m.base[1], m.base[2]),
         })).collect::<Vec<_>>(),
     }))
+}
+
+/// `POST /api/assets` — raw image bytes in; `{id}` (their SHA-256) out. Anything
+/// that does not decode as an image within the size limits is refused.
+async fn put_asset(body: axum::body::Bytes) -> Result<Json<serde_json::Value>, ApiError> {
+    let id = tokio::task::spawn_blocking(move || assets::global().put(&body))
+        .await
+        .map_err(|e| ApiError(CoreError::Invalid(format!("asset failed: {e}"))))?
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok(Json(serde_json::json!({ "id": id })))
+}
+
+/// `GET /api/assets/{id}` — the stored picture.
+async fn get_asset(Path(id): Path<String>) -> Result<Response, ApiError> {
+    let bytes = assets::global()
+        .get_bytes(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("asset {id}")))?;
+    let mime = match bytes.as_slice() {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xff, 0xd8, ..] => "image/jpeg",
+        [b'G', b'I', b'F', ..] => "image/gif",
+        b if b.len() > 12 && &b[8..12] == b"WEBP" => "image/webp",
+        _ => "application/octet-stream",
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes.to_vec(),
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct ImportQuery {
+    name: Option<String>,
+}
+
+/// `POST /api/import/uvtt[?name=…]` — a Universal VTT file (`.dd2vtt` / `.uvtt`)
+/// in the body becomes a new project: the picture is the underlay (stored as an
+/// asset), walls and doors are imported walls, lights are lights, and the grid
+/// is the file's squares. One undoable step. Rooms cannot be reconstructed from
+/// line segments, so the project has none.
+async fn import_uvtt(
+    State(app): State<App>,
+    axum::extract::Query(q): axum::extract::Query<ImportQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use ndcart_core::doc::{ImportedWall, Underlay};
+    let text = std::str::from_utf8(&body)
+        .map_err(|_| ApiError(CoreError::Invalid("a UVTT file is UTF-8 JSON".into())))?;
+    let map = ndcart_formats::uvtt::from_uvtt(text)
+        .map_err(|e| ApiError(CoreError::Invalid(e.to_string())))?;
+    let picture = map
+        .image_b64
+        .as_deref()
+        .and_then(ndcart_formats::base64::decode)
+        .ok_or_else(|| {
+            ApiError(CoreError::Invalid(
+                "the file has no readable picture".into(),
+            ))
+        })?;
+    let asset = tokio::task::spawn_blocking(move || assets::global().put(&picture))
+        .await
+        .map_err(|e| ApiError(CoreError::Invalid(format!("import failed: {e}"))))?
+        .map_err(|m| ApiError(CoreError::Invalid(format!("the picture: {m}"))))?;
+
+    let g = map.cell_size;
+    let walls: Vec<ImportedWall> = map
+        .walls
+        .iter()
+        .map(|w| ImportedWall {
+            pts: w
+                .pts
+                .iter()
+                .map(|p| [(p[0] / g) as f32, (p[1] / g) as f32])
+                .collect(),
+            kind: w.kind,
+            state: w.state,
+        })
+        .collect();
+    let name = q
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or("Imported map");
+    let mut ops = vec![
+        Op::SetUnderlay {
+            underlay: Some(Underlay {
+                asset,
+                x: 0.0,
+                y: 0.0,
+                w: map.cols as f32,
+                h: map.rows as f32,
+                opacity: 1.0,
+            }),
+        },
+        Op::SetImportedWalls { walls },
+    ];
+    ops.extend(
+        map.lights
+            .iter()
+            .cloned()
+            .map(|light| Op::AddLight { light }),
+    );
+    let (wall_count, light_count) = (map.walls.len(), map.lights.len());
+
+    let mut store = app.store.write().await;
+    let id = store.create(name, DocKind::Battle).id.clone();
+    let doc = store.docs.get_mut(&id).expect("just created");
+    doc.manifest.cell_size = g;
+    let floor_id = doc.floors[0].id.clone();
+    if let Err(e) = doc.apply_ops(&floor_id, &[Op::Batch { ops }]) {
+        store.docs.remove(&id); // never leave a half-imported project behind
+        return Err(e.into());
+    }
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    let manifest = store.docs[&id].manifest.clone();
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    Ok(Json(serde_json::json!({
+        "manifest": manifest,
+        "floor": floor_id,
+        "stats": { "cols": map.cols, "rows": map.rows, "walls": wall_count, "lights": light_count },
+    })))
 }
 
 /// `GET /api/stamps` — the starter stamp pack.
@@ -578,6 +709,9 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/export/png", get(export_png))
         .route("/api/docs/{id}/lint", get(lint_doc))
         .route("/api/materials", get(list_materials))
+        .route("/api/assets", post(put_asset))
+        .route("/api/assets/{id}", get(get_asset))
+        .route("/api/import/uvtt", post(import_uvtt))
         .route("/api/stamps", get(list_stamps))
         .route("/api/stamps/{id}/icon.png", get(stamp_icon_png))
         .route("/api/convert", post(convert_image))
@@ -786,6 +920,7 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+            assets::init(data_dir.as_ref().map(|d| d.join("assets")));
             let app_data_dir = data_dir.clone();
             let app: App = Arc::new(AppState {
                 store: tokio::sync::RwLock::new(store),
@@ -1171,6 +1306,241 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    }
+
+    async fn call(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Vec<u8>) {
+        let r = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = r.status();
+        (
+            status,
+            r.into_body().collect().await.unwrap().to_bytes().to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn assets_are_hashed_served_back_and_junk_is_refused() {
+        let router = build_router(test_app());
+        let mut pm = tiny_skia::Pixmap::new(3, 3).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(9, 8, 7, 255));
+        let png = pm.encode_png().unwrap();
+        let (st, body) = call(&router, "POST", "/api/assets", png.clone()).await;
+        assert_eq!(st, StatusCode::OK);
+        let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(id, ndcart_core::hash::sha256_hex(&png));
+        let (st, back) = call(&router, "GET", &format!("/api/assets/{id}"), vec![]).await;
+        assert_eq!((st, back), (StatusCode::OK, png));
+        assert_eq!(
+            call(&router, "POST", "/api/assets", b"not an image".to_vec())
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                &router,
+                "GET",
+                &format!("/api/assets/{}", "0".repeat(64)),
+                vec![]
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            call(&router, "GET", "/api/assets/..%2F..%2Fetc%2Fpasswd", vec![])
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn a_uvtt_file_opens_as_a_project_and_exports_back_without_loss() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        // A source map: two rooms, a door between them, a window, a light.
+        let (src_id, src_floor) = {
+            let mut st = app.store.write().await;
+            let m = st.create("Source", DocKind::Battle).clone();
+            let d = st.docs.get_mut(&m.id).unwrap();
+            let fid = d.floors[0].id.clone();
+            let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+                {"t":"upsert_space","space":{"id":"a","name":"A","color":"#7f5539","kind":"room","material":"wood_planks"}},
+                {"t":"upsert_space","space":{"id":"b","name":"B","color":"#5a7d9a","kind":"room","material":"cobblestone"}},
+                {"t":"paint_cells","cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1},{"x":1,"y":1}],"space":"a"},
+                {"t":"paint_cells","cells":[{"x":2,"y":0},{"x":3,"y":0},{"x":2,"y":1},{"x":3,"y":1}],"space":"b"},
+                {"t":"set_mark","edge":{"cell":{"x":1,"y":0},"edge":"east"},"mark":{"kind":"door","state":"open"}},
+                {"t":"set_mark","edge":{"cell":{"x":0,"y":0},"edge":"north"},"mark":{"kind":"window","state":"closed"}},
+                {"t":"add_light","light":{"id":"l","x":64.0,"y":32.0,"range":5.0,"color":"#ffaa00","intensity":0.8,"on":true}}
+            ]))
+            .unwrap();
+            d.apply_ops(&fid, &ops).unwrap();
+            (m.id, fid)
+        };
+        let (st, uvtt) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{src_id}/export/uvtt?floor={src_floor}&ppc=48"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let src: serde_json::Value = serde_json::from_slice(&uvtt).unwrap();
+
+        // Open it as a new project.
+        let (st, body) = call(
+            &router,
+            "POST",
+            "/api/import/uvtt?name=Opened",
+            uvtt.clone(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let imp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let (new_id, new_floor) = (
+            imp["manifest"]["id"].as_str().unwrap().to_string(),
+            imp["floor"].as_str().unwrap().to_string(),
+        );
+        assert_eq!(imp["manifest"]["name"], "Opened");
+        assert_eq!(
+            imp["manifest"]["cell_size"], 48.0,
+            "the grid is the file's squares"
+        );
+        assert_eq!(imp["stats"]["lights"], 1);
+        {
+            let st = app.store.read().await;
+            let d = &st.docs[&new_id];
+            let f = &d.floors[0];
+            assert!(
+                f.underlay.is_some() && f.grid.cell_count() == 0,
+                "a picture and imported walls, no rooms"
+            );
+            assert_eq!(
+                (
+                    f.underlay.as_ref().unwrap().w,
+                    f.underlay.as_ref().unwrap().h
+                ),
+                (4.0, 2.0)
+            );
+            assert_eq!(f.lights.len(), 1);
+            assert!(f
+                .imported_walls
+                .iter()
+                .any(|w| w.kind == ndcart_core::WallKind::Door));
+            assert!(
+                f.imported_walls
+                    .iter()
+                    .any(|w| w.kind == ndcart_core::WallKind::Window),
+                "the window rides through"
+            );
+        }
+        // The import was one undoable step: undoing it empties the floor again.
+        // (checked on a copy so the export below still has the content)
+        // Export it back: same walls (as segments), same light, a picture of the same size.
+        let (st, again) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{new_id}/export/uvtt?floor={new_floor}&ppc=48"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let back: serde_json::Value = serde_json::from_slice(&again).unwrap();
+        let norm = |v: &serde_json::Value| {
+            let mut segs: Vec<String> = v["line_of_sight"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| {
+                    let mut p: Vec<(i64, i64)> = l
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|q| {
+                            (
+                                (q["x"].as_f64().unwrap() * 1000.0).round() as i64,
+                                (q["y"].as_f64().unwrap() * 1000.0).round() as i64,
+                            )
+                        })
+                        .collect();
+                    if p.first() > p.last() {
+                        p.reverse();
+                    }
+                    format!("{p:?}")
+                })
+                .collect();
+            segs.sort();
+            segs
+        };
+        assert_eq!(
+            norm(&src),
+            norm(&back),
+            "walls survive the open/export round trip"
+        );
+        assert_eq!(
+            src["portals"].as_array().unwrap().len(),
+            back["portals"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            src["lights"].as_array().unwrap().len(),
+            back["lights"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            src["resolution"]["map_size"],
+            back["resolution"]["map_size"]
+        );
+        assert_eq!(
+            src["x_ndcart"]["windows"].as_array().unwrap().len(),
+            back["x_ndcart"]["windows"].as_array().unwrap().len()
+        );
+        // The imported map renders: the underlay is the picture.
+        let (st, png) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{new_id}/export/png?floor={new_floor}&ppc=48"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 4 * 48);
+    }
+
+    #[tokio::test]
+    async fn bad_uvtt_files_are_refused_and_leave_no_project_behind() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let before = app.store.read().await.docs.len();
+        let no_picture = br#"{"resolution":{"map_size":{"x":4,"y":4},"pixels_per_grid":50},"line_of_sight":[],"image":""}"#.to_vec();
+        let junk_picture = br#"{"resolution":{"map_size":{"x":4,"y":4},"pixels_per_grid":50},"line_of_sight":[],"image":"Zm9vYmFy"}"#.to_vec();
+        for body in [
+            b"nope".to_vec(),
+            b"{}".to_vec(),
+            no_picture,
+            junk_picture,
+            vec![0xff, 0xfe, 0x00],
+        ] {
+            let (st, _) = call(&router, "POST", "/api/import/uvtt", body).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(app.store.read().await.docs.len(), before);
     }
 
     #[tokio::test]

@@ -33,6 +33,13 @@ pub fn for_audience(floor: &FloorDoc, audience: Audience) -> FloorDoc {
         return f;
     }
     f.grid.marks.retain(|_, m| m.kind != MarkKind::Secret);
+    // An imported secret door is a plain wall to the players, same as a derived one.
+    for w in &mut f.imported_walls {
+        if w.kind == crate::walls::WallKind::Secret {
+            w.kind = crate::walls::WallKind::Wall;
+            w.state = None;
+        }
+    }
     f.labels.retain(|l| !l.gm_only);
     f
 }
@@ -114,6 +121,28 @@ mod tests {
         // The GM view is untouched, and so is the source document.
         assert_eq!(for_audience(&f, Audience::Gm), f);
         assert_eq!(f.labels.len(), 2);
+    }
+
+    #[test]
+    fn an_imported_secret_door_is_a_plain_wall_to_players() {
+        use crate::doc::ImportedWall;
+        use crate::walls::{floor_walls, WallState};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.set_imported_walls(vec![ImportedWall {
+            pts: vec![[1.0, 1.0], [2.0, 1.0]],
+            kind: WallKind::Secret,
+            state: Some(WallState::Closed),
+        }])
+        .unwrap();
+        assert!(floor_walls(&f, 32.0)
+            .unwrap()
+            .iter()
+            .any(|w| w.kind == WallKind::Secret));
+        let p = for_audience(&f, Audience::Player);
+        let walls = floor_walls(&p, 32.0).unwrap();
+        assert_eq!(walls.len(), 1);
+        assert_eq!((walls[0].kind, walls[0].state), (WallKind::Wall, None));
+        assert!(!serde_json::to_string(&p).unwrap().contains("secret"));
     }
 
     #[test]

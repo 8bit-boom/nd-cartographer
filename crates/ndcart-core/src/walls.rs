@@ -233,6 +233,27 @@ fn emit(walls: &mut Vec<Wall>, seg: Seg, horizontal: bool, s: f64) {
     });
 }
 
+/// Every wall on a floor, in lattice pixels at `cell_size`: the walls derived
+/// from rooms, then the imported ones (cells -> pixels). This is the one place
+/// the two sources meet, so exports, publishing and the linter all agree.
+/// Imported ids are `iw<index>`, stable for an unchanged import.
+pub fn floor_walls(floor: &crate::doc::FloorDoc, cell_size: f64) -> CoreResult<Vec<Wall>> {
+    let mut walls = walls_from_grid(&floor.grid, cell_size)?;
+    for (i, w) in floor.imported_walls.iter().enumerate() {
+        walls.push(Wall {
+            id: format!("iw{i}"),
+            pts: w
+                .pts
+                .iter()
+                .map(|p| [f64::from(p[0]) * cell_size, f64::from(p[1]) * cell_size])
+                .collect(),
+            kind: w.kind,
+            state: w.state,
+        });
+    }
+    Ok(walls)
+}
+
 /// A helper for the linter: how far over nd-world's publish cap a
 /// derivation sits (`walls.len()`, once rendered).
 pub fn over_wall_cap(walls: &[Wall]) -> bool {

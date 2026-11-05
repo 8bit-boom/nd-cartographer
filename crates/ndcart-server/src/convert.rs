@@ -19,7 +19,7 @@ pub struct Converted {
     pub height: u32,
 }
 
-fn decode(input: &[u8]) -> Result<DynamicImage, String> {
+pub(crate) fn decode(input: &[u8]) -> Result<DynamicImage, String> {
     if input.is_empty() {
         return Err("empty input".into());
     }
@@ -44,6 +44,13 @@ fn decode(input: &[u8]) -> Result<DynamicImage, String> {
         return Err(format!("image over {} megapixels", MAX_PIXELS / 1_000_000));
     }
     Ok(img)
+}
+
+/// Decode to straight RGBA8 `(pixels, width, height)` within the size limits.
+pub(crate) fn decode_rgba(input: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let img = decode(input)?.to_rgba8();
+    let (w, h) = img.dimensions();
+    Ok((img.into_raw(), w, h))
 }
 
 /// Convert `input` to `format`. `quality` (1..=100) applies to AVIF; WebP is

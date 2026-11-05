@@ -122,3 +122,5 @@ canvas#canvas.panning { cursor: grabbing; }
 #stamp-palette button { padding: 2px; border-radius: 6px; line-height: 0; }
 #stamp-palette button.active { border-color: var(--accent); background: rgba(0,179,230,0.18); }
 #stamp-palette img { width: 34px; height: 34px; }
+
+#doc-select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 200px; }

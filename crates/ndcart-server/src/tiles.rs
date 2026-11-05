@@ -7,7 +7,7 @@
 //! stroke on top, the background is the void color. Golden-tile tests arrive
 //! with `ndcart-render` (plan §12); this module stays deterministic anyway.
 
-use ndcart_core::walls::{walls_from_grid, Wall};
+use ndcart_core::walls::{floor_walls, Wall};
 use ndcart_core::CellKey;
 use ndcart_core::FloorDoc;
 use ndcart_paint::{edge_mix, Side, BLEND_WIDTH};
@@ -163,14 +163,9 @@ fn encode(pm: &tiny_skia::Pixmap, format: ImageFormat, quality: u8) -> Result<Ve
 pub const MAX_SIDE_PX: i64 = 20_000; // nd-world's schematic canvas limit
 pub const MAX_FULL_PX: i64 = 40_000_000; // nd-world's import-uvtt pixel budget
 
-/// Painted bounding box in cells, min 1x1 (negative cells are out of bounds).
+/// Everything on the floor in cells (rooms, underlay, strokes, stamps), min 1x1.
 pub fn grid_extent(floor: &FloorDoc) -> (u32, u32) {
-    let (mut cols, mut rows) = (1, 1);
-    for (c, _) in floor.grid.cells() {
-        cols = cols.max(c.x + 1);
-        rows = rows.max(c.y + 1);
-    }
-    (cols as u32, rows as u32)
+    floor.extent()
 }
 
 /// Seed for every pattern and blend jitter. A document-level seed can replace
@@ -440,6 +435,34 @@ pub fn stamp_icon(def: &ndcart_paint::StampDef, px: u32) -> Vec<u8> {
     pm.encode_png().expect("png")
 }
 
+/// The picture behind everything: scaled to its rectangle in cells (bilinear),
+/// at the underlay's opacity, over the void and under the rooms.
+fn draw_underlay(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+    let Some(u) = &floor.underlay else { return };
+    let Some(img) = crate::assets::global().get_pixmap(&u.asset) else {
+        return;
+    };
+    let scale = ppc as f32;
+    let (sx, sy) = (
+        u.w * scale / img.width() as f32,
+        u.h * scale / img.height() as f32,
+    );
+    let paint = tiny_skia::PixmapPaint {
+        opacity: u.opacity,
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    let t = tiny_skia::Transform::from_row(
+        sx,
+        0.0,
+        0.0,
+        sy,
+        u.x * scale - x0 as f32,
+        u.y * scale - y0 as f32,
+    );
+    pixmap.draw_pixmap(0, 0, img.as_ref().as_ref(), &paint, t, None);
+}
+
 /// Composite the floor's paint strokes over the baked cells, in z-order.
 /// A paint stroke mixes its material toward each pixel by `coverage * opacity`;
 /// an eraser mixes back toward what was there before any stroke (the room
@@ -546,6 +569,8 @@ fn render_pixmap(
     let cx_to = (x0 + tile_px_w - 1).div_euclid(ppc);
     let cy_from = y0.div_euclid(ppc);
     let cy_to = (y0 + tile_px_h - 1).div_euclid(ppc);
+
+    draw_underlay(&mut pixmap, floor, ppc, x0, y0);
 
     // Cells: each painted cell is filled pixel by pixel from its material (or
     // flat colour), blending toward a differently-painted neighbour near the
@@ -664,7 +689,7 @@ fn render_pixmap(
 
 /// Derive walls once per revision (callers cache the result).
 pub fn derive_walls(floor: &FloorDoc, cell_size: f64) -> Vec<Wall> {
-    walls_from_grid(&floor.grid, cell_size).unwrap_or_default()
+    floor_walls(floor, cell_size).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1114,7 +1139,8 @@ mod tests {
         )
         .unwrap();
         let (png, w, _) = bake_full_stroked(&f, 64);
-        assert_eq!(w, 512);
+        // 8 cells of rooms plus the stroke's reach: the export holds everything.
+        assert!(w >= 512, "{w}");
         let full = decode(&png);
         for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
             let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
@@ -1162,15 +1188,14 @@ mod tests {
             )
             .unwrap();
         }
-        // Plus the heavy case: long, wide, rough scribbles with many samples.
+        // Plus the heavy case: long, wide, rough strokes with many samples, as a
+        // hand would draw them (a smooth wave, ~13 samples per cell).
         for i in 0..40 {
             let pts: Vec<(f32, f32)> = (0..500)
                 .map(|k| {
                     let t = k as f32 / 499.0;
-                    (
-                        1.0 + t * 38.0,
-                        2.0 + i as f32 * 0.9 + ((k * 13 % 17) as f32) * 0.08,
-                    )
+                    let x = 1.0 + t * 38.0;
+                    (x, 2.0 + i as f32 * 0.9 + (x * 0.35).sin() * 0.8)
                 })
                 .collect();
             let mut st = mk_stroke(
@@ -1455,6 +1480,97 @@ mod tests {
                 "{} corner is clear",
                 def.id
             );
+        }
+    }
+
+    fn solid_png(w: u32, h: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let mut pm = tiny_skia::Pixmap::new(w, h).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255));
+        pm.encode_png().unwrap()
+    }
+
+    #[test]
+    fn an_underlay_fills_its_rectangle_under_the_rooms_with_opacity() {
+        use ndcart_core::Underlay;
+        let id = crate::assets::global()
+            .put(&solid_png(4, 4, [255, 0, 0]))
+            .unwrap();
+        let mut f = light_floor(); // a light room fills cells 0..8
+        let u = |opacity: f32| Underlay {
+            asset: id.clone(),
+            x: 6.0,
+            y: 6.0,
+            w: 6.0,
+            h: 6.0,
+            opacity,
+        };
+        f.set_underlay(Some(u(1.0))).unwrap();
+        let pm = bake_stamped(&f, 32);
+        assert_eq!(
+            (pm.width(), pm.height()),
+            (12 * 32, 12 * 32),
+            "the export grows to hold the underlay"
+        );
+        // Outside the room, inside the underlay: pure red. Inside the room: the room wins.
+        assert_eq!(rgb(&pm, 10 * 32, 10 * 32), [255, 0, 0]);
+        assert_eq!(
+            rgb(&pm, 7 * 32, 7 * 32),
+            [0xd0, 0xd0, 0xd0],
+            "rooms draw over the picture"
+        );
+        // Outside the underlay and the room: the void.
+        assert_eq!(rgb(&pm, 10 * 32, 2 * 32), VOID[..3]);
+        // Half opacity mixes with the void behind it.
+        f.set_underlay(Some(u(0.5))).unwrap();
+        let half = rgb(&bake_stamped(&f, 32), 10 * 32, 10 * 32);
+        assert!(
+            (i32::from(half[0]) - 137).abs() <= 2 && half[1] < 20,
+            "{half:?}"
+        );
+        // An asset the store does not have draws nothing and is not an error.
+        f.set_underlay(Some(Underlay {
+            asset: "0".repeat(64),
+            ..u(1.0)
+        }))
+        .unwrap();
+        assert_eq!(rgb(&bake_stamped(&f, 32), 10 * 32, 10 * 32), VOID[..3]);
+    }
+
+    #[test]
+    fn an_underlay_bakes_the_same_in_tiles_and_in_the_full_render() {
+        use ndcart_core::Underlay;
+        // A gradient so any misplacement shows.
+        let mut src = tiny_skia::Pixmap::new(64, 48).unwrap();
+        for (i, p) in src.pixels_mut().iter_mut().enumerate() {
+            let (x, y) = ((i % 64) as u8, (i / 64) as u8);
+            *p = tiny_skia::ColorU8::from_rgba(x * 4, y * 5, 128, 255).premultiply();
+        }
+        let id = crate::assets::global()
+            .put(&src.encode_png().unwrap())
+            .unwrap();
+        let mut f = light_floor();
+        f.set_underlay(Some(Underlay {
+            asset: id,
+            x: 1.3,
+            y: 0.7,
+            w: 9.1,
+            h: 6.9,
+            opacity: 0.9,
+        }))
+        .unwrap();
+        let (png, ..) = bake_full_stroked(&f, 64);
+        let full = decode(&png);
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    assert_eq!(
+                        tile.pixel(x, y),
+                        full.pixel(tx as u32 * 256 + x, ty as u32 * 256 + y),
+                        "tile ({tx},{ty}) pixel ({x},{y})"
+                    );
+                }
+            }
         }
     }
 

@@ -40,6 +40,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 - `{"t":"add_stroke","stroke":{"id","kind":"paint|erase","brush":"round|scatter","material?","color":"#rrggbb","size":0.05-64,"opacity":0-1,"hardness?":0-1,"roughness?":0-1,"density?":0-1,"seed","points":[{"x","y","pressure?":0-1,"tilt?":0-1}]},"index?"}` — a paint stroke in cell coordinates (1–4,000 points, ≤ 20,000 per floor); `index` is its z-order position (default: on top)
 - `{"t":"remove_stroke","id"}`
 - `{"t":"add_stamp","stamp":{"id","asset":"crate","x","y","scale?":0.1-8,"rotation?","flip?","tint?":"#rrggbb","shadow?"},"index?"}`, `{"t":"update_stamp","stamp":{…same id…}}`, `{"t":"remove_stamp","id"}` — placed props (`GET /api/stamps` lists the pack)
+- `{"t":"set_underlay","underlay":{"asset":"<sha256>","x","y","w","h","opacity?"}|null}` — the picture behind everything (asset ids come from `POST /api/assets`); `{"t":"set_imported_walls","walls":[{"pts":[[x,y],…],"kind","state?"}]}` — walls not derived from rooms, in cells
 - `{"t":"remove_space","id"}`
 - `{"t":"set_mark","edge":{"cell":{"x","y"},"edge":"west|north|east|south"},"mark":{"kind":"opening|door|window|secret","state":"open|closed"}|null}`
 - `{"t":"add_light","light":{"id","x","y","range","color","intensity","on","label?"}}` — ≤ 60 per floor (nd-world publish cap)
@@ -57,6 +58,14 @@ Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/materials` | The starter pack: `{pack, materials:[{id, name, color}]}`; `color` is the base colour for swatches. |
+
+## Assets and import
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/assets` | Raw image bytes (≤ 80 MB, ≤ 40 Mpx, PNG/JPEG/GIF/BMP/WebP) → `{id}` = the SHA-256. Anything that does not decode → 400. |
+| GET | `/api/assets/{id}` | The stored picture (immutable, cacheable). 404 for unknown or malformed ids. |
+| POST | `/api/import/uvtt[?name=]` | A Universal VTT file in the body → a new project (`{manifest, floor, stats}`): picture → underlay, walls/portals/windows → imported walls, lights → lights, grid = the file's squares. Bad file → 400 and no project left behind. |
 
 ## Stamps
 

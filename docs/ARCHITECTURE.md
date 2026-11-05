@@ -172,6 +172,28 @@ cannot express), and `publish` started a nested tokio runtime.
   a re-publish keeps the same id for a door that has not moved and nd-world keeps
   its runtime open/closed state.
 
+- **Underlay, imported walls, assets, and opening a `.dd2vtt`.** A floor can hold a
+  raster **underlay** (an asset id — the picture's SHA-256 — plus its rectangle in
+  cells and an opacity), drawn over the void and under the rooms, and **imported
+  walls** (cell coordinates, not derived from rooms: an opened Dungeondraft map has
+  walls but no rooms). `floor_walls` is the one place derived and imported walls
+  meet, so exports, publishing and the linter agree; the secrets filter turns an
+  imported secret door into a plain wall for players. The **asset store**
+  (`GET/POST /api/assets`) is content-addressed, refuses anything that does not
+  decode as an image within the size limits, writes atomically under
+  `<data-dir>/assets/`, and caches decoded pixmaps. `POST /api/import/uvtt` turns
+  a Universal VTT file into a project in one undoable step (picture → underlay,
+  line-of-sight/portals/windows → imported walls, lights → lights, the file's
+  squares → the grid) and leaves nothing behind if any part fails. The UI has a
+  project picker, "New" and "Open .dd2vtt…". A round trip (export UVTT → open →
+  export) preserves walls, the door portal, the window, the light and the size
+  (test). Export extent now covers *every* layer (`FloorDoc::extent`): before, a
+  stroke or stamp outside the painted rooms was cropped from exports.
+  Underlays are scaled bilinearly; very large pictures at low zoom will alias until
+  mip-mapping lands.
+- The linter treats a picture-only map as non-empty and does not call a light on
+  the underlay "in the void".
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

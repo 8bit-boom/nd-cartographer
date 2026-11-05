@@ -5,7 +5,7 @@
 use crate::doc::FloorDoc;
 use crate::grid::{CellKey, Edge, MarkKind};
 use crate::journal::Op;
-use crate::walls::{walls_from_grid, ND_WORLD_WALL_CAP};
+use crate::walls::{floor_walls, ND_WORLD_WALL_CAP};
 use crate::MAX_LIGHTS;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,7 +73,13 @@ pub fn lint(floor: &FloorDoc, cell_size: f64) -> Vec<Problem> {
     let grid = &floor.grid;
     let mut out = Vec::new();
 
-    if grid.cell_count() == 0 {
+    // "Empty" means nothing at all: a map opened from a picture has no rooms
+    // but is not empty.
+    let has_art = floor.underlay.is_some()
+        || !floor.strokes.is_empty()
+        || !floor.stamps.is_empty()
+        || !floor.imported_walls.is_empty();
+    if grid.cell_count() == 0 && !has_art {
         out.push(problem(
             Severity::Warning,
             "empty_floor",
@@ -82,7 +88,7 @@ pub fn lint(floor: &FloorDoc, cell_size: f64) -> Vec<Problem> {
     }
 
     // nd-world's publish caps.
-    if let Ok(walls) = walls_from_grid(grid, cell_size) {
+    if let Ok(walls) = floor_walls(floor, cell_size) {
         if walls.len() > ND_WORLD_WALL_CAP {
             out.push(problem(
                 Severity::Error,
@@ -225,7 +231,12 @@ pub fn lint(floor: &FloorDoc, cell_size: f64) -> Vec<Problem> {
             (l.x / cell_size).floor() as i32,
             (l.y / cell_size).floor() as i32,
         );
-        if grid.cell_space(cell).is_none() {
+        // A light is "in the void" only if neither a room nor the underlay is there.
+        let on_underlay = floor.underlay.as_ref().is_some_and(|u| {
+            let (cx, cy) = (l.x as f32 / cell_size as f32, l.y as f32 / cell_size as f32);
+            cx >= u.x && cx <= u.x + u.w && cy >= u.y && cy <= u.y + u.h
+        });
+        if grid.cell_space(cell).is_none() && !on_underlay {
             out.push(Problem {
                 severity: Severity::Warning,
                 code: "light_in_void",
@@ -390,5 +401,53 @@ mod tests {
             .any(|p| p.code == "walls_over_cap" && p.severity == Severity::Error));
         assert!(blocks_publish(&p));
         assert_eq!(p[0].code, "walls_over_cap", "errors sort first");
+    }
+
+    #[test]
+    fn a_map_opened_from_a_picture_is_not_empty_and_its_lights_are_fine() {
+        use crate::doc::{ImportedWall, Underlay};
+        use crate::walls::WallKind;
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        assert_eq!(codes(&lint(&f, 32.0)), ["empty_floor"]);
+        f.set_underlay(Some(Underlay {
+            asset: crate::hash::sha256_hex(b"x"),
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+            opacity: 1.0,
+        }))
+        .unwrap();
+        f.set_imported_walls(vec![ImportedWall {
+            pts: vec![[0.0, 0.0], [5.0, 0.0]],
+            kind: WallKind::Wall,
+            state: None,
+        }])
+        .unwrap();
+        f.add_light(crate::doc::Light {
+            id: "l".into(),
+            x: 100.0,
+            y: 100.0,
+            range: 4.0,
+            color: "#ffffff".into(),
+            intensity: 1.0,
+            on: true,
+            label: None,
+        })
+        .unwrap();
+        assert!(lint(&f, 32.0).is_empty(), "{:?}", lint(&f, 32.0));
+        // A light off the picture is still flagged.
+        f.add_light(crate::doc::Light {
+            id: "far".into(),
+            x: 9000.0,
+            y: 100.0,
+            range: 4.0,
+            color: "#ffffff".into(),
+            intensity: 1.0,
+            on: true,
+            label: None,
+        })
+        .unwrap();
+        assert_eq!(codes(&lint(&f, 32.0)), ["light_in_void"]);
     }
 }
