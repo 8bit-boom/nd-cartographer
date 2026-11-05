@@ -70,6 +70,9 @@ pub struct Label {
     pub size: f64,
     pub color: String,
     pub bold: bool,
+    /// A GM-only note: never leaves the studio in a player-facing output.
+    #[serde(default)]
+    pub gm_only: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]

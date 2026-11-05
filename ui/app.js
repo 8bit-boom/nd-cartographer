@@ -397,15 +397,17 @@ async function refreshProblems() {
 
 function setExportLinks() {
   const base = `/api/docs/${state.docId}/export`;
-  const q = `floor=${state.floorId}`;
+  const player = document.getElementById('exp-player').checked;
+  const q = `floor=${state.floorId}` + (player ? '&audience=player' : '');
+  const suffix = player ? ' (players)' : '';
   document.getElementById('exp-png').href = `${base}/png?${q}&format=png`;
   document.getElementById('exp-webp').href = `${base}/png?${q}&format=webp`;
   document.getElementById('exp-avif').href = `${base}/png?${q}&format=avif`;
   document.getElementById('exp-uvtt').href = `${base}/uvtt?${q}`;
-  document.getElementById('exp-png').download = `${state.doc.manifest.name}.png`;
-  document.getElementById('exp-webp').download = `${state.doc.manifest.name}.webp`;
-  document.getElementById('exp-avif').download = `${state.doc.manifest.name}.avif`;
-  document.getElementById('exp-uvtt').download = `${state.doc.manifest.name}.dd2vtt`;
+  document.getElementById('exp-png').download = `${state.doc.manifest.name}${suffix}.png`;
+  document.getElementById('exp-webp').download = `${state.doc.manifest.name}${suffix}.webp`;
+  document.getElementById('exp-avif').download = `${state.doc.manifest.name}${suffix}.avif`;
+  document.getElementById('exp-uvtt').download = `${state.doc.manifest.name}${suffix}.dd2vtt`;
 }
 
 async function undo() {
@@ -428,6 +430,7 @@ document.getElementById('tool-window').onclick = () => setTool('window');
 document.getElementById('btn-problems').onclick = () => toggleProblems();
 document.getElementById('problems-close').onclick = () => toggleProblems(false);
 document.getElementById('btn-help').onclick = () => toggleHelp();
+document.getElementById('exp-player').onchange = setExportLinks;
 document.getElementById('btn-undo').onclick = undo;
 
 function buildPalette() {

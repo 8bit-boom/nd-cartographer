@@ -59,8 +59,11 @@ Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/docs/{id}/export/uvtt[?floor=ID&ppc=N&format=png\|webp]` | Universal VTT 0.3 JSON: walls, door portals, lights and the embedded full-map picture (default 32 px/cell, PNG). `format=avif` is refused: VTTs and nd-world's `import-uvtt` don't read it. |
+| GET | `/api/docs/{id}/export/uvtt[?floor=ID&ppc=N&format=png\|webp]` | Universal VTT 0.3 JSON: walls, door portals, lights and the embedded full-map picture (default 32 px/cell, PNG). `audience=player` strips secrets (see below). `format=avif` is refused: VTTs and nd-world's `import-uvtt` don't read it. |
 | GET | `/api/docs/{id}/export/png[?floor=ID&ppc=N&format=png\|webp\|avif&quality=1-100]` | The whole floor as one image. Despite the path it serves `image/png`, `image/webp` (lossless) or `image/avif` (lossy, `quality` default 80). Limits: ppc 1..=256, each side ≤ 20,000 px, area ≤ 40 Mpx (nd-world's import caps) → 400 otherwise. |
+
+`audience=gm|player` (default `gm`) on both exports: `player` runs the floor through the
+one secrets filter — secret doors become plain walls, GM-only labels are dropped.
 
 ## Convert
 
@@ -81,7 +84,7 @@ first run, printed once). 401 without it.
 ndcart serve [--listen 127.0.0.1:8300] [--data-dir DIR]   # env: ND_CARTO_LISTEN, ND_CARTO_DATA_DIR
 ndcart bench                                              # journal/walls/replay timings
 ndcart convert IN OUT [--format webp|avif|png] [--quality N]
-ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32] [--format webp] [--max-mb 20] --data-dir DIR
+ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32] [--format webp] [--max-mb 20] [--audience gm|player] --data-dir DIR
                                                           # password: ND_CARTO_PASSWORD / ND_CARTO_PASSWORD_FILE only
 ```
 

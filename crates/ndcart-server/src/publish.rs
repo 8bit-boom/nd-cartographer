@@ -10,7 +10,7 @@
 
 use crate::{store, tiles};
 use ndcart_bridge::{rooms, Bridge, BridgeError, PublishMap};
-use ndcart_core::NdWorldLink;
+use ndcart_core::{for_audience, Audience, NdWorldLink};
 use std::path::PathBuf;
 
 /// nd-world's default upload cap (`max_upload_mb`, adjustable per instance).
@@ -28,12 +28,16 @@ pub struct Args {
     pub data_dir: PathBuf,
     /// The server's upload cap in MB (`max_upload_mb`); the picture is fitted under it.
     pub max_mb: usize,
+    /// `--audience player` publishes what the players may see (secret doors
+    /// become plain walls, GM-only notes are dropped).
+    pub audience: Audience,
 }
 
 pub fn parse(args: Vec<String>) -> Result<Args, String> {
     let (mut doc, mut server, mut world, mut email) = (None, None, None, None);
     let (mut floor, mut ppc, mut format, mut data_dir) = (None, 32i64, "webp".to_string(), None);
     let mut max_mb = DEFAULT_UPLOAD_CAP_MB;
+    let mut audience = Audience::Gm;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -49,6 +53,10 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
             }
             "--format" => format = val("--format")?,
             "--data-dir" => data_dir = Some(PathBuf::from(val("--data-dir")?)),
+            "--audience" => {
+                audience =
+                    Audience::parse(&val("--audience")?).ok_or("--audience must be gm or player")?
+            }
             "--max-mb" => {
                 max_mb = val("--max-mb")?
                     .parse()
@@ -72,6 +80,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
         format,
         data_dir,
         max_mb,
+        audience,
     })
 }
 
@@ -94,6 +103,7 @@ pub fn build_map(
     floor_id: Option<&str>,
     ppc: i64,
     format: tiles::ImageFormat,
+    audience: Audience,
 ) -> Result<PublishMap, String> {
     let floor = match floor_id {
         Some(id) => doc
@@ -103,6 +113,10 @@ pub fn build_map(
             .ok_or(format!("no floor {id}"))?,
         None => doc.floors.first().ok_or("document has no floors")?,
     };
+    // Everything below is built from the audience's view of the floor: the
+    // picture, walls, lights AND the room state (which carries edge marks).
+    let filtered = for_audience(floor, audience);
+    let floor = &filtered;
     let cell_size = doc.manifest.cell_size;
     let walls = tiles::derive_walls(floor, cell_size);
     let (image, w, h) = tiles::bake_full_as(floor, &walls, cell_size, ppc, format, 80)?;
@@ -141,10 +155,11 @@ pub fn build_map_fitted(
     ppc: i64,
     format: tiles::ImageFormat,
     cap_bytes: usize,
+    audience: Audience,
 ) -> Result<(PublishMap, i64), String> {
     let mut ppc = ppc;
     loop {
-        let map = build_map(doc, floor_id, ppc, format)?;
+        let map = build_map(doc, floor_id, ppc, format, audience)?;
         if map.image.len() <= cap_bytes {
             return Ok((map, ppc));
         }
@@ -195,6 +210,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         a.ppc,
         a.format,
         a.max_mb * 1_048_576,
+        a.audience,
     )?;
     if used_ppc != a.ppc {
         println!(
@@ -285,7 +301,7 @@ mod tests {
 
     #[test]
     fn map_is_in_picture_pixels_and_matches_the_canvas() {
-        let m = build_map(&doc(), None, 16, tiles::ImageFormat::Webp).unwrap();
+        let m = build_map(&doc(), None, 16, tiles::ImageFormat::Webp, Audience::Gm).unwrap();
         // 2x2 cells at 16 px.
         assert_eq!((m.canvas_w, m.canvas_h), (32, 32));
         assert_eq!(m.cell_px, 16.0);
@@ -305,11 +321,38 @@ mod tests {
     }
 
     #[test]
+    fn a_player_publish_carries_no_secret_in_walls_or_rooms() {
+        let mut d = doc();
+        let fid = d.floors[0].id.clone();
+        let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+            {"t":"upsert_space","space":{"id":"v","name":"Vault","color":"#5a7d9a","kind":"room"}},
+            {"t":"paint_cells","cells":[{"x":2,"y":0}],"space":"v"},
+            {"t":"set_mark","edge":{"cell":{"x":1,"y":0},"edge":"east"},"mark":{"kind":"secret","state":"closed"}}
+        ]))
+        .unwrap();
+        d.apply_ops(&fid, &ops).unwrap();
+        let gm = build_map(&d, None, 16, tiles::ImageFormat::Png, Audience::Gm).unwrap();
+        let pl = build_map(&d, None, 16, tiles::ImageFormat::Png, Audience::Player).unwrap();
+        let payload =
+            |m: &PublishMap| serde_json::json!({"walls": m.walls, "rooms": m.rooms}).to_string();
+        assert!(
+            payload(&gm).contains("secret"),
+            "the GM publish keeps the secret door"
+        );
+        assert!(!payload(&pl).contains("secret"), "{}", payload(&pl));
+        assert_ne!(
+            gm.image, pl.image,
+            "the picture differs too (the door is drawn)"
+        );
+    }
+
+    #[test]
     fn the_picture_is_fitted_under_the_cap_and_stays_aligned() {
         let d = doc();
-        let big = build_map(&d, None, 64, tiles::ImageFormat::Png).unwrap();
+        let big = build_map(&d, None, 64, tiles::ImageFormat::Png, Audience::Gm).unwrap();
         let cap = big.image.len() / 2;
-        let (m, ppc) = build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, cap).unwrap();
+        let (m, ppc) =
+            build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, cap, Audience::Gm).unwrap();
         assert!((MIN_PPC..64).contains(&ppc), "{ppc}");
         assert!(m.image.len() <= cap);
         // Everything was re-derived at the new scale: canvas, cell, light, walls.
@@ -322,13 +365,20 @@ mod tests {
             }
         }
         // An impossible cap is refused with advice, not looped on.
-        let e = build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, 10)
+        let e = build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, 10, Audience::Gm)
             .err()
             .unwrap();
         assert!(e.contains("avif") && e.contains("max_upload_mb"), "{e}");
         // A roomy cap changes nothing.
-        let (_, same) =
-            build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, usize::MAX).unwrap();
+        let (_, same) = build_map_fitted(
+            &d,
+            None,
+            64,
+            tiles::ImageFormat::Png,
+            usize::MAX,
+            Audience::Gm,
+        )
+        .unwrap();
         assert_eq!(same, 64);
     }
 

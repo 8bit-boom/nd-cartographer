@@ -216,6 +216,19 @@ struct ExportQuery {
     format: Option<String>,
     /// AVIF quality 1..=100 (default 80).
     quality: Option<u8>,
+    /// `gm` (default) or `player`: player output goes through the one secrets filter.
+    audience: Option<String>,
+}
+
+fn pick_audience(q: &ExportQuery) -> Result<ndcart_core::Audience, ApiError> {
+    match q.audience.as_deref() {
+        None => Ok(ndcart_core::Audience::Gm),
+        Some(a) => ndcart_core::Audience::parse(a).ok_or_else(|| {
+            ApiError(CoreError::Invalid(format!(
+                "unknown audience {a:?} (gm or player)"
+            )))
+        }),
+    }
 }
 
 fn pick_format(q: &ExportQuery) -> Result<tiles::ImageFormat, ApiError> {
@@ -276,6 +289,8 @@ async fn export_png(
         .floors
         .get(idx)
         .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+    let filtered = ndcart_core::for_audience(floor, pick_audience(&q)?);
+    let floor = &filtered;
     let cell_size = doc.manifest.cell_size;
     let walls = tiles::derive_walls(floor, cell_size);
     let fmt = pick_format(&q)?;
@@ -318,6 +333,8 @@ async fn export_uvtt(
         .floors
         .get(idx)
         .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+    let filtered = ndcart_core::for_audience(floor, pick_audience(&q)?);
+    let floor = &filtered;
     let cell_size = doc.manifest.cell_size;
     let walls = tiles::derive_walls(floor, cell_size);
     let (cols, rows) = tiles::grid_extent(floor);
@@ -1028,6 +1045,62 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
         assert!(v["problems"].as_array().unwrap().is_empty(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn player_exports_hide_secret_doors_and_gm_exports_show_them() {
+        let app = test_app();
+        let (doc_id, floor_id) = {
+            let mut st = app.store.write().await;
+            let m = st.create("Vault", DocKind::Battle).clone();
+            let d = st.docs.get_mut(&m.id).unwrap();
+            let fid = d.floors[0].id.clone();
+            let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+                {"t":"upsert_space","space":{"id":"a","name":"Hall","color":"#7f5539","kind":"room"}},
+                {"t":"upsert_space","space":{"id":"b","name":"Vault","color":"#5a7d9a","kind":"room"}},
+                {"t":"paint_cells","cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0}],"space":"a"},
+                {"t":"paint_cells","cells":[{"x":3,"y":0}],"space":"b"},
+                {"t":"set_mark","edge":{"cell":{"x":2,"y":0},"edge":"east"},"mark":{"kind":"secret","state":"closed"}}
+            ]))
+            .unwrap();
+            d.apply_ops(&fid, &ops).unwrap();
+            (m.id, fid)
+        };
+        let router = build_router(app);
+        let fetch = |aud: &'static str| {
+            let router = router.clone();
+            let uri =
+                format!("/api/docs/{doc_id}/export/png?floor={floor_id}&ppc=32&audience={aud}");
+            async move {
+                let r = router
+                    .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), StatusCode::OK, "{aud}");
+                let b = r.into_body().collect().await.unwrap().to_bytes();
+                tiny_skia::Pixmap::decode_png(&b).unwrap()
+            }
+        };
+        let has_purple = |pm: &tiny_skia::Pixmap| {
+            pm.pixels().iter().any(|p| {
+                let d = |a: u8, b: u8| (i32::from(a) - i32::from(b)).abs();
+                d(p.red(), 0xb0) < 14 && d(p.green(), 0x6a) < 14 && d(p.blue(), 0xd8) < 14
+            })
+        };
+        assert!(
+            has_purple(&fetch("gm").await),
+            "the GM sees the secret door"
+        );
+        assert!(!has_purple(&fetch("player").await), "the players must not");
+        let bad = router
+            .oneshot(
+                Request::get(format!("/api/docs/{doc_id}/export/png?audience=bard"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

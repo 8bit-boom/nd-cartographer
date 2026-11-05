@@ -80,6 +80,15 @@ cannot express), and `publish` started a nested tokio runtime.
   lattice, walls, lights and rooms at each scale, until it fits under the server's
   upload cap.
 
+- **One secrets filter** (`ndcart-core::view::for_audience`) — every player-facing
+  output goes through it: a secret door becomes a plain wall (its mark is dropped,
+  so the edge derives as an ordinary wall) and GM-only labels (`gm_only`) are
+  removed. Used by `?audience=player` on the PNG/WebP/AVIF and UVTT exports, by
+  `ndcart publish --audience player` (picture, walls, lights *and* the room state,
+  which carries marks), and by the UI's "players' copy" checkbox. Tests assert no
+  `secret` survives in the player state, the exported picture, or the publish
+  payload. The upcoming true-preview must use the same function.
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

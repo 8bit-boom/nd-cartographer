@@ -12,6 +12,7 @@ pub mod grid;
 pub mod ids;
 pub mod journal;
 pub mod lint;
+pub mod view;
 pub mod walls;
 
 pub use doc::{DocKind, FloorDoc, Label, Light, Manifest, NdWorldLink};
@@ -19,4 +20,5 @@ pub use error::{CoreError, CoreResult, MAX_CELL, MAX_LIGHTS};
 pub use grid::{CellKey, Edge, EdgeKey, Mark, MarkKind, MarkState, RoomGrid, Space, SpaceKind};
 pub use journal::{apply_op, Journal, Op};
 pub use lint::{blocks_publish, lint, Problem, Severity};
+pub use view::{for_audience, Audience};
 pub use walls::{walls_from_grid, Wall, WallKind, WallState, ND_WORLD_WALL_CAP};

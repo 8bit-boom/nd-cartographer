@@ -393,6 +393,7 @@ mod tests {
                         size: 14.0,
                         color: "#ffffff".into(),
                         bold: false,
+                        gm_only: false,
                     },
                 },
             ],
