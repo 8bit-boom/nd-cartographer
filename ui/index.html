@@ -11,6 +11,7 @@
   <strong id="doc-name">nd-cartographer</strong>
   <select id="doc-select" title="Switch project" aria-label="Project"></select>
   <button id="btn-preview" title="Player view: what the table sees from one spot (double-click the map to move the viewer)" aria-pressed="false">👁 Player view</button>
+  <button id="btn-spec" title="Describe a map as rooms and how they connect, preview the layout, accept or reject it">✨ From a spec…</button>
   <button id="btn-gallery" title="All projects as thumbnails">🗂 Projects</button>
   <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
   <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
@@ -117,6 +118,25 @@
       </div>
     </details>
   </div>
+  <dialog id="spec-dialog">
+    <h3>Map from a spec</h3>
+    <p class="dim">Rooms and how they connect, as JSON (an AI can write this for you). Nothing changes until you accept.</p>
+    <textarea id="spec-text" rows="12" spellcheck="false" aria-label="MapSpec JSON"></textarea>
+    <div class="row">
+      <button id="spec-example" type="button">Insert an example</button>
+      <button id="spec-go" type="button" class="primary">Preview layout</button>
+      <span id="spec-msg" class="dim" role="status"></span>
+    </div>
+    <div id="spec-result" hidden>
+      <div id="spec-floors"></div>
+      <div class="row">
+        <button id="spec-accept" type="button" class="primary">Accept (adds the floors)</button>
+        <button id="spec-again" type="button">Another layout</button>
+        <button id="spec-reject" type="button">Reject</button>
+      </div>
+    </div>
+    <menu><button id="spec-close" type="button">Close</button></menu>
+  </dialog>
   <dialog id="gallery-dialog">
     <h3>Projects</h3>
     <div id="gallery-grid" role="list"></div>

@@ -1369,6 +1369,74 @@ function buildOutline() {
   }
 }
 
+// ---------- map from a spec (proposal workflow) ----------
+const specDialog = document.getElementById('spec-dialog');
+const SPEC_EXAMPLE = {
+  name: 'Abandoned metro station',
+  floors: [
+    { name: 'Platform', rooms: [
+        { id: 'hall', name: 'Ticket Hall', w: 9, h: 6 }, { id: 'plat', name: 'Platform', w: 14, h: 4 },
+        { id: 'office', name: 'Control Office', w: 5, h: 5 }, { id: 'store', name: 'Hidden Store', w: 4, h: 4 } ],
+      links: [ { a: 'hall', b: 'plat', kind: 'opening' }, { a: 'hall', b: 'office' }, { a: 'office', b: 'store', kind: 'secret' } ],
+      stairs: [ { room: 'plat', to_floor: 'Tunnels', to_room: 'tun' } ] },
+    { name: 'Tunnels', rooms: [ { id: 'tun', name: 'Service Tunnel', w: 12, h: 3 }, { id: 'pump', name: 'Flooded Pump Room', w: 6, h: 6 } ],
+      links: [ { a: 'tun', b: 'pump' } ] },
+  ],
+};
+let proposal = null;     // {id, seed, spec}
+
+async function runSpec(seed) {
+  const msg = document.getElementById('spec-msg');
+  let spec;
+  try { spec = JSON.parse(document.getElementById('spec-text').value); }
+  catch (e) { msg.textContent = `That is not valid JSON: ${e.message}`; return; }
+  msg.textContent = 'Laying it out…';
+  try {
+    if (proposal) { try { await api('DELETE', `/api/docs/${state.docId}/proposals/${proposal.id}`); } catch { /* already gone */ } proposal = null; }
+    const p = await api('POST', `/api/docs/${state.docId}/propose`, { spec, seed });
+    proposal = { id: p.id, seed, spec };
+    const box = document.getElementById('spec-floors');
+    box.textContent = '';
+    p.floors.forEach((f, i) => {
+      const fig = document.createElement('figure');
+      const img = document.createElement('img');
+      img.alt = `Proposed floor ${f.name}`;
+      img.src = `/api/docs/${state.docId}/proposals/${p.id}/preview?floor=${i}&ppc=10`;
+      const cap = document.createElement('figcaption');
+      cap.textContent = `${f.name}: ${f.rooms} rooms, ${f.squares} squares` + (f.problems.length ? ` · ${f.problems.length} note(s)` : '');
+      if (f.problems.length) cap.title = f.problems.join('\n');
+      fig.append(img, cap);
+      box.appendChild(fig);
+    });
+    document.getElementById('spec-result').hidden = false;
+    msg.textContent = `Layout ${seed}. Nothing has been added yet.`;
+  } catch (e) {
+    document.getElementById('spec-result').hidden = true;
+    msg.textContent = e.message;       // the server says what to fix
+  }
+}
+document.getElementById('btn-spec').onclick = () => { document.getElementById('spec-msg').textContent = ''; specDialog.showModal(); };
+document.getElementById('spec-example').onclick = () => { document.getElementById('spec-text').value = JSON.stringify(SPEC_EXAMPLE, null, 2); };
+document.getElementById('spec-go').onclick = () => runSpec(Math.floor(Math.random() * 1e6));
+document.getElementById('spec-again').onclick = () => runSpec(Math.floor(Math.random() * 1e6));
+document.getElementById('spec-accept').onclick = async () => {
+  if (!proposal) return;
+  try {
+    const res = await api('POST', `/api/docs/${state.docId}/proposals/${proposal.id}/accept`);
+    proposal = null; specDialog.close();
+    state.rev = res.rev; tileCache.clear();
+    state.floorId = res.floors[0];
+    await refresh();
+    statusEl.textContent = `Added ${res.floors.length} floor(s). Undo floors (↶ Floors) takes them back one at a time.`;
+  } catch (e) { document.getElementById('spec-msg').textContent = e.message; }
+};
+document.getElementById('spec-reject').onclick = async () => {
+  if (proposal) { try { await api('DELETE', `/api/docs/${state.docId}/proposals/${proposal.id}`); } catch { /* gone */ } proposal = null; }
+  document.getElementById('spec-result').hidden = true;
+  document.getElementById('spec-msg').textContent = 'Rejected. Nothing was added.';
+};
+document.getElementById('spec-close').onclick = () => specDialog.close();
+
 // ---------- player view ----------
 // The fog preview: the server renders what the table sees from one spot
 // (the players' copy of the floor, walls and closed doors blocking sight).

@@ -15,6 +15,7 @@ pub mod hash;
 pub mod ids;
 pub mod journal;
 pub mod lint;
+pub mod mapspec;
 pub mod outline;
 pub mod overlay;
 pub mod prefab;

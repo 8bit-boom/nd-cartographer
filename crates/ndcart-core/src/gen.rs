@@ -9,7 +9,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::grid::{CellKey, Edge, EdgeKey, Mark, MarkKind, Space, SpaceKind};
 use crate::journal::Op;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 pub const MIN_SIDE: i32 = 16;
 pub const MAX_SIDE: i32 = 120;
@@ -32,9 +32,9 @@ pub struct GenParams {
     pub height: i32,
 }
 
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -42,7 +42,7 @@ impl Rng {
         z ^ (z >> 31)
     }
     /// Uniform in `lo..=hi`.
-    fn range(&mut self, lo: i32, hi: i32) -> i32 {
+    pub(crate) fn range(&mut self, lo: i32, hi: i32) -> i32 {
         if hi <= lo {
             return lo;
         }
@@ -56,34 +56,34 @@ impl Rng {
     }
 }
 
-const PALETTE: [&str; 8] = [
+pub(crate) const PALETTE: [&str; 8] = [
     "#7f5539", "#6d597a", "#457b9d", "#8d6a3f", "#5e7c5a", "#9a5b5b", "#4f6d7a", "#7a6c4f",
 ];
 
 /// A drawing surface: one space index per cell (0 = nothing).
-struct Canvas {
-    w: i32,
-    h: i32,
-    cells: Vec<u16>,
-    spaces: Vec<Space>,
-    doors: BTreeSet<(i32, i32, u8)>,
-    lights: Vec<(i32, i32, f64)>,
-    labels: Vec<(f64, f64, String)>,
+pub(crate) struct Canvas {
+    pub(crate) w: i32,
+    pub(crate) h: i32,
+    pub(crate) cells: Vec<u16>,
+    pub(crate) spaces: Vec<Space>,
+    doors: BTreeMap<(i32, i32, u8), MarkKind>,
+    pub(crate) lights: Vec<(i32, i32, f64)>,
+    pub(crate) labels: Vec<(f64, f64, String)>,
 }
 
 impl Canvas {
-    fn new(w: i32, h: i32) -> Self {
+    pub(crate) fn new(w: i32, h: i32) -> Self {
         Canvas {
             w,
             h,
             cells: vec![0; (w * h) as usize],
             spaces: Vec::new(),
-            doors: BTreeSet::new(),
+            doors: BTreeMap::new(),
             lights: Vec::new(),
             labels: Vec::new(),
         }
     }
-    fn space(&mut self, name: &str, color: &str, kind: SpaceKind) -> u16 {
+    pub(crate) fn space(&mut self, name: &str, color: &str, kind: SpaceKind) -> u16 {
         let id = format!("g{}", self.spaces.len() + 1);
         self.spaces.push(Space {
             id,
@@ -94,20 +94,20 @@ impl Canvas {
         });
         self.spaces.len() as u16
     }
-    fn at(&self, x: i32, y: i32) -> u16 {
+    pub(crate) fn at(&self, x: i32, y: i32) -> u16 {
         if x < 0 || y < 0 || x >= self.w || y >= self.h {
             0
         } else {
             self.cells[(y * self.w + x) as usize]
         }
     }
-    fn set(&mut self, x: i32, y: i32, s: u16) {
+    pub(crate) fn set(&mut self, x: i32, y: i32, s: u16) {
         if x >= 0 && y >= 0 && x < self.w && y < self.h {
             self.cells[(y * self.w + x) as usize] = s;
         }
     }
     /// Fill `x0..x1` × `y0..y1` (end exclusive); only empty cells unless `over`.
-    fn rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, s: u16, over: bool) {
+    pub(crate) fn rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, s: u16, over: bool) {
         for y in y0..y1 {
             for x in x0..x1 {
                 if over || self.at(x, y) == 0 {
@@ -117,19 +117,23 @@ impl Canvas {
         }
     }
     /// A door on the edge from cell `(x, y)` towards `(tx, ty)`, which must be a neighbour.
-    fn door(&mut self, x: i32, y: i32, tx: i32, ty: i32) {
+    pub(crate) fn door(&mut self, x: i32, y: i32, tx: i32, ty: i32) {
+        self.mark(x, y, tx, ty, MarkKind::Door);
+    }
+    /// Any mark (door, secret door, opening) on that edge.
+    pub(crate) fn mark(&mut self, x: i32, y: i32, tx: i32, ty: i32, kind: MarkKind) {
         let e = match (tx - x, ty - y) {
             (1, 0) => 1,
             (-1, 0) => 3,
             (0, 1) => 2,
             _ => 0,
         };
-        self.doors.insert((x, y, e));
+        self.doors.insert((x, y, e), kind);
     }
-    fn count(&self, s: u16) -> usize {
+    pub(crate) fn count(&self, s: u16) -> usize {
         self.cells.iter().filter(|c| **c == s).count()
     }
-    fn centre(&self, s: u16) -> Option<(i32, i32)> {
+    pub(crate) fn centre(&self, s: u16) -> Option<(i32, i32)> {
         let mut pts = Vec::new();
         for y in 0..self.h {
             for x in 0..self.w {
@@ -150,7 +154,7 @@ impl Canvas {
         pts.into_iter()
             .min_by_key(|(x, y)| (*x as i64 - cx).pow(2) + (*y as i64 - cy).pow(2))
     }
-    fn label_room(&mut self, s: u16, light_over: usize) {
+    pub(crate) fn label_room(&mut self, s: u16, light_over: usize) {
         if let Some((cx, cy)) = self.centre(s) {
             let name = self.spaces[(s - 1) as usize].name.clone();
             self.labels.push((cx as f64 + 0.5, cy as f64 + 0.5, name));
@@ -160,7 +164,7 @@ impl Canvas {
         }
     }
 
-    fn into_ops(self) -> Vec<Op> {
+    pub(crate) fn into_ops(self) -> Vec<Op> {
         let mut ops = Vec::new();
         let mut used: Vec<u16> = Vec::new();
         for s in 1..=self.spaces.len() as u16 {
@@ -184,14 +188,14 @@ impl Canvas {
                 space: Some(self.spaces[(*s - 1) as usize].id.clone()),
             });
         }
-        for (x, y, e) in &self.doors {
+        for ((x, y, e), kind) in &self.doors {
             let edge = [Edge::North, Edge::East, Edge::South, Edge::West][*e as usize];
             ops.push(Op::SetMark {
                 edge: EdgeKey {
                     cell: CellKey { x: *x, y: *y },
                     edge,
                 },
-                mark: Some(Mark::new(MarkKind::Door)),
+                mark: Some(Mark::new(*kind)),
             });
         }
         for (i, (x, y, range)) in self.lights.iter().enumerate() {
@@ -569,6 +573,7 @@ mod tests {
     use super::*;
     use crate::doc::FloorDoc;
     use crate::journal::{apply_op, Journal};
+    use std::collections::BTreeSet;
 
     fn make(kind: GenKind, seed: u64, w: i32, h: i32) -> (FloorDoc, Vec<Op>) {
         let ops = generate(&GenParams {

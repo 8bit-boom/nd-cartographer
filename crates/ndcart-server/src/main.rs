@@ -975,6 +975,145 @@ struct PreviewQuery {
     ppc: Option<i64>,
 }
 
+#[derive(Deserialize)]
+struct ProposeBody {
+    spec: ndcart_core::mapspec::MapSpec,
+    #[serde(default)]
+    seed: Option<u64>,
+}
+
+fn proposal_summary(p: &store::Proposal) -> serde_json::Value {
+    let floors: Vec<_> = p
+        .floors
+        .iter()
+        .map(|cf| {
+            let mut f = FloorDoc::new("preview".into(), cf.name.clone());
+            let mut j = ndcart_core::Journal::default();
+            for op in &cf.ops {
+                let _ = j.push(&mut f, op);
+            }
+            let problems = ndcart_core::lint(&f, 32.0);
+            serde_json::json!({
+                "name": cf.name,
+                "rooms": f.grid.spaces.len(),
+                "squares": f.grid.cell_count(),
+                "problems": problems.iter().map(|x| x.message.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "id": p.id, "name": p.spec.name, "seed": p.seed, "floors": floors })
+}
+
+/// `POST /api/docs/{id}/propose` `{spec, seed?}` — lay a MapSpec (rooms and how
+/// they connect) out and hold it as a PROPOSAL. Nothing in the document changes
+/// until it is accepted; a bad spec is refused with a message that says what to fix.
+async fn propose_map(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<ProposeBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad spec: {e}"))))?;
+    let seed = b.seed.unwrap_or(1);
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let p = doc.propose(b.spec, seed)?;
+    Ok(Json(proposal_summary(p)))
+}
+
+#[derive(Deserialize)]
+struct ProposalPreviewQuery {
+    /// Which floor of the proposal (0-based; default 0).
+    floor: Option<usize>,
+    ppc: Option<i64>,
+}
+
+/// `GET /api/docs/{id}/proposals/{pid}/preview?floor=N` — the proposed floor as a PNG.
+async fn proposal_preview(
+    State(app): State<App>,
+    Path((id, pid)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<ProposalPreviewQuery>,
+) -> Result<Response, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let p = doc
+        .proposals
+        .iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| CoreError::NotFound(format!("proposal {pid}")))?;
+    let cf = p
+        .floors
+        .get(q.floor.unwrap_or(0))
+        .ok_or_else(|| CoreError::NotFound("that floor of the proposal".into()))?;
+    let cell_size = doc.manifest.cell_size;
+    let mut f = FloorDoc::new("preview".into(), cf.name.clone());
+    let mut j = ndcart_core::Journal::default();
+    for op in &cf.ops {
+        j.push(&mut f, op)?;
+    }
+    drop(store);
+    let walls = tiles::derive_walls(&f, cell_size);
+    let (png, ..) = tiles::bake_full_as(
+        &f,
+        &walls,
+        cell_size,
+        q.ppc.unwrap_or(16),
+        tiles::ImageFormat::Png,
+        90,
+    )
+    .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        png,
+    )
+        .into_response())
+}
+
+/// `POST /api/docs/{id}/proposals/{pid}/accept` — add the proposal's floors (and
+/// stairs between them) to the document. Existing floors are never touched; each
+/// new floor can be taken back with undo-structure.
+async fn accept_proposal(
+    State(app): State<App>,
+    Path((id, pid)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floors = doc.accept_proposal(&pid)?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(
+        serde_json::json!({ "ok": true, "rev": rev, "floors": floors }),
+    ))
+}
+
+/// `DELETE /api/docs/{id}/proposals/{pid}` — reject it.
+async fn reject_proposal(
+    State(app): State<App>,
+    Path((id, pid)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.reject_proposal(&pid)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// `GET /api/docs/{id}/preview?x=&y=&radius=&darkness=&ppc=` — what the table
 /// sees from one point: the player's copy of the floor (secrets stripped)
 /// under fog, with sight blocked by walls and closed doors and lamps lighting
@@ -1333,6 +1472,19 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/generate-map", post(generate_map))
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
+        .route("/api/docs/{id}/propose", post(propose_map))
+        .route(
+            "/api/docs/{id}/proposals/{pid}",
+            axum::routing::delete(reject_proposal),
+        )
+        .route(
+            "/api/docs/{id}/proposals/{pid}/preview",
+            get(proposal_preview),
+        )
+        .route(
+            "/api/docs/{id}/proposals/{pid}/accept",
+            post(accept_proposal),
+        )
         .route("/api/prefabs", get(list_prefabs))
         .route("/api/prefabs/{pid}", axum::routing::delete(delete_prefab))
         .route("/api/docs/{id}/prefabs", post(capture_prefab))
@@ -2497,6 +2649,122 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
         let _ = fb;
+    }
+
+    #[tokio::test]
+    async fn a_proposal_changes_nothing_until_accepted_then_adds_floors_with_stairs() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"AI"}"#.to_vec()).await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let spec = serde_json::json!({"name":"Metro","floors":[
+          {"name":"Platform","rooms":[{"id":"hall","name":"Hall","w":8,"h":6},{"id":"plat","name":"Platform","w":12,"h":4}],
+           "links":[{"a":"hall","b":"plat","kind":"opening"}],
+           "stairs":[{"room":"plat","to_floor":"Tunnels","to_room":"tun"}]},
+          {"name":"Tunnels","rooms":[{"id":"tun","name":"Tunnel","w":10,"h":3}],"links":[]}]});
+        let floors = || {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}"));
+            async move {
+                json(call(&router, "GET", &uri, vec![]).await.1)["floors"]
+                    .as_array()
+                    .unwrap()
+                    .clone()
+            }
+        };
+        let (st, r) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/propose"),
+            serde_json::json!({"spec": spec, "seed": 4})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let r = json(r);
+        let pid = r["id"].as_str().unwrap().to_string();
+        assert_eq!(r["floors"].as_array().unwrap().len(), 2);
+        assert_eq!(floors().await.len(), 1, "a proposal alone changes nothing");
+        let (st, png) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/proposals/{pid}/preview?floor=1"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(&png[1..4], b"PNG");
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/proposals/{pid}/accept"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let fl = floors().await;
+        assert_eq!(fl.len(), 3);
+        let stairs = |f: &serde_json::Value| {
+            f["markers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|m| m["links_to"].is_object())
+                .count()
+        };
+        assert_eq!(
+            (stairs(&fl[1]), stairs(&fl[2])),
+            (1, 1),
+            "stairs up and the way back"
+        );
+        assert_eq!(fl[1]["markers"][0]["links_to"]["floor"], fl[2]["id"]);
+        // Once taken it is gone; a bad spec is refused with its reason, and rejecting works.
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/proposals/{pid}/accept"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let bad = serde_json::json!({"spec": {"name":"X","floors":[{"name":"G","rooms":[{"id":"a","name":"A","w":4,"h":4},{"id":"b","name":"B","w":4,"h":4}]}]}});
+        let (st, body) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/propose"),
+            bad.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        assert!(String::from_utf8_lossy(&body).contains("not linked"));
+        let (_, r) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/propose"),
+            serde_json::json!({"spec": spec}).to_string().into_bytes(),
+        )
+        .await;
+        let p2 = json(r)["id"].as_str().unwrap().to_string();
+        let (st, _) = call(
+            &router,
+            "DELETE",
+            &format!("/api/docs/{id}/proposals/{p2}"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(floors().await.len(), 3);
+        // Undoing the structure steps removes what the proposal added.
+        for _ in 0..2 {
+            call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/undo-structure"),
+                vec![],
+            )
+            .await;
+        }
+        assert_eq!(floors().await.len(), 1);
     }
 
     #[tokio::test]

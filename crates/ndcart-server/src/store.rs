@@ -23,6 +23,17 @@ pub struct Checkpoint {
 }
 
 pub const MAX_CHECKPOINTS: usize = 30;
+pub const MAX_PROPOSALS: usize = 10;
+
+/// A map the GM has been shown but not accepted: the spec, the seed, and the
+/// laid-out floors. Nothing in the document changes until it is accepted.
+#[derive(Clone)]
+pub struct Proposal {
+    pub id: String,
+    pub spec: ndcart_core::mapspec::MapSpec,
+    pub seed: u64,
+    pub floors: Vec<ndcart_core::mapspec::CompiledFloor>,
+}
 
 pub struct StoredDoc {
     pub manifest: Manifest,
@@ -31,6 +42,8 @@ pub struct StoredDoc {
     /// Adding, renaming, moving and removing floors, with its own undo.
     pub structure: StructJournal,
     pub checkpoints: Vec<Checkpoint>,
+    /// Pending AI/spec proposals (in memory only).
+    pub proposals: Vec<Proposal>,
     pub rev: u64,
 }
 
@@ -54,6 +67,7 @@ impl StoredDoc {
             journal: Journal::default(),
             structure: StructJournal::default(),
             checkpoints: Vec::new(),
+            proposals: Vec::new(),
             rev: 0,
         }
     }
@@ -146,6 +160,119 @@ impl StoredDoc {
         self.structure.undo_last(&mut self.floors)?;
         self.touched();
         Ok(())
+    }
+
+    /// Lay a spec out and keep it as a pending proposal.
+    pub fn propose(
+        &mut self,
+        spec: ndcart_core::mapspec::MapSpec,
+        seed: u64,
+    ) -> CoreResult<&Proposal> {
+        let floors = ndcart_core::mapspec::compile(&spec, seed)?;
+        if self.proposals.len() >= MAX_PROPOSALS {
+            self.proposals.remove(0);
+        }
+        self.proposals.push(Proposal {
+            id: new_id("pr"),
+            spec,
+            seed,
+            floors,
+        });
+        Ok(self.proposals.last().expect("just pushed"))
+    }
+
+    pub fn reject_proposal(&mut self, id: &str) -> CoreResult<()> {
+        let before = self.proposals.len();
+        self.proposals.retain(|p| p.id != id);
+        if self.proposals.len() == before {
+            return Err(ndcart_core::CoreError::NotFound(format!("proposal {id}")));
+        }
+        Ok(())
+    }
+
+    /// Add the proposal's floors to the document (never touching what is
+    /// there), with stairs between them. Each floor is one undoable
+    /// structure step plus one batch; returns the new floor ids in order.
+    pub fn accept_proposal(&mut self, id: &str) -> CoreResult<Vec<String>> {
+        use ndcart_core::overlay::{FloorLink, Marker, OverlayItem};
+        let p = self
+            .proposals
+            .iter()
+            .find(|p| p.id == id)
+            .cloned()
+            .ok_or_else(|| ndcart_core::CoreError::NotFound(format!("proposal {id}")))?;
+        let mut ids: Vec<String> = Vec::new();
+        for cf in &p.floors {
+            let mut name = cf.name.clone();
+            let mut n = 2;
+            while self.floors.iter().any(|f| f.name == name) {
+                name = format!("{} ({n})", cf.name);
+                n += 1;
+            }
+            let fid = self.add_floor(&name, None)?;
+            self.apply_ops(&fid, &cf.ops)?;
+            ids.push(fid);
+        }
+        // Stairs, and the way back unless the target already has stairs to this floor.
+        let floor_pos = |name: &str| p.spec.floors.iter().position(|f| f.name == name);
+        let mut have: std::collections::BTreeSet<(usize, usize)> =
+            std::collections::BTreeSet::new();
+        for (fi, f) in p.spec.floors.iter().enumerate() {
+            for s in &f.stairs {
+                if let Some(ti) = floor_pos(&s.to_floor) {
+                    have.insert((fi, ti));
+                }
+            }
+        }
+        let marker = |at: (i32, i32), label: &str, to: &str, land: Option<(i32, i32)>| Marker {
+            id: new_id("st"),
+            x: at.0 as f32 + 0.5,
+            y: at.1 as f32 + 0.5,
+            label: label.chars().take(80).collect(),
+            note: String::new(),
+            color: "#e8b030".into(),
+            link_schematic: None,
+            links_to: Some(FloorLink {
+                floor: to.to_string(),
+                x: land.map(|l| l.0 as f32 + 0.5),
+                y: land.map(|l| l.1 as f32 + 0.5),
+            }),
+        };
+        for (fi, f) in p.spec.floors.iter().enumerate() {
+            for s in &f.stairs {
+                let ti = floor_pos(&s.to_floor).expect("validated");
+                let here = p.floors[fi].centres[&s.room];
+                let landing = match &s.to_room {
+                    Some(r) => p.floors[ti].centres[r],
+                    None => *p.floors[ti].centres.values().next().expect("rooms"),
+                };
+                let label = s
+                    .label
+                    .clone()
+                    .unwrap_or_else(|| format!("Stairs to {}", s.to_floor));
+                let there = Some(landing);
+                self.apply_ops(
+                    &ids[fi],
+                    &[Op::PutOverlay {
+                        item: OverlayItem::Marker(marker(here, &label, &ids[ti], there)),
+                        index: None,
+                    }],
+                )?;
+                if !have.contains(&(ti, fi)) {
+                    let back = format!("Stairs to {}", f.name);
+                    self.apply_ops(
+                        &ids[ti],
+                        &[Op::PutOverlay {
+                            item: OverlayItem::Marker(marker(landing, &back, &ids[fi], Some(here))),
+                            index: None,
+                        }],
+                    )?;
+                    have.insert((ti, fi));
+                }
+            }
+        }
+        self.proposals.retain(|x| x.id != id);
+        Ok(ids)
     }
 
     pub fn create_checkpoint(&mut self, name: &str) -> CoreResult<String> {
@@ -293,6 +420,7 @@ impl Store {
                         .ok()
                         .and_then(|t| serde_json::from_str(&t).ok())
                         .unwrap_or_default(),
+                    proposals: Vec::new(),
                     rev,
                 },
             );
