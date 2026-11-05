@@ -435,6 +435,120 @@ pub fn stamp_icon(def: &ndcart_paint::StampDef, px: u32) -> Vec<u8> {
     pm.encode_png().expect("png")
 }
 
+/// Shade the heightmap into the region: every pixel is a pure function of its
+/// world position, so tiles and the full render agree exactly.
+fn draw_terrain(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+    use ndcart_core::terrain::RES;
+    let Some(t) = &floor.terrain else { return };
+    let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
+    let k = RES as f32 / ppc as f32; // samples per pixel
+                                     // Margin: bilinear (+1) around a central difference (+1) around the pixel.
+    let (sx0, sy0) = (
+        (x0 as f32 * k).floor() as i32 - 4,
+        (y0 as f32 * k).floor() as i32 - 4,
+    );
+    let (sw, sh) = (
+        (w as f32 * k).ceil() as i32 + 9,
+        (h as f32 * k).ceil() as i32 + 9,
+    );
+    let grid = t.extract(sx0, sy0, sw, sh);
+    let shader = ndcart_terrain::Shader::new(&grid, &t.style, PAINT_SEED);
+    let stride = w as usize * 4;
+    let data = pixmap.data_mut();
+    for py in 0..h {
+        let sv = ((y0 + i64::from(py)) as f32 + 0.5) * k;
+        for px in 0..w {
+            let su = ((x0 + i64::from(px)) as f32 + 0.5) * k;
+            let c = shader.color(su, sv);
+            let i = py as usize * stride + px as usize * 4;
+            data[i] = c[0];
+            data[i + 1] = c[1];
+            data[i + 2] = c[2];
+            data[i + 3] = 0xff;
+        }
+    }
+}
+
+/// Rivers are variable-width soft strokes (the brush engine again): the width
+/// tapers from a third at the source to full at the mouth.
+fn draw_rivers(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+    if floor.rivers.is_empty() {
+        return;
+    }
+    let scale = ppc as f32;
+    let (w, h) = (i64::from(pixmap.width()), i64::from(pixmap.height()));
+    let region = [
+        x0 as f32 / scale,
+        y0 as f32 / scale,
+        (x0 + w) as f32 / scale,
+        (y0 + h) as f32 / scale,
+    ];
+    let stride = w as usize * 4;
+    for r in &floor.rivers {
+        let n = r.points.len();
+        let stroke = ndcart_core::Stroke {
+            id: r.id.clone(),
+            kind: ndcart_core::StrokeKind::Paint,
+            brush: ndcart_core::BrushKind::Round,
+            material: None,
+            color: "#4f8fc2".into(),
+            size: r.width,
+            opacity: 1.0,
+            hardness: 0.55,
+            roughness: 0.15,
+            density: 0.5,
+            seed: 0x7213,
+            points: r
+                .points
+                .iter()
+                .enumerate()
+                .map(|(i, p)| ndcart_core::StrokePoint {
+                    x: p[0],
+                    y: p[1],
+                    pressure: i as f32 / (n - 1) as f32,
+                    tilt: 0.0,
+                })
+                .collect(),
+        };
+        let b = stroke.point_bounds();
+        if b[0] - r.width > region[2]
+            || b[2] + r.width < region[0]
+            || b[1] - r.width > region[3]
+            || b[3] + r.width < region[1]
+        {
+            continue;
+        }
+        let p = ndcart_paint::Prepared::new(&stroke);
+        if !p.touches(region) {
+            continue;
+        }
+        let px0 = ((p.bounds[0] * scale).floor() as i64 - x0).clamp(0, w);
+        let px1 = ((p.bounds[2] * scale).ceil() as i64 - x0 + 1).clamp(0, w);
+        let py0 = ((p.bounds[1] * scale).floor() as i64 - y0).clamp(0, h);
+        let py1 = ((p.bounds[3] * scale).ceil() as i64 - y0 + 1).clamp(0, h);
+        let data = pixmap.data_mut();
+        for py in py0..py1 {
+            for pxl in px0..px1 {
+                let (u, v) = (
+                    ((x0 + pxl) as f32 + 0.5) / scale,
+                    ((y0 + py) as f32 + 0.5) / scale,
+                );
+                let cov = p.coverage(u, v);
+                if cov <= 0.0 {
+                    continue;
+                }
+                let i = py as usize * stride + pxl as usize * 4;
+                // Darker in the middle of the channel, lighter toward the banks.
+                let water = ndcart_paint::mix([0x3f, 0x7c, 0xb0], [0x6f, 0xaa, 0xd2], 1.0 - cov);
+                let c = ndcart_paint::mix([data[i], data[i + 1], data[i + 2]], water, cov * 0.92);
+                data[i] = c[0];
+                data[i + 1] = c[1];
+                data[i + 2] = c[2];
+            }
+        }
+    }
+}
+
 /// The picture behind everything: scaled to its rectangle in cells (bilinear),
 /// at the underlay's opacity, over the void and under the rooms.
 fn draw_underlay(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
@@ -570,6 +684,8 @@ fn render_pixmap(
     let cy_from = y0.div_euclid(ppc);
     let cy_to = (y0 + tile_px_h - 1).div_euclid(ppc);
 
+    draw_terrain(&mut pixmap, floor, ppc, x0, y0);
+    draw_rivers(&mut pixmap, floor, ppc, x0, y0);
     draw_underlay(&mut pixmap, floor, ppc, x0, y0);
 
     // Cells: each painted cell is filled pixel by pixel from its material (or
@@ -1561,6 +1677,49 @@ mod tests {
         let (png, ..) = bake_full_stroked(&f, 64);
         let full = decode(&png);
         for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    assert_eq!(
+                        tile.pixel(x, y),
+                        full.pixel(tx as u32 * 256 + x, ty as u32 * 256 + y),
+                        "tile ({tx},{ty}) pixel ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terrain_and_rivers_bake_the_same_in_tiles_and_in_the_full_render() {
+        let g = ndcart_terrain::generate(&ndcart_terrain::GenParams {
+            seed: 5,
+            cols: 24,
+            rows: 20,
+            land: 0.5,
+            continent: 0.5,
+            ridges: 0.6,
+            rivers: 3,
+        });
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.set_canvas(Some([24, 20])).unwrap();
+        f.terrain_set(
+            g.terrain.fill,
+            &g.terrain
+                .chunk_keys()
+                .into_iter()
+                .map(|(a, b)| g.terrain.snapshot_chunk(a, b))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        f.set_terrain_style(g.terrain.style.clone()).unwrap();
+        for r in g.rivers {
+            f.add_river(r, false, None).unwrap();
+        }
+        let (png, w, _) = bake_full_stroked(&f, 64);
+        assert!(w >= 24 * 64);
+        let full = decode(&png);
+        for (tx, ty) in [(0, 0), (1, 0), (2, 1), (3, 2), (5, 4)] {
             let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
             for y in 0..256u32 {
                 for x in 0..256u32 {

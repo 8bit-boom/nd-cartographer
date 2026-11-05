@@ -6,6 +6,7 @@
 //! (`cells` + `spaces` + `marks`; walls `{id, pts, kind, state}`; lights in
 //! squares with `range`/`intensity`), so publishing is a pass-through.
 
+pub mod base64;
 pub mod doc;
 pub mod error;
 pub mod grid;
@@ -16,6 +17,7 @@ pub mod lint;
 pub mod outline;
 pub mod stamp;
 pub mod stroke;
+pub mod terrain;
 pub mod view;
 pub mod walls;
 
@@ -27,5 +29,6 @@ pub use lint::{blocks_publish, lint, Problem, Severity};
 pub use outline::{outline, Outline};
 pub use stamp::Stamp;
 pub use stroke::{BrushKind, Stroke, StrokeKind, StrokePoint};
+pub use terrain::{ChunkData, River, Terrain, TerrainMode, TerrainStroke, TerrainStyle};
 pub use view::{for_audience, Audience};
 pub use walls::{floor_walls, walls_from_grid, Wall, WallKind, WallState, ND_WORLD_WALL_CAP};

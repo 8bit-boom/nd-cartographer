@@ -81,6 +81,18 @@ struct FloorView {
     outline: ndcart_core::Outline,
     #[serde(skip_serializing_if = "Option::is_none")]
     underlay: Option<ndcart_core::Underlay>,
+    /// Region maps: what the terrain panel needs (the heights stay server-side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terrain: Option<TerrainView>,
+    rivers: Vec<ndcart_core::River>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    canvas: Option<[u32; 2]>,
+}
+
+#[derive(Serialize)]
+struct TerrainView {
+    style: ndcart_core::TerrainStyle,
+    chunks: usize,
 }
 
 #[derive(Serialize)]
@@ -109,6 +121,12 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         labels: floor.labels.clone(),
         outline: ndcart_core::outline(floor, cell_size),
         underlay: floor.underlay.clone(),
+        terrain: floor.terrain.as_ref().map(|t| TerrainView {
+            style: t.style.clone(),
+            chunks: t.chunk_count(),
+        }),
+        rivers: floor.rivers.clone(),
+        canvas: floor.canvas,
     }
 }
 
@@ -384,6 +402,96 @@ async fn import_uvtt(
         "manifest": manifest,
         "floor": floor_id,
         "stats": { "cols": map.cols, "rows": map.rows, "walls": wall_count, "lights": light_count },
+    })))
+}
+
+#[derive(Deserialize)]
+struct GenerateBody {
+    seed: Option<u32>,
+    cols: Option<u32>,
+    rows: Option<u32>,
+    land: Option<f32>,
+    continent: Option<f32>,
+    ridges: Option<f32>,
+    rivers: Option<u32>,
+}
+
+/// `POST /api/docs/{id}/generate` — a seeded world (continents, mountains, a sea
+/// level for the requested land fraction, rivers to the sea) replaces the
+/// floor's terrain and rivers as ONE undoable step. Size is capped at 512x512
+/// cells here so a request cannot tie the server up.
+async fn generate_world(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<GenerateBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) =
+        body.map_err(|_| ApiError(CoreError::Invalid("body must be a JSON object".into())))?;
+    let def = ndcart_terrain::GenParams::default();
+    let num = |v: Option<f32>, d: f32, what: &str| -> Result<f32, ApiError> {
+        let v = v.unwrap_or(d);
+        if v.is_finite() {
+            Ok(v)
+        } else {
+            Err(ApiError(CoreError::Invalid(format!(
+                "{what} must be a number"
+            ))))
+        }
+    };
+    let params = ndcart_terrain::GenParams {
+        seed: b.seed.unwrap_or(def.seed),
+        cols: b.cols.unwrap_or(def.cols).clamp(8, 512),
+        rows: b.rows.unwrap_or(def.rows).clamp(8, 512),
+        land: num(b.land, def.land, "land")?.clamp(0.05, 0.95),
+        continent: num(b.continent, def.continent, "continent")?.clamp(0.0, 1.0),
+        ridges: num(b.ridges, def.ridges, "ridges")?.clamp(0.0, 1.0),
+        rivers: b.rivers.unwrap_or(def.rivers).min(40),
+    };
+    let (cols, rows) = (params.cols, params.rows);
+    let world = tokio::task::spawn_blocking(move || ndcart_terrain::generate(&params))
+        .await
+        .map_err(|e| ApiError(CoreError::Invalid(format!("generation failed: {e}"))))?;
+
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor_id = doc.floors[0].id.clone();
+    let t = &world.terrain;
+    let mut ops: Vec<Op> = doc.floors[0]
+        .rivers
+        .iter()
+        .map(|r| Op::RemoveRiver { id: r.id.clone() })
+        .collect();
+    ops.push(Op::ClearTerrain);
+    ops.push(Op::SetCanvas {
+        canvas: Some([cols, rows]),
+    });
+    ops.push(Op::TerrainSet {
+        fill: t.fill,
+        chunks: t
+            .chunk_keys()
+            .into_iter()
+            .map(|(cx, cy)| t.snapshot_chunk(cx, cy))
+            .collect(),
+    });
+    ops.push(Op::SetTerrainStyle {
+        style: t.style.clone(),
+    });
+    let river_count = world.rivers.len();
+    ops.extend(world.rivers.into_iter().map(|river| Op::AddRiver {
+        river,
+        carve: false,
+        index: None,
+    }));
+    doc.apply_ops(&floor_id, &[Op::Batch { ops }])?;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({
+        "ok": true, "cols": cols, "rows": rows, "rivers": river_count,
+        "sea_level": t.sea_level(), "chunks": t.chunk_count(),
     })))
 }
 
@@ -718,6 +826,7 @@ fn build_router(app: App) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             convert::MAX_INPUT_BYTES,
         ))
+        .route("/api/docs/{id}/generate", post(generate_world))
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
@@ -1320,6 +1429,7 @@ mod tests {
                 Request::builder()
                     .method(method)
                     .uri(uri)
+                    .header("content-type", "application/json")
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -1541,6 +1651,200 @@ mod tests {
             assert_eq!(st, StatusCode::BAD_REQUEST);
         }
         assert_eq!(app.store.read().await.docs.len(), before);
+    }
+
+    async fn region_doc(router: &Router) -> (String, String) {
+        let (st, body) = call(
+            router,
+            "POST",
+            "/api/docs",
+            br#"{"name":"World","kind":"region"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let id = serde_json::from_slice::<serde_json::Value>(&body).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, doc) = call(router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let floor = serde_json::from_slice::<serde_json::Value>(&doc).unwrap()["floors"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        (id, floor)
+    }
+
+    #[tokio::test]
+    async fn a_generated_world_renders_undoes_and_is_reproducible() {
+        let router = build_router(test_app());
+        let (id, floor) = region_doc(&router).await;
+        let gen = br#"{"seed":42,"cols":40,"rows":30,"land":0.4,"rivers":3}"#.to_vec();
+        let (st, body) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/generate"),
+            gen.clone(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let out: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // 40x30 cells at 4 samples per cell is 160x120 samples: 3x2 chunks of 64.
+        assert_eq!(out["chunks"].as_u64().unwrap(), 6);
+        assert!(out["sea_level"].as_u64().unwrap() > 1000);
+
+        // The view carries what the panel needs; the export is the canvas size.
+        let (_, doc) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let v: serde_json::Value = serde_json::from_slice(&doc).unwrap();
+        assert_eq!(v["floors"][0]["canvas"], serde_json::json!([40, 30]));
+        assert!(v["floors"][0]["terrain"]["chunks"].as_u64().unwrap() > 0);
+        assert_eq!(
+            v["floors"][0]["rivers"].as_array().unwrap().len(),
+            out["rivers"].as_u64().unwrap() as usize
+        );
+        let (st, png) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/export/png?floor={floor}&ppc=16"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 40 * 16);
+        assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 30 * 16);
+        // It is a map: there is blue water and there is green or tan land.
+        let pm = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let (mut blue, mut land) = (0, 0);
+        for p in pm.pixels() {
+            if i32::from(p.blue()) > i32::from(p.red()) + 30 && p.blue() > p.green() {
+                blue += 1;
+            } else if p.green() >= p.blue() {
+                land += 1;
+            }
+        }
+        assert!(blue > 200 && land > 200, "water {blue}, land {land}");
+
+        // The same request again gives the identical picture (and replaces, not stacks).
+        let (st, _) = call(&router, "POST", &format!("/api/docs/{id}/generate"), gen).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, png2) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/export/png?floor={floor}&ppc=16"),
+            vec![],
+        )
+        .await;
+        assert_eq!(png, png2, "same seed, same world, byte for byte");
+
+        // A whole generation is one undo step: undoing twice walks back to nothing.
+        let undo = |router: Router, id: String, floor: String| async move {
+            call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/undo"),
+                format!(r#"{{"floor":"{floor}"}}"#).into_bytes(),
+            )
+            .await
+            .0
+        };
+        assert_eq!(
+            undo(router.clone(), id.clone(), floor.clone()).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            undo(router.clone(), id.clone(), floor.clone()).await,
+            StatusCode::OK
+        );
+        let (_, doc) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let v: serde_json::Value = serde_json::from_slice(&doc).unwrap();
+        assert!(
+            v["floors"][0]["terrain"].is_null()
+                && v["floors"][0]["rivers"].as_array().unwrap().is_empty()
+        );
+        // Bad input is refused, and an unknown document is a 404.
+        assert_eq!(
+            call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/generate"),
+                b"nope".to_vec()
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&router, "POST", "/api/docs/ghost/generate", b"{}".to_vec())
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn terrain_strokes_and_rivers_arrive_through_the_ops_route() {
+        let router = build_router(test_app());
+        let (id, floor) = region_doc(&router).await;
+        let ops = |body: serde_json::Value| {
+            let router = router.clone();
+            let (id, floor) = (id.clone(), floor.clone());
+            async move {
+                call(
+                    &router,
+                    "POST",
+                    &format!("/api/docs/{id}/ops"),
+                    serde_json::json!({"floor": floor, "ops": body})
+                        .to_string()
+                        .into_bytes(),
+                )
+                .await
+                .0
+            }
+        };
+        assert_eq!(
+            ops(serde_json::json!([{"t":"set_canvas","canvas":[20,16]}])).await,
+            StatusCode::OK
+        );
+        // Raise an island out of the sea with repeated strokes.
+        for _ in 0..30 {
+            let st = ops(serde_json::json!([{"t":"terrain_stroke","stroke":{"mode":"raise","points":[[10.0,8.0],[10.5,8.2]],"radius":4.0,"strength":1.0,"seed":1}}])).await;
+            assert_eq!(st, StatusCode::OK);
+        }
+        let (_, png) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/export/png?floor={floor}&ppc=16"),
+            vec![],
+        )
+        .await;
+        let pm = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let centre = pm.pixel(10 * 16, 8 * 16).unwrap();
+        let corner = pm.pixel(8, 8).unwrap();
+        assert!(
+            centre.green() >= centre.blue(),
+            "the island is land at its centre"
+        );
+        assert!(
+            corner.blue() > corner.red() + 20,
+            "and open sea at the corner"
+        );
+        // A river is accepted and shows in the view.
+        assert_eq!(ops(serde_json::json!([{"t":"add_river","river":{"id":"r1","name":"Silver","points":[[8.0,6.0],[10.0,8.0],[12.0,10.5]],"width":1.2}}])).await, StatusCode::OK);
+        let (_, doc) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&doc).unwrap()["floors"][0]["rivers"][0]
+                ["name"],
+            "Silver"
+        );
+        // Hostile terrain input is a 400, not stored.
+        for bad in [
+            serde_json::json!([{"t":"terrain_stroke","stroke":{"mode":"raise","points":[[1.0,1.0]],"radius":-1.0,"strength":1.0}}]),
+            serde_json::json!([{"t":"terrain_stroke","stroke":{"mode":"raise","points":[],"radius":2.0,"strength":1.0}}]),
+            serde_json::json!([{"t":"add_river","river":{"id":"x","name":"n","points":[[0.0,0.0]],"width":1.0}}]),
+            serde_json::json!([{"t":"set_terrain_style","style":{"tint":"red"}}]),
+            serde_json::json!([{"t":"set_canvas","canvas":[0,10]}]),
+        ] {
+            assert_eq!(ops(bad).await, StatusCode::BAD_REQUEST);
+        }
     }
 
     #[tokio::test]

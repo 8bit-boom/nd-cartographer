@@ -186,6 +186,16 @@ pub struct FloorDoc {
     /// Walls that are not derived from rooms (see [`ImportedWall`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imported_walls: Vec<ImportedWall>,
+    /// Region maps: the heightmap (plan §7.2). `None` until first edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terrain: Option<crate::terrain::Terrain>,
+    /// Rivers: carved into the terrain when added, drawn as water on top.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rivers: Vec<crate::terrain::River>,
+    /// An explicit map size in cells `[cols, rows]` (region maps): the export is
+    /// at least this big even where nothing is painted (open sea, empty land).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas: Option<[u32; 2]>,
 }
 
 pub fn now_iso() -> String {
@@ -219,6 +229,9 @@ impl FloorDoc {
             stamps: Vec::new(),
             underlay: None,
             imported_walls: Vec::new(),
+            terrain: None,
+            rivers: Vec::new(),
+            canvas: None,
         }
     }
 
@@ -243,6 +256,103 @@ impl FloorDoc {
         }
         let at = index.unwrap_or(self.strokes.len()).min(self.strokes.len());
         self.strokes.insert(at, stroke);
+        Ok(())
+    }
+
+    /// The terrain, created (open ocean) on first use.
+    pub fn terrain_mut(&mut self) -> &mut crate::terrain::Terrain {
+        self.terrain
+            .get_or_insert_with(crate::terrain::Terrain::default)
+    }
+
+    pub fn terrain_stroke(&mut self, s: &crate::terrain::TerrainStroke) -> CoreResult<()> {
+        s.validate()?;
+        self.terrain_mut()
+            .stroke(s.mode, &s.points, s.radius, s.strength, s.seed);
+        Ok(())
+    }
+
+    /// Raw chunk replacement (undo, generators). `fill` is the open-water level;
+    /// it can only be chosen when the terrain is created.
+    pub fn terrain_set(
+        &mut self,
+        fill: u16,
+        chunks: &[crate::terrain::ChunkData],
+    ) -> CoreResult<()> {
+        match &self.terrain {
+            Some(t) if t.fill != fill => {
+                return Err(CoreError::Invalid(
+                    "the open-water level cannot change on existing terrain".into(),
+                ))
+            }
+            _ => {}
+        }
+        // Validate on a scratch copy so a bad chunk leaves the terrain untouched.
+        let mut t = self.terrain.clone().unwrap_or_else(|| {
+            let mut t = crate::terrain::Terrain::default();
+            t.fill = fill;
+            t
+        });
+        t.set_chunks(chunks)?;
+        self.terrain = Some(t);
+        Ok(())
+    }
+
+    pub fn clear_terrain(&mut self) {
+        self.terrain = None;
+    }
+
+    pub fn set_terrain_style(&mut self, style: crate::terrain::TerrainStyle) -> CoreResult<()> {
+        style.validate()?;
+        self.terrain_mut().style = style;
+        Ok(())
+    }
+
+    /// Add a river (validated). With `carve`, the channel is cut into the terrain;
+    /// undo uses `carve: false` to put a removed river back without cutting twice.
+    pub fn add_river(
+        &mut self,
+        river: crate::terrain::River,
+        carve: bool,
+        index: Option<usize>,
+    ) -> CoreResult<()> {
+        river.validate()?;
+        if self.rivers.iter().any(|r| r.id == river.id) {
+            return Err(CoreError::Invalid(format!("duplicate river {}", river.id)));
+        }
+        if self.rivers.len() >= crate::terrain::MAX_RIVERS {
+            return Err(CoreError::CapExceeded(format!(
+                "at most {} rivers",
+                crate::terrain::MAX_RIVERS
+            )));
+        }
+        if carve {
+            self.terrain_mut().carve_river(&river);
+        }
+        let at = index.unwrap_or(self.rivers.len()).min(self.rivers.len());
+        self.rivers.insert(at, river);
+        Ok(())
+    }
+
+    pub fn remove_river(&mut self, id: &str) -> CoreResult<()> {
+        let i = self
+            .rivers
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| CoreError::NotFound(format!("river {id}")))?;
+        self.rivers.remove(i);
+        Ok(())
+    }
+
+    pub fn set_canvas(&mut self, canvas: Option<[u32; 2]>) -> CoreResult<()> {
+        if let Some([c, r]) = canvas {
+            if !(1..=20_000).contains(&c) || !(1..=20_000).contains(&r) {
+                return Err(CoreError::Invalid(
+                    "canvas must be 1..=20000 cells a side".into(),
+                ));
+            }
+        }
+        self.canvas = canvas;
         Ok(())
     }
 
@@ -272,7 +382,8 @@ impl FloorDoc {
         Ok(())
     }
 
-    /// The smallest `cols x rows` (cells, from the origin) that holds
+    /// The `cols x rows` (cells, from the origin) of the exported map: the explicit
+    /// `canvas` if one is set, otherwise the smallest size that holds
     /// everything on the floor: painted cells, the underlay, strokes (with their
     /// reach) and stamps. Never smaller than 1x1; negative coordinates are
     /// outside the exported image.
@@ -297,6 +408,21 @@ impl FloorDoc {
             let reach = 2.0 * s.scale + 1.0;
             cols = cols.max(s.x + reach);
             rows = rows.max(s.y + reach);
+        }
+        if let Some(b) = self.terrain.as_ref().and_then(|t| t.bounds_cells()) {
+            cols = cols.max(b[2]);
+            rows = rows.max(b[3]);
+        }
+        for r in &self.rivers {
+            for p in &r.points {
+                cols = cols.max(p[0] + r.width);
+                rows = rows.max(p[1] + r.width);
+            }
+        }
+        // An explicit map size (region maps) is authoritative: it IS the map, and
+        // content past it (terrain chunks are 16 cells wide and overshoot) is outside.
+        if let Some([c, r]) = self.canvas {
+            return (c.clamp(1, 20_000), r.clamp(1, 20_000));
         }
         let cap = 20_000.0;
         (
@@ -644,5 +770,29 @@ mod layer_tests {
         )
         .unwrap();
         assert_eq!(f.extent().1, 53);
+    }
+
+    #[test]
+    fn an_explicit_canvas_is_the_map_size_whatever_overshoots() {
+        use crate::terrain::{TerrainMode, TerrainStroke};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.terrain_stroke(&TerrainStroke {
+            mode: TerrainMode::Raise,
+            points: vec![[30.0, 30.0]],
+            radius: 5.0,
+            strength: 1.0,
+            seed: 0,
+        })
+        .unwrap();
+        let grown = f.extent();
+        assert!(
+            grown.0 >= 32 && grown.1 >= 32,
+            "without a canvas the terrain sets the size: {grown:?}"
+        );
+        f.set_canvas(Some([20, 14])).unwrap();
+        assert_eq!(f.extent(), (20, 14), "with one, the canvas does");
+        assert!(f.set_canvas(Some([0, 5])).is_err() && f.set_canvas(Some([5, 99_999])).is_err());
+        f.set_canvas(None).unwrap();
+        assert_eq!(f.extent(), grown);
     }
 }

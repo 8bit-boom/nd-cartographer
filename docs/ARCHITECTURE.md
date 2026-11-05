@@ -194,6 +194,34 @@ cannot express), and `publish` started a nested tokio runtime.
 - The linter treats a picture-only map as non-empty and does not call a light on
   the underlay "in the void".
 
+- **Terrain (M2 begins)** — `ndcart-core::terrain` + `ndcart-terrain`. A floor can
+  hold a sparse heightmap: 16-bit elevations in 64×64-sample chunks, 4 samples per
+  cell, absent chunks reading as open ocean. Edits are deterministic ops with
+  **exact undo by chunk snapshot** (an undone first edit removes the terrain
+  again; a removed-then-restored river does not carve a second time):
+  `terrain_stroke` (raise / lower / smooth / flatten / roughen — points, radius,
+  strength, seed), `terrain_set` (raw chunks: generators and undo),
+  `set_terrain_style` (sea level, tint, saturation, contrast, brightness, relief
+  strength, contour interval), `add_river` / `remove_river` (a river is drawn
+  upstream→downstream; the carved bed never rises and banks blend smoothly),
+  `clear_terrain`, `set_canvas` (the map's size in cells — authoritative for the
+  export extent). Chunk data travels as base64 so a 160×110-cell map is ~0.7 MB
+  of JSON, not 70 chunks × 4,096 numbers.
+  **Shading** (`ndcart-terrain::Shader`) is a pure function of position: tints
+  that follow altitude with a moisture field (dry lowlands tan, wet ones green),
+  bare rock on steep ground, snow on the heights, depth-shaded water with a pale
+  shore, relief from a north-west sun, optional contours, then the global grade.
+  Terrain and rivers (rivers are variable-width soft strokes — the brush engine
+  again) bake **pixel-identically** in tiles and in the full render (test).
+  **Generation** (`ndcart-terrain::generate`) is seeded and platform-stable (no
+  `sin`/`powf`): domain-warped fractal continents, ridged mountain chains, a sea
+  level chosen so the requested land fraction is met, a height curve that keeps
+  most land low, and rivers traced downhill from high ground. `POST
+  /api/docs/{id}/generate` replaces a floor's terrain and rivers as **one undoable
+  step** (same seed ⇒ byte-identical picture).
+  *Not yet:* biome brushes, mass scatter, typography, routes, regions, hex
+  overlay, publish B, and the terrain tools in the UI.
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

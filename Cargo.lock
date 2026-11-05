@@ -1161,11 +1161,20 @@ dependencies = [
  "ndcart-core",
  "ndcart-formats",
  "ndcart-paint",
+ "ndcart-terrain",
  "serde",
  "serde_json",
  "tiny-skia",
  "tokio",
  "tower",
+]
+
+[[package]]
+name = "ndcart-terrain"
+version = "0.1.0"
+dependencies = [
+ "ndcart-core",
+ "ndcart-paint",
 ]
 
 [[package]]

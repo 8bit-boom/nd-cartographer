@@ -41,6 +41,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 - `{"t":"remove_stroke","id"}`
 - `{"t":"add_stamp","stamp":{"id","asset":"crate","x","y","scale?":0.1-8,"rotation?","flip?","tint?":"#rrggbb","shadow?"},"index?"}`, `{"t":"update_stamp","stamp":{…same id…}}`, `{"t":"remove_stamp","id"}` — placed props (`GET /api/stamps` lists the pack)
 - `{"t":"set_underlay","underlay":{"asset":"<sha256>","x","y","w","h","opacity?"}|null}` — the picture behind everything (asset ids come from `POST /api/assets`); `{"t":"set_imported_walls","walls":[{"pts":[[x,y],…],"kind","state?"}]}` — walls not derived from rooms, in cells
+- Region maps: `{"t":"terrain_stroke","stroke":{"mode":"raise|lower|smooth|flatten|roughen","points":[[x,y],…],"radius":0.2-64,"strength":0-1,"seed?"}}`, `{"t":"terrain_set","fill","chunks":[{"cx","cy","data":"<base64 64x64 u16 LE>"}]}`, `{"t":"set_terrain_style","style":{"sea_level?","tint?","tint_amount?","saturation?","contrast?","brightness?","hillshade?","contour_interval?"}}`, `{"t":"add_river","river":{"id","name","points":[[x,y],…],"width":0.05-16},"carve?":true,"index?"}`, `{"t":"remove_river","id"}`, `{"t":"clear_terrain"}`, `{"t":"set_canvas","canvas":[cols,rows]|null}`
 - `{"t":"remove_space","id"}`
 - `{"t":"set_mark","edge":{"cell":{"x","y"},"edge":"west|north|east|south"},"mark":{"kind":"opening|door|window|secret","state":"open|closed"}|null}`
 - `{"t":"add_light","light":{"id","x","y","range","color","intensity","on","label?"}}` — ≤ 60 per floor (nd-world publish cap)
@@ -58,6 +59,12 @@ Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/materials` | The starter pack: `{pack, materials:[{id, name, color}]}`; `color` is the base colour for swatches. |
+
+## Generate a world
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/docs/{id}/generate` | Body `{seed?, cols?, rows?, land?, continent?, ridges?, rivers?}` (size capped at 512×512 cells). Replaces the first floor's terrain and rivers as one undoable step; returns `{cols, rows, rivers, sea_level, chunks}`. Same seed ⇒ the same world. |
 
 ## Assets and import
 
