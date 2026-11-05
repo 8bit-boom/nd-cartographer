@@ -8,7 +8,9 @@
 //! with `ndcart-render` (plan §12); this module stays deterministic anyway.
 
 use ndcart_core::walls::{walls_from_grid, Wall};
+use ndcart_core::CellKey;
 use ndcart_core::FloorDoc;
+use ndcart_paint::{edge_mix, Side, BLEND_WIDTH};
 
 /// Pixels per cell at zoom 0. Zoom z doubles it (z capped at 4).
 pub const PPC0: i64 = 16;
@@ -171,6 +173,53 @@ pub fn grid_extent(floor: &FloorDoc) -> (u32, u32) {
     (cols as u32, rows as u32)
 }
 
+/// Seed for every pattern and blend jitter. A document-level seed can replace
+/// this later; fixed for now so renders are reproducible.
+const PAINT_SEED: u32 = 0x6e64;
+const FALLBACK: Surface = Surface::Flat([0x33, 0x44, 0x55]);
+
+/// What a space paints: a pack material, or a flat colour.
+#[derive(Clone, Copy)]
+enum Surface {
+    Mat(&'static ndcart_paint::Material),
+    Flat([u8; 3]),
+}
+
+impl Surface {
+    fn sample(&self, u: f32, v: f32) -> [u8; 3] {
+        match self {
+            Surface::Mat(m) => m.sample(u, v, PAINT_SEED),
+            Surface::Flat(c) => *c,
+        }
+    }
+    fn same_as(&self, o: &Surface) -> bool {
+        match (self, o) {
+            (Surface::Mat(a), Surface::Mat(b)) => a.id == b.id,
+            (Surface::Flat(a), Surface::Flat(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Resolve every space once per bake. An unknown material id falls back to the
+/// space's flat colour.
+fn surfaces_of(floor: &FloorDoc) -> std::collections::HashMap<&str, Surface> {
+    floor
+        .grid
+        .spaces
+        .iter()
+        .map(|(id, s)| {
+            let surface = s
+                .material
+                .as_deref()
+                .and_then(ndcart_paint::find)
+                .map(Surface::Mat)
+                .unwrap_or_else(|| Surface::Flat(parse_hex(&s.color)));
+            (id.as_str(), surface)
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_region(
     floor: &FloorDoc,
@@ -213,38 +262,69 @@ fn render_pixmap(
     let cy_from = y0.div_euclid(ppc);
     let cy_to = (y0 + tile_px_h - 1).div_euclid(ppc);
 
-    let mut paint = tiny_skia::Paint {
-        anti_alias: false,
-        ..Default::default()
-    };
-
+    // Cells: each painted cell is filled pixel by pixel from its material (or
+    // flat colour), blending toward a differently-painted neighbour near the
+    // shared edge. Everything is sampled in world cell coordinates, so tiles,
+    // zoom levels and the full-map export all agree.
+    let surfaces = surfaces_of(floor);
+    let stride = w as usize * 4;
     for (cell, space_id) in floor.grid.cells() {
         let cx = i64::from(cell.x);
         let cy = i64::from(cell.y);
         if cx < cx_from || cx > cx_to || cy < cy_from || cy > cy_to {
             continue;
         }
-        let rgb = floor
-            .grid
-            .spaces
-            .get(space_id)
-            .map(|s| parse_hex(&s.color))
-            .unwrap_or([0x33, 0x44, 0x55]);
-        paint.set_color_rgba8(rgb[0], rgb[1], rgb[2], 0xff);
-        // Cell rect in world px, clipped to the tile.
-        let wx = cell.x as i64 * ppc;
-        let wy = cell.y as i64 * ppc;
-        let rx = (wx - x0).max(0);
-        let ry = (wy - y0).max(0);
-        let rx2 = ((wx + ppc) - x0).min(tile_px_w);
-        let ry2 = ((wy + ppc) - y0).min(tile_px_h);
+        let own = surfaces.get(space_id).copied().unwrap_or(FALLBACK);
+        // The four neighbours' surfaces, only when painted and different.
+        let nb = |c: CellKey| {
+            floor
+                .grid
+                .cell_space(c)
+                .and_then(|id| surfaces.get(id).copied())
+                .filter(|n| !own.same_as(n))
+        };
+        let (west, east) = (nb(cell.west()), nb(cell.east()));
+        let (north, south) = (nb(cell.north()), nb(cell.south()));
+        let (wx, wy) = (cx * ppc, cy * ppc);
+        let (rx, ry) = ((wx - x0).max(0), (wy - y0).max(0));
+        let (rx2, ry2) = (
+            ((wx + ppc) - x0).min(tile_px_w),
+            ((wy + ppc) - y0).min(tile_px_h),
+        );
         if rx >= rx2 || ry >= ry2 {
             continue;
         }
-        let rect =
-            tiny_skia::Rect::from_xywh(rx as f32, ry as f32, (rx2 - rx) as f32, (ry2 - ry) as f32);
-        if let Some(r) = rect {
-            pixmap.fill_rect(r, &paint, tiny_skia::Transform::identity(), None);
+        let data = pixmap.data_mut();
+        for py in ry..ry2 {
+            for px in rx..rx2 {
+                let u = (x0 + px) as f32 + 0.5;
+                let v = (y0 + py) as f32 + 0.5;
+                let (u, v) = (u / ppc as f32, v / ppc as f32);
+                let (fx, fy) = (u - cell.x as f32, v - cell.y as f32);
+                let mut c = own.sample(u, v);
+                // Horizontal edge pair, then vertical; near a corner both apply.
+                let (hn, hd, hs) = if fx < 0.5 {
+                    (west, fx, Side::Far)
+                } else {
+                    (east, 1.0 - fx, Side::Near)
+                };
+                if let Some(n) = hn.filter(|_| hd < BLEND_WIDTH) {
+                    c = edge_mix(c, n.sample(u, v), hd, hs, u, v, PAINT_SEED);
+                }
+                let (vn, vd, vs) = if fy < 0.5 {
+                    (north, fy, Side::Far)
+                } else {
+                    (south, 1.0 - fy, Side::Near)
+                };
+                if let Some(n) = vn.filter(|_| vd < BLEND_WIDTH) {
+                    c = edge_mix(c, n.sample(u, v), vd, vs, u, v, PAINT_SEED);
+                }
+                let i = py as usize * stride + px as usize * 4;
+                data[i] = c[0];
+                data[i + 1] = c[1];
+                data[i + 2] = c[2];
+                data[i + 3] = 0xff;
+            }
         }
     }
 
@@ -317,6 +397,7 @@ mod tests {
                     name: "A".into(),
                     color: "#7f5539".into(),
                     kind: SpaceKind::Room,
+                    material: None,
                 },
             },
         )
@@ -410,6 +491,109 @@ mod tests {
             "window on the south edge of cell 3"
         );
         assert!(near(16, 0, WALL_RGB), "plain wall keeps the wall colour");
+    }
+
+    /// Two adjacent rooms in different materials, an unknown-material room and a flat one.
+    fn material_floor() -> FloorDoc {
+        use ndcart_core::grid::default_space;
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        for (id, mat, color) in [
+            ("a", Some("wood_planks"), "#111111"),
+            ("b", Some("cobblestone"), "#222222"),
+            ("c", Some("no_such_material"), "#336699"),
+            ("d", None, "#aa5500"),
+        ] {
+            let mut sp = default_space(id, id, SpaceKind::Room);
+            sp.material = mat.map(String::from);
+            sp.color = color.into();
+            f.grid.upsert_space(sp).unwrap();
+        }
+        let rect = |x0: i32, x1: i32, y0: i32, y1: i32| -> Vec<CellKey> {
+            (x0..=x1)
+                .flat_map(|x| (y0..=y1).map(move |y| CellKey::new(x, y)))
+                .collect()
+        };
+        f.grid.paint(&rect(0, 3, 0, 3), Some("a")).unwrap();
+        f.grid.paint(&rect(4, 7, 0, 3), Some("b")).unwrap();
+        f.grid.paint(&rect(0, 3, 4, 7), Some("c")).unwrap();
+        f.grid.paint(&rect(4, 7, 4, 7), Some("d")).unwrap();
+        f
+    }
+
+    #[test]
+    fn a_tile_is_the_matching_crop_of_the_full_render() {
+        // Materials are sampled in world coordinates, so baking in 256 px chunks
+        // and baking the whole map agree pixel for pixel — no seams at tile joins.
+        let f = material_floor();
+        let walls: Vec<Wall> = vec![];
+        let (full, w, _h) = bake_full(&f, &walls, 32.0, 64).unwrap(); // 8x8 cells = 512 px
+        let full = tiny_skia::Pixmap::decode_png(&full).unwrap();
+        assert_eq!(w, 512);
+        // z2 is 64 px/cell: tile (1,0) covers x 256..512, y 0..256 of the same image.
+        let tile = bake_tile(&f, &walls, 32.0, 2, 1, 0);
+        let tile = tiny_skia::Pixmap::decode_png(&tile).unwrap();
+        for y in 0..256u32 {
+            for x in 0..256u32 {
+                assert_eq!(tile.pixel(x, y), full.pixel(256 + x, y), "({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn materials_blend_continuously_across_a_shared_edge() {
+        let f = material_floor();
+        let (png, ..) = bake_full(&f, &[], 32.0, 64).unwrap();
+        let pm = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let px = |x: u32, y: u32| {
+            let p = pm.pixel(x, y).unwrap();
+            [
+                i32::from(p.red()),
+                i32::from(p.green()),
+                i32::from(p.blue()),
+            ]
+        };
+        let step = |a: [i32; 3], b: [i32; 3]| (0..3).map(|i| (a[i] - b[i]).abs()).sum::<i32>();
+        // The wood|cobble edge is x = 256. Across it, row by row, the largest
+        // jump between neighbouring pixels must not stand out from the jumps
+        // *inside* the textures (a hard seam would be far bigger).
+        let mut at_edge = 0;
+        let mut inside = 0;
+        for y in 8..120u32 {
+            at_edge = at_edge.max(step(px(255, y), px(256, y)));
+            inside = inside.max(step(px(120, y), px(121, y)).max(step(px(400, y), px(401, y))));
+        }
+        assert!(
+            at_edge <= inside.max(60) + 40,
+            "a seam at the edge: {at_edge} vs {inside} inside the textures"
+        );
+        // And the blend is real: a few pixels in, the colour differs from the
+        // far-inside colour of the same row band (the neighbour bleeds in).
+        let near = px(256 - 3, 30);
+        let far = px(256 - 40, 30);
+        assert_ne!(near, far);
+    }
+
+    #[test]
+    fn unknown_material_and_flat_space_keep_their_colour() {
+        let f = material_floor();
+        let (png, ..) = bake_full(&f, &[], 32.0, 32).unwrap();
+        let pm = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        // Room c (unknown id) centre: flat #336699. Room d centre: flat #aa5500.
+        let at = |cx: u32, cy: u32| {
+            let p = pm.pixel(cx * 32 + 16, cy * 32 + 16).unwrap();
+            [p.red(), p.green(), p.blue()]
+        };
+        assert_eq!(at(1, 5), [0x33, 0x66, 0x99]);
+        assert_eq!(at(5, 5), [0xaa, 0x55, 0x00]);
+        // A material room is textured, not flat.
+        let wood: std::collections::BTreeSet<_> = (0..32u32)
+            .flat_map(|y| (0..32u32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                pm.pixel(32 + x, 32 + y)
+                    .map(|p| (p.red(), p.green(), p.blue()))
+            })
+            .collect();
+        assert!(wood.len() > 6, "wood planks should have texture");
     }
 
     #[test]

@@ -111,6 +111,10 @@ pub struct Space {
     /// `#rrggbb`.
     pub color: String,
     pub kind: SpaceKind,
+    /// A material id from the active pack (plan §7.1). `None` paints the flat
+    /// `color`; an id the pack does not know falls back to `color` too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
 }
 
 /// One painted cell. (Serde shape: a list of triples rather than a map keyed
@@ -239,6 +243,17 @@ impl RoomGrid {
                 space.color
             )));
         }
+        if let Some(m) = &space.material {
+            let ok = !m.is_empty()
+                && m.len() <= 40
+                && m.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+            if !ok {
+                return Err(CoreError::Invalid(
+                    "material must be 1-40 chars of a-z, 0-9 and _".into(),
+                ));
+            }
+        }
         self.spaces.insert(space.id.clone(), space);
         Ok(())
     }
@@ -356,6 +371,7 @@ pub fn default_space(id: &str, name: &str, kind: SpaceKind) -> Space {
         name: name.to_string(),
         color: "#334455".to_string(),
         kind,
+        material: None,
     }
 }
 
@@ -369,6 +385,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn material_ids_are_validated_and_optional_in_old_documents() {
+        let mut g = RoomGrid::default();
+        let mut sp = default_space("a", "A", SpaceKind::Room);
+        sp.material = Some("stone_floor".into());
+        g.upsert_space(sp.clone()).unwrap();
+        for bad in ["", "Stone", "a b", "../x", &"x".repeat(41)] {
+            sp.material = Some(bad.into());
+            assert!(g.upsert_space(sp.clone()).is_err(), "{bad:?}");
+        }
+        // A space saved before materials existed still loads (and stays flat).
+        let old = r##"{"id":"o","name":"Old","color":"#112233","kind":"room"}"##;
+        let s: Space = serde_json::from_str(old).unwrap();
+        assert_eq!(s.material, None);
+        assert!(!serde_json::to_string(&s).unwrap().contains("material"));
+    }
+
+    #[test]
     fn paint_requires_existing_space() {
         let mut g = RoomGrid::default();
         g.upsert_space(Space {
@@ -376,6 +409,7 @@ mod tests {
             name: "A".into(),
             color: "#112233".into(),
             kind: SpaceKind::Room,
+            material: None,
         })
         .unwrap();
         assert!(g.paint(&[CellKey::new(0, 0)], Some("nope")).is_err());

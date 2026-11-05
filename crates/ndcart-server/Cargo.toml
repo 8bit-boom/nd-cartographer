@@ -19,6 +19,7 @@ bridge = ["dep:ndcart-bridge"]
 [dependencies]
 ndcart-core = { path = "../ndcart-core" }
 ndcart-formats = { path = "../ndcart-formats" }
+ndcart-paint = { path = "../ndcart-paint" }
 ndcart-bridge = { path = "../ndcart-bridge", optional = true }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "io-util", "time"] }

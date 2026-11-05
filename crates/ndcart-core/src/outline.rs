@@ -14,6 +14,8 @@ pub struct OutlineSpace {
     pub name: String,
     pub kind: SpaceKind,
     pub color: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
     pub cells: usize,
     /// `[min_x, min_y, max_x, max_y]` in cells; `None` when nothing is painted.
     pub bbox: Option<[i32; 4]>,
@@ -79,6 +81,7 @@ pub fn outline(floor: &FloorDoc, cell_size: f64) -> Outline {
                 name: s.name.clone(),
                 kind: s.kind,
                 color: s.color.clone(),
+                material: s.material.clone(),
                 cells,
                 bbox,
             }

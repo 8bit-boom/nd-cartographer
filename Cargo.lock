@@ -1144,6 +1144,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ndcart-paint"
+version = "0.1.0"
+
+[[package]]
 name = "ndcart-server"
 version = "0.1.0"
 dependencies = [
@@ -1153,6 +1157,7 @@ dependencies = [
  "ndcart-bridge",
  "ndcart-core",
  "ndcart-formats",
+ "ndcart-paint",
  "serde",
  "serde_json",
  "tiny-skia",

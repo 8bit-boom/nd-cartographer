@@ -1042,6 +1042,12 @@ map" works against Python/hybrid but not Rust-only. Publishing is unaffected (th
 studio keeps its own document); the probe reports `read_back`. Closing it is a Tier-1
 nd-world change (port those two GETs to the gateway) — noted, not done.
 
+**Order change (owner go-ahead):** split exports → outliner → materials/starter pack →
+brush engine. The starter pack moved *behind* the material system it is made of, so
+M1b opened with `ndcart-paint` (materials, procedural patterns, edge blending) and the
+first-party procedural pack; the brush engine (pressure/tilt, pattern/scatter brushes,
+stamps) is next.
+
 **Image formats** — exports support PNG, WebP and AVIF (owner request). UVTT pictures
 stay PNG/WebP (the consumers can't read AVIF). Lossy WebP for cap-fitting is a
 follow-up (needs libwebp); until then cap-fitting uses AVIF for plain exports and

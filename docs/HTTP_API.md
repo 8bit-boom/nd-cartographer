@@ -36,7 +36,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 ### Ops (internally tagged, `"t"`)
 
 - `{"t":"paint_cells","cells":[{"x","y"}…],"space":"id"|null}` — paint or clear
-- `{"t":"upsert_space","space":{"id","name","color":"#rrggbb","kind":"room|corridor|area"}}`
+- `{"t":"upsert_space","space":{"id","name","color":"#rrggbb","kind":"room|corridor|area","material?":"stone_floor"}}` — `material` is an id from `GET /api/materials` (1–40 chars `a-z0-9_`); without one the flat `color` paints
 - `{"t":"remove_space","id"}`
 - `{"t":"set_mark","edge":{"cell":{"x","y"},"edge":"west|north|east|south"},"mark":{"kind":"opening|door|window|secret","state":"open|closed"}|null}`
 - `{"t":"add_light","light":{"id","x","y","range","color","intensity","on","label?"}}` — ≤ 60 per floor (nd-world publish cap)
@@ -48,6 +48,12 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 Validation is at the boundary (the D1 lesson): every number finite and bounded,
 referenced ids must exist, caps enforced. Refused ops are never journaled.
 Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
+
+## Materials
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/materials` | The starter pack: `{pack, materials:[{id, name, color}]}`; `color` is the base colour for swatches. |
 
 ## Tiles
 
@@ -82,7 +88,7 @@ first run, printed once). 401 without it.
 
 ```
 ndcart serve [--listen 127.0.0.1:8300] [--data-dir DIR]   # env: ND_CARTO_LISTEN, ND_CARTO_DATA_DIR
-ndcart bench                                              # journal/walls/replay timings
+ndcart bench [--ppc N]                                    # journal/walls/replay + full-map bake timings (asserts the 30 s budget)
 ndcart convert IN OUT [--format webp|avif|png] [--quality N]
 ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32] [--format webp] [--max-mb 20] [--audience gm|player] --data-dir DIR
                                                           # password: ND_CARTO_PASSWORD / ND_CARTO_PASSWORD_FILE only

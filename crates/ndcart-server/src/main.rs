@@ -244,6 +244,18 @@ fn pick_format(q: &ExportQuery) -> Result<tiles::ImageFormat, ApiError> {
     }
 }
 
+/// `GET /api/materials` — the starter pack: id, name and the base colour for swatches.
+async fn list_materials() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "pack": "starter",
+        "materials": ndcart_paint::starter().iter().map(|m| serde_json::json!({
+            "id": m.id,
+            "name": m.name,
+            "color": format!("#{:02x}{:02x}{:02x}", m.base[0], m.base[1], m.base[2]),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 /// `GET /api/docs/{id}/lint[?floor=ID]` — the Problems panel: deterministic
 /// checks with undoable fixes (`fix` is an op you can POST to `/ops`).
 async fn lint_doc(
@@ -540,6 +552,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/export/uvtt", get(export_uvtt))
         .route("/api/docs/{id}/export/png", get(export_png))
         .route("/api/docs/{id}/lint", get(lint_doc))
+        .route("/api/materials", get(list_materials))
         .route("/api/convert", post(convert_image))
         .layer(axum::extract::DefaultBodyLimit::max(
             convert::MAX_INPUT_BYTES,
@@ -552,10 +565,20 @@ fn build_router(app: App) -> Router {
 
 // ---------- bench ----------
 
-fn run_bench() {
+fn run_bench(args: Vec<String>) {
     use ndcart_core::grid::{Space, SpaceKind};
     use ndcart_core::journal::Journal;
-    println!("ndcart bench (M0): journal + walls + replay on a 200x140 dungeon");
+    // `ndcart bench [--ppc N]`: the full-map bake runs at N px per square
+    // (default 16 so the debug-build CI smoke stays quick; the plan's budget is
+    // measured at 32: `cargo run --release -p ndcart-server -- bench --ppc 32`).
+    let mut bake_ppc = 16i64;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--ppc" {
+            bake_ppc = it.next().and_then(|v| v.parse().ok()).unwrap_or(16);
+        }
+    }
+    println!("ndcart bench: journal + walls + replay + full-map bake on a 200x140 dungeon");
     let mut floor = FloorDoc::new("bench".into(), "Bench".into());
     let mut journal = Journal::default();
 
@@ -567,6 +590,8 @@ fn run_bench() {
             name: format!("Space {i}"),
             color: (*color).to_string(),
             kind: SpaceKind::Room,
+            // Worst case for the baker: every cell borders a different material.
+            material: Some(ndcart_paint::starter()[i].id.to_string()),
         };
         store::apply_ops_direct(&mut floor, &mut journal, &[Op::UpsertSpace { space }]).unwrap();
     }
@@ -617,6 +642,22 @@ fn run_bench() {
         back.len()
     );
     println!("  OK: replay reproduces the state exactly.");
+
+    // The plan's budget (§6): a full 200x140-cell bake at 32 px/cell < 30 s.
+    let walls = tiles::derive_walls(&floor, 32.0);
+    let t4 = std::time::Instant::now();
+    let (png, w, h) =
+        tiles::bake_full_as(&floor, &walls, 32.0, bake_ppc, tiles::ImageFormat::Png, 90)
+            .expect("bake");
+    let bake_ms = t4.elapsed().as_millis();
+    println!(
+        "  full-map bake:     {w}x{h} px at {bake_ppc} px/cell in {bake_ms} ms ({} KB png, every cell blending)",
+        png.len() / 1024
+    );
+    assert!(
+        bake_ms < 30_000,
+        "bake budget blown: {bake_ms} ms (plan: < 30 s at 32 px/cell)"
+    );
 }
 
 // ---------- convert CLI ----------
@@ -682,7 +723,7 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| "serve".into());
     match cmd.as_str() {
-        "bench" => run_bench(),
+        "bench" => run_bench(args.collect()),
         "convert" => run_convert(args.collect()),
         #[cfg(feature = "bridge")]
         "publish" => {

@@ -330,6 +330,7 @@ mod tests {
             name: "A".into(),
             color: "#112233".into(),
             kind: SpaceKind::Room,
+            material: None,
         }
     }
 

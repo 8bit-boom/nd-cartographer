@@ -8,14 +8,16 @@ const PPC0 = 16;          // pixels per cell at zoom 0 (matches tiles.rs)
 const TILE = 256;
 const MAX_Z = 4;
 
-const PALETTE = [
-  { color: '#7f5539', name: 'Wood floor' },
-  { color: '#8a9a5b', name: 'Grass' },
-  { color: '#5a7d9a', name: 'Water' },
-  { color: '#b5651d', name: 'Road' },
-  { color: '#4a4a4a', name: 'Dark stone' },
-  { color: '#262626', name: 'Void' },
+// The palette is the server's material pack (GET /api/materials). If that cannot
+// be fetched the editor still works with flat colours (no `material`).
+const FLAT_FALLBACK = [
+  { id: null, color: '#7f5539', name: 'Wood floor' },
+  { id: null, color: '#8a9a5b', name: 'Grass' },
+  { id: null, color: '#5a7d9a', name: 'Water' },
+  { id: null, color: '#4a4a4a', name: 'Dark stone' },
 ];
+let PALETTE = FLAT_FALLBACK;
+const activeItem = () => PALETTE.find(p => p.color === state.color && (p.id || null) === (state.materialId || null)) || PALETTE[0];
 
 const state = {
   docId: null,
@@ -25,7 +27,8 @@ const state = {
   z: 0,
   px: 0, py: 0,     // world->screen offset (screen = world*scale + offset)
   tool: 'pan',
-  color: PALETTE[0].color,
+  color: FLAT_FALLBACK[0].color,   // set from the palette at boot
+  materialId: null,
   painting: null,   // in-progress stroke: Set of "x,y"
   pendingFlush: null,
 };
@@ -165,7 +168,7 @@ function setTool(tool) {
   }
   canvas.classList.toggle('painting', tool !== 'pan');
   statusEl.textContent =
-    tool === 'paint' ? `Painting ${PALETTE.find(p => p.color === state.color)?.name || state.color}`
+    tool === 'paint' ? `Painting ${activeItem().name}`
     : tool in EDGE_TOOLS ? `Click a cell edge to place a ${tool}; click it again to remove`
     : 'Pan (drag) · wheel zooms';
 }
@@ -218,11 +221,12 @@ async function flushStroke() {
     return { x, y };
   });
   state.painting = null;
-  const spaceId = 'sp_' + state.color.slice(1).toLowerCase();
+  const item = activeItem();
+  const spaceId = item.id || ('sp_' + item.color.slice(1).toLowerCase());
   const ops = [{
     t: 'batch',
     ops: [
-      { t: 'upsert_space', space: { id: spaceId, name: PALETTE.find(p => p.color === state.color)?.name || spaceId, color: state.color, kind: 'room' } },
+      { t: 'upsert_space', space: { id: spaceId, name: item.name, color: item.color, kind: 'room', ...(item.id ? { material: item.id } : {}) } },
       { t: 'paint_cells', cells, space: spaceId },
     ],
   }];
@@ -234,6 +238,30 @@ async function flushStroke() {
   } catch (e) {
     statusEl.textContent = `Error: ${e.message}`;
   }
+}
+
+// Every cell on the segment between two cells (Bresenham), so a fast stroke
+// paints a continuous line instead of one cell per pointer event.
+function cellsOnLine(x0, y0, x1, y1) {
+  const out = [];
+  const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0);
+  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+  let err = dx + dy, x = x0, y = y0;
+  for (;;) {
+    out.push([x, y]);
+    if (x === x1 && y === y1) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) { err += dy; x += sx; }
+    if (e2 <= dx) { err += dx; y += sy; }
+  }
+  return out;
+}
+
+function paintTo(cx, cy) {
+  const last = state.lastCell;
+  const cells = last ? cellsOnLine(last[0], last[1], cx, cy) : [[cx, cy]];
+  for (const [x, y] of cells) queuePaint(x, y);
+  state.lastCell = [cx, cy];
 }
 
 function queuePaint(cellX, cellY) {
@@ -262,7 +290,8 @@ canvas.addEventListener('pointerdown', (e) => {
   if (wantPaint) {
     const [cx, cy] = worldToCell(wx, wy);
     state.painting = new Set();
-    queuePaint(cx, cy);
+    state.lastCell = null;
+    paintTo(cx, cy);
     dragging = { painting: true };
   } else {
     dragging = { sx: e.offsetX, sy: e.offsetY, px: state.px, py: state.py, moved: false };
@@ -275,7 +304,7 @@ canvas.addEventListener('pointermove', (e) => {
   if (dragging.painting) {
     const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
     const [cx, cy] = worldToCell(wx, wy);
-    queuePaint(cx, cy);
+    paintTo(cx, cy);
   } else {
     const dx = e.offsetX - dragging.sx;
     const dy = e.offsetY - dragging.sy;
@@ -289,6 +318,7 @@ canvas.addEventListener('pointermove', (e) => {
 canvas.addEventListener('pointerup', (e) => {
   if (dragging && dragging.painting) {
     clearTimeout(state.pendingFlush);
+    state.lastCell = null;
     flushStroke();
   }
   dragging = null;
@@ -498,7 +528,7 @@ function goToRoom(s) {
 function renameRoom(s) {
   const name = window.prompt('Rename room', s.name);
   if (name === null || !name.trim() || name.trim() === s.name) return;
-  postOps([{ t: 'upsert_space', space: { id: s.id, name: name.trim().slice(0, 60), color: s.color, kind: s.kind } }]);
+  postOps([{ t: 'upsert_space', space: { id: s.id, name: name.trim().slice(0, 60), color: s.color, kind: s.kind, ...(s.material ? { material: s.material } : {}) } }]);
 }
 
 treeEl.addEventListener('keydown', (e) => {
@@ -569,11 +599,13 @@ function buildPalette() {
   wrap.textContent = '';   // rebuilt on every pick: without this the swatches multiplied
   for (const item of PALETTE) {
     const sw = document.createElement('span');
-    sw.className = 'swatch' + (item.color === state.color ? ' active' : '');
+    const active = item.color === state.color && (item.id || null) === (state.materialId || null);
+    sw.className = 'swatch' + (active ? ' active' : '');
     sw.style.background = item.color;
     sw.title = item.name;
     sw.onclick = () => {
       state.color = item.color;
+      state.materialId = item.id || null;
       buildPalette();
       setTool('paint');
     };
@@ -586,6 +618,14 @@ window.addEventListener('resize', resizeCanvas);
 // ---------- boot ----------
 
 (async function boot() {
+  try {
+    const { materials } = await api('GET', '/api/materials');
+    if (materials.length) {
+      PALETTE = materials.map(m => ({ id: m.id, color: m.color, name: m.name }));
+      state.color = PALETTE[0].color;
+      state.materialId = PALETTE[0].id;
+    }
+  } catch { /* flat palette */ }
   buildPalette();
   resizeCanvas();
   try {

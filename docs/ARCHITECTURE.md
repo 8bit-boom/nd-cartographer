@@ -97,6 +97,33 @@ cannot express), and `publish` started a nested tokio runtime.
   the keyboard-complete path the plan calls "the accessible map". Not yet:
   zones, drag-and-drop, multi-select bulk ops (M3).
 
+- **`ndcart-paint`** (M1b begins) — materials, not colours. A material is a
+  procedural pattern (tiles, planks, cobble, mottled ground, water) sampled in
+  *world cell coordinates*, so it looks the same at every zoom, in every tile and
+  in a full-map export: no seams, nothing to ship. Deterministic from
+  `(material, u, v, seed)` using only `+ - * /`, `floor` and integer hashing (no
+  `sin`/`powf`), so output does not drift between platforms. Adjacent materials
+  **blend automatically**: the boundary jitter enters with opposite signs on the
+  two sides of an edge, so the join is continuous by construction (the first
+  version added jitter to the weight and left a seam — caught by test). The
+  **first-party starter pack** is ten procedural materials (stone floor,
+  flagstone, wood planks, cobblestone, grass, dirt, sand, water, metal deck, neon
+  tile): MIT, nothing to license or redistribute.
+  A space carries an optional `material` (validated: 1–40 chars of `a-z0-9_`;
+  old documents stay flat; an unknown id falls back to the flat `color`).
+  `GET /api/materials` feeds the UI palette. Tests: a tile equals the matching
+  crop of the full render; the blend is continuous across an edge; materials are
+  textured, distinguishable and stay near their base colour.
+  **Budget (plan §6):** the full-map bake at 32 px/cell, every cell bordering a
+  different material (the worst case), runs at ~2.4 s per 10 Mpx in release — a
+  full 200x140 map is about 7 s against the 30 s budget. `ndcart bench [--ppc N]`
+  measures it and asserts the budget. Textured pictures are big as lossless
+  PNG/WebP (17 MB for that slice), so the cap-fitting step and, still to do,
+  lossy WebP matter more now.
+  *Not yet in M1b:* brush engine (pressure/tilt, round/pattern/scatter brushes),
+  stamps with shadows, eraser/roughen. The UI paints with the existing cell tool,
+  now interpolated so fast strokes no longer skip cells.
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

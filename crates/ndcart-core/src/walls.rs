@@ -252,6 +252,7 @@ mod tests {
             name: space.to_string(),
             color: "#112233".into(),
             kind: SpaceKind::Room,
+            material: None,
         })
         .unwrap();
         let keys: Vec<_> = cells.iter().map(|(x, y)| CellKey::new(*x, *y)).collect();
@@ -284,6 +285,7 @@ mod tests {
             name: "b".into(),
             color: "#445566".into(),
             kind: SpaceKind::Room,
+            material: None,
         })
         .unwrap();
         g.paint(&[CellKey::new(1, 0)], Some("b")).unwrap();
