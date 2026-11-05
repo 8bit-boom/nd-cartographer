@@ -104,6 +104,25 @@ pub struct PublishReport {
     pub steps: Vec<&'static str>,
 }
 
+/// A region (world) map for nd-world's image-map viewer: the baked picture plus
+/// its markers and regions as the viewer's own overlay JSON (`lat`/`lng` are
+/// Leaflet CRS.Simple: `lat` counts up from the bottom, `lng` along the width).
+pub struct PublishRegion {
+    pub name: String,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub image: Vec<u8>,
+    pub image_ext: String,
+    pub markers: Vec<Value>,
+    pub regions: Vec<Value>,
+    /// Replace the map's marker/region overlay with these. On a re-publish this
+    /// discards markers added by hand in nd-world (there is no JSON read route
+    /// to merge with), so it can be switched off.
+    pub replace_overlay: bool,
+}
+
+pub const OVERLAY_CAP: usize = 500;
+
 pub struct Bridge {
     http: Client,
     base: String,
@@ -378,6 +397,116 @@ impl Bridge {
         if let Some(rooms) = &map.rooms {
             self.json_step("rooms", &path("rooms"), rooms, &mut report, &part, true)
                 .await?;
+        }
+        Ok(report)
+    }
+
+    fn precheck_region(map: &PublishRegion) -> Result<(), BridgeError> {
+        let bad = |m: String| Err(BridgeError::Precheck(m));
+        if map.markers.len() > OVERLAY_CAP || map.regions.len() > OVERLAY_CAP {
+            return bad(format!(
+                "{} markers / {} regions; nd-world keeps at most {OVERLAY_CAP} of each",
+                map.markers.len(),
+                map.regions.len()
+            ));
+        }
+        if !(100..=20_000).contains(&map.width_px) || !(100..=20_000).contains(&map.height_px) {
+            return bad("the picture must be 100..=20000 px a side for nd-world".into());
+        }
+        if !matches!(
+            map.image_ext.as_str(),
+            "webp" | "avif" | "png" | "jpg" | "jpeg" | "gif"
+        ) {
+            return bad(format!(
+                "picture type {:?} is not one nd-world accepts",
+                map.image_ext
+            ));
+        }
+        if map.image.is_empty() {
+            return bad("no picture to publish".into());
+        }
+        if map.name.trim().is_empty() {
+            return bad("the map needs a name".into());
+        }
+        Ok(())
+    }
+
+    /// Publish a region map as an nd-world image map: create it (or, with
+    /// `existing_slug`, replace its picture), then set its markers and regions.
+    pub async fn publish_region(
+        &self,
+        map: &PublishRegion,
+        existing_slug: Option<&str>,
+    ) -> Result<PublishReport, BridgeError> {
+        Self::precheck_region(map)?;
+        let mut report = PublishReport::default();
+        let mime = mime_for(&map.image_ext).unwrap_or("application/octet-stream");
+        let file = |m: &PublishRegion| {
+            multipart::Part::bytes(m.image.clone())
+                .file_name(format!("map.{}", m.image_ext))
+                .mime_str(mime)
+                .map_err(|e| BridgeError::Protocol(e.to_string()))
+        };
+        let slug = match existing_slug {
+            Some(s) => s.to_string(),
+            None => {
+                let form = multipart::Form::new()
+                    .text("name", map.name.trim().to_string())
+                    .text("width", map.width_px.to_string())
+                    .text("height", map.height_px.to_string())
+                    .part("image_file", file(map)?);
+                let resp = check(
+                    self.send(self.req(Method::POST, "/maps/new").multipart(form))
+                        .await?,
+                )
+                .await?;
+                let loc = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| BridgeError::Protocol("map creation gave no Location".into()))?;
+                let slug = loc
+                    .split('?')
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| BridgeError::Protocol(format!("odd Location {loc:?}")))?
+                    .to_string();
+                report.created = true;
+                report.steps.push("create");
+                slug
+            }
+        };
+        report.slug = slug.clone();
+        let part = |step: &'static str, cause: BridgeError| BridgeError::Partial {
+            slug: slug.clone(),
+            step,
+            cause: Box::new(cause),
+        };
+        if !report.created {
+            // A re-publish: swap the picture in place.
+            let up = self
+                .req(Method::POST, &format!("/maps/{slug}/upload"))
+                .multipart(multipart::Form::new().part("file", file(map)?));
+            check(self.send(up).await.map_err(|e| part("picture", e))?)
+                .await
+                .map_err(|e| part("picture", e))?;
+            report.steps.push("picture");
+        }
+        if report.created || map.replace_overlay {
+            let body = json!({"custom_markers": map.markers, "custom_regions": map.regions});
+            self.json_step(
+                "overlay",
+                &format!("/api/maps/{slug}/overlay"),
+                &body,
+                &mut report,
+                &part,
+                false,
+            )
+            .await?;
         }
         Ok(report)
     }

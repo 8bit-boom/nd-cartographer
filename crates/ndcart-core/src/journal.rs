@@ -110,6 +110,17 @@ pub enum Op {
     SetCanvas {
         canvas: Option<[u32; 2]>,
     },
+    /// Add a marker / region / route, or replace one with the same kind and id
+    /// (move, recolour, rename) keeping its z-order.
+    PutOverlay {
+        item: crate::overlay::OverlayItem,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+    },
+    RemoveOverlay {
+        kind: crate::overlay::OverlayKind,
+        id: String,
+    },
     /// Several ops as one undoable step.
     Batch {
         ops: Vec<Op>,
@@ -318,6 +329,25 @@ impl Op {
             Op::SetCanvas { .. } => Ok(Op::SetCanvas {
                 canvas: floor.canvas,
             }),
+            Op::PutOverlay { item, .. } => Ok(match floor.find_overlay(item.kind(), item.id()) {
+                Some((_, prev)) => Op::PutOverlay {
+                    item: prev,
+                    index: None,
+                },
+                None => Op::RemoveOverlay {
+                    kind: item.kind(),
+                    id: item.id().to_string(),
+                },
+            }),
+            Op::RemoveOverlay { kind, id } => {
+                let (index, item) = floor
+                    .find_overlay(*kind, id)
+                    .ok_or_else(|| CoreError::NotFound(format!("{kind:?} {id}")))?;
+                Ok(Op::PutOverlay {
+                    item,
+                    index: Some(index),
+                })
+            }
             Op::Batch { ops } => {
                 // Compute the batch inverse by walking a scratch copy of the
                 // floor forward through the batch.
@@ -379,6 +409,8 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         } => floor.add_river(river.clone(), *carve, *index)?,
         Op::RemoveRiver { id } => floor.remove_river(id)?,
         Op::SetCanvas { canvas } => floor.set_canvas(*canvas)?,
+        Op::PutOverlay { item, index } => floor.put_overlay(item.clone(), *index)?,
+        Op::RemoveOverlay { kind, id } => floor.remove_overlay(*kind, id)?,
         Op::Batch { ops } => {
             for op in ops {
                 apply_op(floor, op)?;
@@ -1205,5 +1237,154 @@ mod tests {
             assert_eq!(f, before, "a refused op leaves the floor untouched");
         }
         assert_eq!(j.len(), n);
+    }
+
+    #[test]
+    fn overlay_items_add_replace_remove_and_undo_exactly() {
+        use crate::overlay::{OverlayItem as I, OverlayKind as K};
+        let m = |id: &str, x: f32| crate::overlay::Marker {
+            id: id.into(),
+            x,
+            y: 1.0,
+            label: id.into(),
+            note: String::new(),
+            color: "#e8b030".into(),
+            link_schematic: None,
+        };
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        let mut j = Journal::default();
+        for (id, x) in [("a", 1.0), ("b", 2.0), ("c", 3.0)] {
+            j.push(
+                &mut f,
+                &Op::PutOverlay {
+                    item: I::Marker(m(id, x)),
+                    index: None,
+                },
+            )
+            .unwrap();
+        }
+        // Replacing keeps the z-order; undo restores the old placement.
+        j.push(
+            &mut f,
+            &Op::PutOverlay {
+                item: I::Marker(m("b", 9.0)),
+                index: None,
+            },
+        )
+        .unwrap();
+        assert_eq!((f.markers[1].id.as_str(), f.markers[1].x), ("b", 9.0));
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(f.markers[1].x, 2.0);
+        // Remove the middle one; undo returns it to the middle.
+        j.push(
+            &mut f,
+            &Op::RemoveOverlay {
+                kind: K::Marker,
+                id: "b".into(),
+            },
+        )
+        .unwrap();
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(
+            f.markers.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
+        // Kinds are separate namespaces: a region and a marker may share an id.
+        let r = crate::overlay::Region {
+            id: "a".into(),
+            name: "R".into(),
+            points: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]],
+            color: "#c0504d".into(),
+            opacity: 0.3,
+            hatch: true,
+        };
+        j.push(
+            &mut f,
+            &Op::PutOverlay {
+                item: I::Region(r),
+                index: None,
+            },
+        )
+        .unwrap();
+        assert_eq!((f.markers.len(), f.regions.len()), (3, 1));
+        j.undo_last(&mut f).unwrap();
+        assert!(f.regions.is_empty());
+        // Refusals are never journaled; removing a ghost is an error.
+        let n = j.len();
+        let mut bad = m("z", 0.0);
+        bad.x = f32::NAN;
+        assert!(j
+            .push(
+                &mut f,
+                &Op::PutOverlay {
+                    item: I::Marker(bad),
+                    index: None
+                }
+            )
+            .is_err());
+        assert!(j
+            .push(
+                &mut f,
+                &Op::RemoveOverlay {
+                    kind: K::Route,
+                    id: "ghost".into()
+                }
+            )
+            .is_err());
+        assert_eq!(j.len(), n);
+        // Replay (with its undos) reproduces the floor.
+        let mut fresh = FloorDoc::new("f".into(), "G".into());
+        Journal::from_ndjson(&j.to_ndjson())
+            .unwrap()
+            .replay_into(&mut fresh)
+            .unwrap();
+        assert_eq!(fresh.markers, f.markers);
+        assert_eq!(fresh.regions, f.regions);
+    }
+
+    #[test]
+    fn overlay_lists_are_capped() {
+        use crate::overlay::{OverlayItem as I, MAX_MARKERS};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        for i in 0..MAX_MARKERS {
+            f.put_overlay(
+                I::Marker(crate::overlay::Marker {
+                    id: format!("m{i}"),
+                    x: 0.0,
+                    y: 0.0,
+                    label: String::new(),
+                    note: String::new(),
+                    color: "#e8b030".into(),
+                    link_schematic: None,
+                }),
+                None,
+            )
+            .unwrap();
+        }
+        let extra = I::Marker(crate::overlay::Marker {
+            id: "extra".into(),
+            x: 0.0,
+            y: 0.0,
+            label: String::new(),
+            note: String::new(),
+            color: "#e8b030".into(),
+            link_schematic: None,
+        });
+        assert!(
+            f.put_overlay(extra, None).is_err(),
+            "nd-world would refuse a 501st marker"
+        );
+        // Replacing an existing one at the cap is fine.
+        let again = I::Marker(crate::overlay::Marker {
+            id: "m3".into(),
+            x: 5.0,
+            y: 0.0,
+            label: "moved".into(),
+            note: String::new(),
+            color: "#e8b030".into(),
+            link_schematic: None,
+        });
+        f.put_overlay(again, None).unwrap();
+        assert_eq!(f.markers[3].label, "moved");
     }
 }

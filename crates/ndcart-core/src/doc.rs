@@ -196,6 +196,15 @@ pub struct FloorDoc {
     /// at least this big even where nothing is painted (open sea, empty land).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas: Option<[u32; 2]>,
+    /// Points of interest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<crate::overlay::Marker>,
+    /// Political regions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<crate::overlay::Region>,
+    /// Roads, trade routes, journeys.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<crate::overlay::Route>,
 }
 
 pub fn now_iso() -> String {
@@ -232,6 +241,9 @@ impl FloorDoc {
             terrain: None,
             rivers: Vec::new(),
             canvas: None,
+            markers: Vec::new(),
+            regions: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -342,6 +354,88 @@ impl FloorDoc {
             .ok_or_else(|| CoreError::NotFound(format!("river {id}")))?;
         self.rivers.remove(i);
         Ok(())
+    }
+
+    /// Add or replace an overlay item (same kind and id replaces in place, keeping
+    /// its z-order; otherwise it is inserted at `index` or appended).
+    pub fn put_overlay(
+        &mut self,
+        item: crate::overlay::OverlayItem,
+        index: Option<usize>,
+    ) -> CoreResult<()> {
+        use crate::overlay::{OverlayItem as I, MAX_MARKERS, MAX_REGIONS, MAX_ROUTES};
+        item.validate()?;
+        macro_rules! put {
+            ($list:expr, $v:expr, $cap:expr, $what:expr) => {{
+                if let Some(slot) = $list.iter_mut().find(|x| x.id == $v.id) {
+                    *slot = $v;
+                } else {
+                    if $list.len() >= $cap {
+                        return Err(CoreError::CapExceeded(format!(
+                            "at most {} {}",
+                            $cap, $what
+                        )));
+                    }
+                    let at = index.unwrap_or($list.len()).min($list.len());
+                    $list.insert(at, $v);
+                }
+            }};
+        }
+        match item {
+            I::Marker(m) => put!(self.markers, m, MAX_MARKERS, "markers"),
+            I::Region(r) => put!(self.regions, r, MAX_REGIONS, "regions"),
+            I::Route(r) => put!(self.routes, r, MAX_ROUTES, "routes"),
+        }
+        Ok(())
+    }
+
+    pub fn remove_overlay(
+        &mut self,
+        kind: crate::overlay::OverlayKind,
+        id: &str,
+    ) -> CoreResult<()> {
+        use crate::overlay::OverlayKind as K;
+        macro_rules! rm {
+            ($list:expr) => {{
+                let i = $list
+                    .iter()
+                    .position(|x| x.id == id)
+                    .ok_or_else(|| CoreError::NotFound(format!("{kind:?} {id}")))?;
+                $list.remove(i);
+            }};
+        }
+        match kind {
+            K::Marker => rm!(self.markers),
+            K::Region => rm!(self.regions),
+            K::Route => rm!(self.routes),
+        }
+        Ok(())
+    }
+
+    /// The overlay item with this kind and id, and its z-index.
+    pub fn find_overlay(
+        &self,
+        kind: crate::overlay::OverlayKind,
+        id: &str,
+    ) -> Option<(usize, crate::overlay::OverlayItem)> {
+        use crate::overlay::{OverlayItem as I, OverlayKind as K};
+        match kind {
+            K::Marker => self
+                .markers
+                .iter()
+                .position(|x| x.id == id)
+                .map(|i| (i, I::Marker(self.markers[i].clone()))),
+            K::Region => self
+                .regions
+                .iter()
+                .position(|x| x.id == id)
+                .map(|i| (i, I::Region(self.regions[i].clone()))),
+            K::Route => self
+                .routes
+                .iter()
+                .position(|x| x.id == id)
+                .map(|i| (i, I::Route(self.routes[i].clone()))),
+        }
     }
 
     pub fn set_canvas(&mut self, canvas: Option<[u32; 2]>) -> CoreResult<()> {

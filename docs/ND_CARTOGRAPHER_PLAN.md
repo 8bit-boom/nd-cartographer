@@ -1051,6 +1051,22 @@ tile-identical (see ARCHITECTURE). Stamps with drop shadows remain.
 
 **Resolved:** wall ids are now stable (derived from the edge), so a re-publish keeps nd-world's runtime door state for any door that has not moved.
 
+**Publish B facts (read from the handlers, then confirmed live on both images):**
+- `POST /maps/new` is a multipart form (`name`, `width`, `height`, `image_file`) that answers
+  `303 /maps/{slug}`. It **silently ignores a picture whose extension is not allowed** and makes
+  a map with no image, so the bridge refuses unsupported types before the first request.
+  `POST /maps/{slug}/upload` swaps the picture in place (WebP and AVIF are accepted).
+- **The plan was wrong that the importer "merges" overlays**: `map_overlay` *appends*
+  (`markers.extend`), so re-publishing through it would duplicate every marker. Overlays are
+  therefore set with the replace route `POST /api/maps/{slug}/overlay`
+  (`{custom_markers, custom_regions}`, ≤ 500 each), which both images serve. There is no JSON
+  read route (the viewer inlines the overlay into the page), so a replace discards markers added
+  by hand in nd-world; `ndcart publish --keep-overlay` skips it on a re-publish.
+- Coordinates are Leaflet `CRS.Simple` over `[[0,0],[height,width]]`: `lat` counts up from the
+  bottom of the picture (`lat = height_px - y_px`), `lng` is `x_px`. Regions are
+  `{points:[[lat,lng],…], name, color, opacity}`. nd-world has **no route overlay**, so routes
+  appear in the baked picture only.
+
 **Image formats** — exports support PNG, WebP and AVIF (owner request). UVTT pictures
 stay PNG/WebP (the consumers can't read AVIF). Lossy WebP for cap-fitting is a
 follow-up (needs libwebp); until then cap-fitting uses AVIF for plain exports and

@@ -435,6 +435,199 @@ pub fn stamp_icon(def: &ndcart_paint::StampDef, px: u32) -> Vec<u8> {
     pm.encode_png().expect("png")
 }
 
+/// Regions, then routes, then marker pins, over everything. Paths are built in
+/// WORLD pixels and shifted by an exact integer translation, so a tile and the
+/// matching crop of the full render rasterize identical geometry.
+fn draw_overlay(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+    use tiny_skia::{
+        FillRule, LineCap, LineJoin, Mask, Paint, PathBuilder, Stroke, StrokeDash, Transform,
+    };
+    if floor.regions.is_empty() && floor.routes.is_empty() && floor.markers.is_empty() {
+        return;
+    }
+    let s = ppc as f32;
+    let (w, h) = (pixmap.width(), pixmap.height());
+    let shift = Transform::from_translate(-(x0 as f32), -(y0 as f32));
+    let world = |p: &[f32; 2]| (p[0] * s, p[1] * s);
+    let on_screen = |lo: (f32, f32), hi: (f32, f32), pad: f32| {
+        hi.0 + pad >= x0 as f32
+            && hi.1 + pad >= y0 as f32
+            && lo.0 - pad <= (x0 + i64::from(w)) as f32
+            && lo.1 - pad <= (y0 + i64::from(h)) as f32
+    };
+    let bounds = |pts: &[[f32; 2]]| {
+        let (mut lo, mut hi) = ((f32::MAX, f32::MAX), (f32::MIN, f32::MIN));
+        for p in pts {
+            let (x, y) = world(p);
+            lo = (lo.0.min(x), lo.1.min(y));
+            hi = (hi.0.max(x), hi.1.max(y));
+        }
+        (lo, hi)
+    };
+    let paint_of = |rgb: [u8; 3], alpha: f32| {
+        let mut p = Paint::default();
+        p.set_color_rgba8(
+            rgb[0],
+            rgb[1],
+            rgb[2],
+            (alpha.clamp(0.0, 1.0) * 255.0).round() as u8,
+        );
+        p.anti_alias = true;
+        p
+    };
+
+    for r in &floor.regions {
+        let (lo, hi) = bounds(&r.points);
+        if !on_screen(lo, hi, s) {
+            continue;
+        }
+        let mut pb = PathBuilder::new();
+        let (fx, fy) = world(&r.points[0]);
+        pb.move_to(fx, fy);
+        for p in &r.points[1..] {
+            let (x, y) = world(p);
+            pb.line_to(x, y);
+        }
+        pb.close();
+        let Some(path) = pb.finish() else { continue };
+        let rgb = parse_hex(&r.color);
+        pixmap.fill_path(
+            &path,
+            &paint_of(rgb, r.opacity),
+            FillRule::Winding,
+            shift,
+            None,
+        );
+        if r.hatch {
+            // Diagonal lines on a world-fixed grid, clipped to the polygon.
+            if let Some(mut mask) = Mask::new(w, h) {
+                mask.fill_path(&path, FillRule::Winding, true, shift);
+                let step = (0.35 * s).max(4.0);
+                let mut hb = PathBuilder::new();
+                let mut k = ((lo.0 + lo.1) / step).floor() * step;
+                while k <= hi.0 + hi.1 {
+                    // the line x + y = k, from the top edge of the region to its bottom edge
+                    hb.move_to(k - lo.1, lo.1);
+                    hb.line_to(k - hi.1, hi.1);
+                    k += step;
+                }
+                if let Some(lines) = hb.finish() {
+                    let st = Stroke {
+                        width: (0.04 * s).max(1.0),
+                        ..Default::default()
+                    };
+                    pixmap.stroke_path(
+                        &lines,
+                        &paint_of(rgb, (r.opacity + 0.35).min(0.9)),
+                        &st,
+                        shift,
+                        Some(&mask),
+                    );
+                }
+            }
+        }
+        let border = Stroke {
+            width: (0.07 * s).max(1.5),
+            line_join: LineJoin::Round,
+            ..Default::default()
+        };
+        pixmap.stroke_path(
+            &path,
+            &paint_of(ndcart_paint::shade(rgb, 0.7), 0.95),
+            &border,
+            shift,
+            None,
+        );
+    }
+
+    for r in &floor.routes {
+        let (lo, hi) = bounds(&r.points);
+        if !on_screen(lo, hi, s) {
+            continue;
+        }
+        let mut pb = PathBuilder::new();
+        let (fx, fy) = world(&r.points[0]);
+        pb.move_to(fx, fy);
+        for p in &r.points[1..] {
+            let (x, y) = world(p);
+            pb.line_to(x, y);
+        }
+        let Some(path) = pb.finish() else { continue };
+        let width = (r.width * s).max(1.5);
+        let mut st = Stroke {
+            width,
+            line_cap: LineCap::Round,
+            line_join: LineJoin::Round,
+            ..Default::default()
+        };
+        if r.dashed {
+            st.dash = StrokeDash::new(vec![width * 3.0, width * 2.0], 0.0);
+        }
+        let rgb = parse_hex(&r.color);
+        pixmap.stroke_path(&path, &paint_of(rgb, 0.95), &st, shift, None);
+        // Waymarks: a dot every 3 cells along the route, measured from its start.
+        let every = 3.0 * s;
+        let (mut walked, mut next) = (0.0f32, every);
+        for seg in r.points.windows(2) {
+            let (a, b) = (world(&seg[0]), world(&seg[1]));
+            let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+            while next <= walked + len && len > 0.0 {
+                let t = (next - walked) / len;
+                let (cx, cy) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                let mut dot = PathBuilder::new();
+                dot.push_circle(cx, cy, (width * 0.9).max(2.0));
+                if let Some(d) = dot.finish() {
+                    pixmap.fill_path(
+                        &d,
+                        &paint_of(ndcart_paint::shade(rgb, 0.8), 1.0),
+                        FillRule::Winding,
+                        shift,
+                        None,
+                    );
+                }
+                next += every;
+            }
+            walked += len;
+        }
+    }
+
+    for m in &floor.markers {
+        let (cx, cy) = world(&[m.x, m.y]);
+        let rad = (0.3 * s).max(4.5);
+        if !on_screen((cx, cy), (cx, cy), rad * 2.0) {
+            continue;
+        }
+        let rgb = parse_hex(&m.color);
+        let mut ring = PathBuilder::new();
+        ring.push_circle(cx, cy, rad + 1.5);
+        if let Some(p) = ring.finish() {
+            pixmap.fill_path(
+                &p,
+                &paint_of([255, 255, 255], 0.95),
+                FillRule::Winding,
+                shift,
+                None,
+            );
+        }
+        let mut body = PathBuilder::new();
+        body.push_circle(cx, cy, rad);
+        if let Some(p) = body.finish() {
+            pixmap.fill_path(&p, &paint_of(rgb, 1.0), FillRule::Winding, shift, None);
+        }
+        let mut core = PathBuilder::new();
+        core.push_circle(cx, cy, rad * 0.35);
+        if let Some(p) = core.finish() {
+            pixmap.fill_path(
+                &p,
+                &paint_of(ndcart_paint::shade(rgb, 0.45), 1.0),
+                FillRule::Winding,
+                shift,
+                None,
+            );
+        }
+    }
+}
+
 /// Shade the heightmap into the region: every pixel is a pure function of its
 /// world position, so tiles and the full render agree exactly.
 fn draw_terrain(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
@@ -756,6 +949,7 @@ fn render_pixmap(
 
     apply_strokes(&mut pixmap, floor, ppc, x0, y0);
     apply_stamps(&mut pixmap, floor, ppc, x0, y0);
+    draw_overlay(&mut pixmap, floor, ppc, x0, y0);
 
     // Walls on top: stroke width grows with zoom, min 1px, so z0 reads.
     let mut wall_paint = tiny_skia::Paint {
@@ -1730,6 +1924,149 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn overlay_floor() -> FloorDoc {
+        use ndcart_core::overlay::{Marker, OverlayItem as I, Region, Route};
+        let mut f = light_floor(); // 8x8 light-grey room
+        f.put_overlay(
+            I::Region(Region {
+                id: "r".into(),
+                name: "Kingdom".into(),
+                points: vec![[1.0, 1.0], [4.0, 1.0], [4.0, 4.0], [1.0, 4.0]],
+                color: "#c0504d".into(),
+                opacity: 0.5,
+                hatch: false,
+            }),
+            None,
+        )
+        .unwrap();
+        f.put_overlay(
+            I::Route(Route {
+                id: "t".into(),
+                name: "Road".into(),
+                points: vec![[0.5, 6.0], [7.5, 6.0]],
+                color: "#202020".into(),
+                width: 0.2,
+                dashed: true,
+            }),
+            None,
+        )
+        .unwrap();
+        f.put_overlay(
+            I::Marker(Marker {
+                id: "m".into(),
+                x: 6.0,
+                y: 2.0,
+                label: "Port".into(),
+                note: String::new(),
+                color: "#e8b030".into(),
+                link_schematic: None,
+            }),
+            None,
+        )
+        .unwrap();
+        f
+    }
+
+    #[test]
+    fn regions_routes_and_markers_draw_where_they_say() {
+        let f = overlay_floor();
+        let pm = bake_stamped(&f, 32);
+        let clear = bake_stamped(&light_floor(), 32);
+        // The region tints its interior (50% of #c0504d over #d0d0d0) and not outside it.
+        let inside = rgb(&pm, 2 * 32 + 16, 2 * 32 + 16);
+        assert!(inside[0] > inside[1] + 30, "reddish: {inside:?}");
+        assert_eq!(
+            rgb(&pm, 6 * 32, 2 * 32 + 3 * 32 - 40),
+            rgb(&clear, 6 * 32, 2 * 32 + 3 * 32 - 40),
+            "outside is untouched"
+        );
+        // The dashed route leaves gaps: along its line some pixels are dark, some are the floor.
+        let row = 6 * 32;
+        let samples: Vec<[u8; 3]> = (40..230).map(|x| rgb(&pm, x, row)).collect();
+        let dark = samples.iter().filter(|c| c[0] < 90).count();
+        let light = samples.iter().filter(|c| c[0] > 190).count();
+        assert!(
+            dark > 20 && light > 20,
+            "dashed: {dark} dark, {light} light"
+        );
+        // The marker pin: gold body, with a darker core at the centre.
+        // the pin is 9.6 px in radius at 32 px/cell and its dark core 3.4 px
+        let body = rgb(&pm, 6 * 32 + 6, 2 * 32);
+        assert!(body[0] > 200 && body[2] < 90, "gold: {body:?}");
+        let core = rgb(&pm, 6 * 32, 2 * 32);
+        assert!(core[0] < body[0], "darker core: {core:?}");
+    }
+
+    #[test]
+    fn hatching_adds_lines_inside_the_region_only() {
+        use ndcart_core::overlay::{OverlayItem as I, Region};
+        let mk = |hatch: bool| {
+            let mut f = light_floor();
+            f.put_overlay(
+                I::Region(Region {
+                    id: "r".into(),
+                    name: "R".into(),
+                    points: vec![[1.0, 1.0], [5.0, 1.0], [5.0, 5.0], [1.0, 5.0]],
+                    color: "#3050c0".into(),
+                    opacity: 0.2,
+                    hatch,
+                }),
+                None,
+            )
+            .unwrap();
+            bake_stamped(&f, 32)
+        };
+        let (plain, hatched) = (mk(false), mk(true));
+        let (mut differing_inside, mut differing_outside) = (0, 0);
+        for y in 0..256u32 {
+            for x in 0..256u32 {
+                if plain.pixel(x, y) != hatched.pixel(x, y) {
+                    // The polygon spans 32..160 px. Its border band (a few px either side) is
+                    // where the anti-aliased clip meets the line ends, so judge "inside" by the
+                    // interior and "outside" by clear air beyond a margin.
+                    let inside = (34..158).contains(&x) && (34..158).contains(&y);
+                    let clear_outside = !(28..164).contains(&x) || !(28..164).contains(&y);
+                    if !inside && !clear_outside {
+                        continue;
+                    }
+                    if inside {
+                        differing_inside += 1
+                    } else {
+                        differing_outside += 1
+                    }
+                }
+            }
+        }
+        assert!(differing_inside > 400, "lines inside: {differing_inside}");
+        assert_eq!(
+            differing_outside, 0,
+            "no hatching outside the polygon (border pixels aside)"
+        );
+    }
+
+    #[test]
+    fn overlays_bake_the_same_in_tiles_and_in_the_full_render() {
+        let f = overlay_floor();
+        let (png, ..) = bake_full_stroked(&f, 64);
+        let full = decode(&png);
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
+            let mut worst = 0u8;
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    let (a, b) = (
+                        rgb(&tile, x, y),
+                        rgb(&full, tx as u32 * 256 + x, ty as u32 * 256 + y),
+                    );
+                    for k in 0..3 {
+                        worst = worst.max(a[k].abs_diff(b[k]));
+                    }
+                }
+            }
+            assert_eq!(worst, 0, "tile ({tx},{ty}) differs by {worst}");
         }
     }
 

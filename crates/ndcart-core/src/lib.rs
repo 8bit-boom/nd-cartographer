@@ -15,6 +15,7 @@ pub mod ids;
 pub mod journal;
 pub mod lint;
 pub mod outline;
+pub mod overlay;
 pub mod stamp;
 pub mod stroke;
 pub mod terrain;
@@ -27,6 +28,7 @@ pub use grid::{CellKey, Edge, EdgeKey, Mark, MarkKind, MarkState, RoomGrid, Spac
 pub use journal::{apply_op, Journal, Op};
 pub use lint::{blocks_publish, lint, Problem, Severity};
 pub use outline::{outline, Outline};
+pub use overlay::{Marker, OverlayItem, OverlayKind, Region, Route};
 pub use stamp::Stamp;
 pub use stroke::{BrushKind, Stroke, StrokeKind, StrokePoint};
 pub use terrain::{ChunkData, River, Terrain, TerrainMode, TerrainStroke, TerrainStyle};

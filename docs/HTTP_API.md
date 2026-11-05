@@ -42,6 +42,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 - `{"t":"add_stamp","stamp":{"id","asset":"crate","x","y","scale?":0.1-8,"rotation?","flip?","tint?":"#rrggbb","shadow?"},"index?"}`, `{"t":"update_stamp","stamp":{…same id…}}`, `{"t":"remove_stamp","id"}` — placed props (`GET /api/stamps` lists the pack)
 - `{"t":"set_underlay","underlay":{"asset":"<sha256>","x","y","w","h","opacity?"}|null}` — the picture behind everything (asset ids come from `POST /api/assets`); `{"t":"set_imported_walls","walls":[{"pts":[[x,y],…],"kind","state?"}]}` — walls not derived from rooms, in cells
 - Region maps: `{"t":"terrain_stroke","stroke":{"mode":"raise|lower|smooth|flatten|roughen","points":[[x,y],…],"radius":0.2-64,"strength":0-1,"seed?"}}`, `{"t":"terrain_set","fill","chunks":[{"cx","cy","data":"<base64 64x64 u16 LE>"}]}`, `{"t":"set_terrain_style","style":{"sea_level?","tint?","tint_amount?","saturation?","contrast?","brightness?","hillshade?","contour_interval?"}}`, `{"t":"add_river","river":{"id","name","points":[[x,y],…],"width":0.05-16},"carve?":true,"index?"}`, `{"t":"remove_river","id"}`, `{"t":"clear_terrain"}`, `{"t":"set_canvas","canvas":[cols,rows]|null}`
+- `{"t":"put_overlay","item":{"kind":"marker","id","x","y","label","note?","color?","link_schematic?"}|{"kind":"region","id","name","points":[[x,y],…],"color?","opacity?","hatch?"}|{"kind":"route","id","name","points":[[x,y],…],"color?","width?","dashed?"},"index?"}` (same kind+id replaces in place), `{"t":"remove_overlay","kind":"marker|region|route","id"}` — overlay items in cells (≤ 500 per kind)
 - `{"t":"remove_space","id"}`
 - `{"t":"set_mark","edge":{"cell":{"x","y"},"edge":"west|north|east|south"},"mark":{"kind":"opening|door|window|secret","state":"open|closed"}|null}`
 - `{"t":"add_light","light":{"id","x","y","range","color","intensity","on","label?"}}` — ≤ 60 per floor (nd-world publish cap)
@@ -116,7 +117,7 @@ first run, printed once). 401 without it.
 ndcart serve [--listen 127.0.0.1:8300] [--data-dir DIR]   # env: ND_CARTO_LISTEN, ND_CARTO_DATA_DIR
 ndcart bench [--ppc N]                                    # journal/walls/replay + full-map bake timings (asserts the 30 s budget)
 ndcart convert IN OUT [--format webp|avif|png] [--quality N]
-ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32] [--format webp] [--max-mb 20] [--audience gm|player] --data-dir DIR
+ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32] [--format webp] [--max-mb 20] [--audience gm|player] [--keep-overlay] --data-dir DIR
                                                           # password: ND_CARTO_PASSWORD / ND_CARTO_PASSWORD_FILE only
 ```
 

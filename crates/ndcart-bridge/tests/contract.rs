@@ -1,7 +1,7 @@
 //! Contract tests against a faked nd-world (plan §12: wiremock per route).
 //! They pin the request shapes read out of nd-world's own handlers.
 
-use ndcart_bridge::{Bridge, BridgeError, PublishMap};
+use ndcart_bridge::{Bridge, BridgeError, PublishMap, PublishRegion};
 use ndcart_core::{Light, Wall, WallKind};
 use serde_json::json;
 use wiremock::matchers::{body_json, method, path, query_param};
@@ -334,4 +334,141 @@ async fn status_codes_map_to_plain_errors() {
         dead.probe().await,
         Err(BridgeError::Unreachable(_))
     ));
+}
+
+fn region() -> PublishRegion {
+    PublishRegion {
+        name: "Archipelago".into(),
+        width_px: 1920,
+        height_px: 1280,
+        image: vec![9, 9, 9],
+        image_ext: "webp".into(),
+        markers: vec![
+            json!({"lat": 1000.0, "lng": 200.0, "label": "Port Neon", "note": "", "color": "#e8b030"}),
+        ],
+        regions: vec![
+            json!({"points": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]], "name": "Kingdom", "color": "#c0504d", "opacity": 0.3}),
+        ],
+        replace_overlay: true,
+    }
+}
+
+#[tokio::test]
+async fn publish_b_creates_an_image_map_then_sets_its_overlay() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/maps/new"))
+        .and(query_param("w", "neon"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/maps/archipelago"))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("POST")).and(path("/api/maps/archipelago/overlay")).and(query_param("w", "neon"))
+        .and(body_json(json!({
+            "custom_markers": [{"lat": 1000.0, "lng": 200.0, "label": "Port Neon", "note": "", "color": "#e8b030"}],
+            "custom_regions": [{"points": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]], "name": "Kingdom", "color": "#c0504d", "opacity": 0.3}]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1).mount(&s).await;
+    let r = Bridge::new(&s.uri(), Some("neon"))
+        .unwrap()
+        .publish_region(&region(), None)
+        .await
+        .unwrap();
+    assert_eq!((r.slug.as_str(), r.created), ("archipelago", true));
+    assert_eq!(r.steps, ["create", "overlay"]);
+    // /maps/new is a multipart form with exactly the fields nd-world reads.
+    let reqs = s.received_requests().await.unwrap();
+    let new = reqs.iter().find(|q| q.url.path() == "/maps/new").unwrap();
+    let body = String::from_utf8_lossy(&new.body);
+    for needle in [
+        "name=\"name\"",
+        "Archipelago",
+        "name=\"width\"",
+        "1920",
+        "name=\"height\"",
+        "1280",
+        "name=\"image_file\"",
+        "filename=\"map.webp\"",
+        "image/webp",
+    ] {
+        assert!(
+            body.contains(needle),
+            "missing {needle:?} in the create form"
+        );
+    }
+}
+
+#[tokio::test]
+async fn publish_b_republish_swaps_the_picture_and_can_leave_the_overlay_alone() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/maps/atlas/upload"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/maps/atlas"))
+        .expect(2)
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/maps/atlas/overlay"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    let r = b.publish_region(&region(), Some("atlas")).await.unwrap();
+    assert_eq!(
+        (r.created, r.steps.clone()),
+        (false, vec!["picture", "overlay"])
+    );
+    // Keeping the overlay: hand-made markers in nd-world survive, nothing is sent for it.
+    let mut keep = region();
+    keep.replace_overlay = false;
+    let r = b.publish_region(&keep, Some("atlas")).await.unwrap();
+    assert_eq!(r.steps, ["picture"]);
+}
+
+#[tokio::test]
+async fn publish_b_refuses_over_cap_before_any_request_and_reports_a_partial_failure() {
+    let s = MockServer::start().await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    let mut big = region();
+    big.markers = (0..501)
+        .map(|i| json!({"lat": 0, "lng": i, "label": "x"}))
+        .collect();
+    assert!(matches!(
+        b.publish_region(&big, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    let mut small = region();
+    small.width_px = 20;
+    assert!(matches!(
+        b.publish_region(&small, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    let mut odd = region();
+    odd.image_ext = "bmp".into();
+    assert!(matches!(
+        b.publish_region(&odd, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    assert!(s.received_requests().await.unwrap().is_empty());
+    // The map is made but the overlay is refused: the slug comes back to retry.
+    Mock::given(method("POST"))
+        .and(path("/maps/new"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/maps/atlas"))
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/maps/atlas/overlay"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({"detail": "Too many markers/regions"})),
+        )
+        .mount(&s)
+        .await;
+    match b.publish_region(&region(), None).await {
+        Err(BridgeError::Partial { slug, step, .. }) => {
+            assert_eq!((slug.as_str(), step), ("atlas", "overlay"))
+        }
+        other => panic!("expected Partial, got {other:?}"),
+    }
 }

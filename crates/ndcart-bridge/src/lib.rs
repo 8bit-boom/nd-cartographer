@@ -4,4 +4,4 @@
 pub mod client;
 pub mod rooms;
 
-pub use client::{Bridge, BridgeError, Probe, PublishMap, PublishReport};
+pub use client::{Bridge, BridgeError, Probe, PublishMap, PublishRegion, PublishReport};

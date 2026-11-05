@@ -222,6 +222,20 @@ cannot express), and `publish` started a nested tokio runtime.
   *Not yet:* biome brushes, mass scatter, typography, routes, regions, hex
   overlay, publish B, and the terrain tools in the UI.
 
+- **Overlay items and publish B.** Markers (points of interest, optionally linking to an
+  nd-world battle map), regions (tinted, bordered, optionally hatched polygons) and
+  routes (dashed or solid with waymarks) are one op family — `put_overlay` /
+  `remove_overlay` — with exact undo (a removed item returns to its z-index) and the
+  same boundary validation as everything else (ids, finite bounded coordinates, colours,
+  per-list caps matching nd-world's 500). The baker draws them over everything else;
+  paths are built in world pixels and shifted by an exact integer, so tiles equal the
+  full render **exactly** (test). `ndcart publish` branches on the project kind: a
+  **world map** is baked whole and sent as an nd-world image map — created with
+  `POST /maps/new`, re-published in place through `/maps/{slug}/upload`, markers and
+  regions through the overlay replace route. Verified end to end against a real
+  nd-world in Python mode and the Rust-only gateway (markers at exactly the right
+  `lat`/`lng`, region intact, AVIF picture swapped, no duplicates on re-publish).
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the
