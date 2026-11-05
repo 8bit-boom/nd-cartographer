@@ -9,6 +9,7 @@
 pub mod base64;
 pub mod doc;
 pub mod error;
+pub mod furnish;
 pub mod gen;
 pub mod grid;
 pub mod hash;

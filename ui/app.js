@@ -1450,6 +1450,42 @@ document.getElementById('spec-reject').onclick = async () => {
 };
 document.getElementById('spec-close').onclick = () => specDialog.close();
 
+// ---------- search all maps ----------
+const searchBox = document.getElementById('search-box');
+const searchList = document.getElementById('search-results');
+let searchTimer = null;
+searchBox.addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const q = searchBox.value.trim();
+  if (!q) { searchList.hidden = true; return; }
+  searchTimer = setTimeout(async () => {
+    let hits = [];
+    try { hits = (await api('GET', `/api/search?q=${encodeURIComponent(q)}`)).hits; } catch { return; }
+    searchList.textContent = '';
+    if (hits.length === 0) { const li = document.createElement('li'); li.className = 'dim'; li.textContent = 'Nothing found'; searchList.appendChild(li); }
+    for (const h of hits) {
+      const li = document.createElement('li');
+      li.tabIndex = 0; li.setAttribute('role', 'option');
+      li.append(document.createTextNode(h.name));
+      const k = document.createElement('span'); k.className = 'k';
+      k.textContent = `${h.kind} · ${h.doc_name}${h.floor_name ? ' / ' + h.floor_name : ''}`;
+      li.appendChild(k);
+      const go = async () => {
+        searchList.hidden = true;
+        if (h.doc !== state.docId) await openDoc(h.doc);
+        if (h.floor && state.doc.floors.some(f => f.id === h.floor) && h.floor !== state.floorId) await selectFloor(h.floor);
+        if (h.at) centerOn({ x: h.at[0] - 0.5, y: h.at[1] - 0.5 });
+      };
+      li.onclick = go;
+      li.onkeydown = (e) => { if (e.key === 'Enter') go(); };
+      searchList.appendChild(li);
+    }
+    searchList.hidden = false;
+  }, 200);
+});
+searchBox.addEventListener('keydown', (e) => { if (e.key === 'Escape') { searchList.hidden = true; searchBox.blur(); } });
+document.addEventListener('click', (e) => { if (!e.target.closest('#searchwrap')) searchList.hidden = true; });
+
 // ---------- player view ----------
 // The fog preview: the server renders what the table sees from one spot
 // (the players' copy of the floor, walls and closed doors blocking sight).
@@ -1797,7 +1833,7 @@ function updateBulk() {
   for (const id of [...state.sel]) if (!have.has(id)) state.sel.delete(id);
   const n = state.sel.size;
   document.getElementById('sel-count').textContent = `${n} selected`;
-  for (const id of ['sel-none', 'bk-zone', 'bk-color', 'bk-kind', 'bk-prefix', 'bk-delete']) {
+  for (const id of ['sel-none', 'bk-zone', 'bk-color', 'bk-kind', 'bk-prefix', 'bk-furnish', 'bk-delete']) {
     document.getElementById(id).disabled = n === 0;
   }
   const sel = document.getElementById('sel-by');
@@ -1847,6 +1883,13 @@ document.getElementById('bk-prefix').onclick = () => {
   const p = window.prompt('Text to put before each name', 'East – ');
   if (p === null || !p) return;
   postOps([{ t: 'batch', ops: selSpaces().map(s => spaceOp(s, { name: (p + s.name).slice(0, 60) })) }]);
+};
+document.getElementById('bk-furnish').onclick = async () => {
+  try {
+    const res = await api('POST', `/api/docs/${state.docId}/furnish`, { floor: state.floorId, spaces: [...state.sel], seed: Math.floor(Math.random() * 4294967295) });
+    state.rev = res.rev; tileCache.clear(); await refresh();
+    statusEl.textContent = 'Furnished the selected rooms. Ctrl+Z takes it back in one step.';
+  } catch (e) { statusEl.textContent = e.message; }
 };
 document.getElementById('bk-delete').onclick = () => {
   const n = state.sel.size;

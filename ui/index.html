@@ -12,6 +12,7 @@
   <select id="doc-select" title="Switch project" aria-label="Project"></select>
   <button id="btn-preview" title="Player view: what the table sees from one spot (double-click the map to move the viewer)" aria-pressed="false">👁 Player view</button>
   <button id="btn-spec" title="Describe a map as rooms and how they connect, preview the layout, accept or reject it">✨ From a spec…</button>
+  <span id="searchwrap"><input id="search-box" type="search" placeholder="Search all maps…" aria-label="Search all maps" autocomplete="off"><ul id="search-results" role="listbox" hidden></ul></span>
   <button id="btn-gallery" title="All projects as thumbnails">🗂 Projects</button>
   <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
   <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
@@ -80,6 +81,7 @@
       <button id="bk-color" title="Give the selected rooms one colour">Colour</button>
       <button id="bk-kind" title="Change what the selected rooms are">Kind</button>
       <button id="bk-prefix" title="Add text before every selected room's name">Prefix</button>
+      <button id="bk-furnish" title="Put props in the selected rooms, chosen from what each room is">Furnish</button>
       <button id="bk-delete" title="Delete the selected rooms (undoable)">Delete</button>
     </div>
     <ul id="tree" role="tree" aria-label="Rooms, lights and notes"></ul>

@@ -775,6 +775,135 @@ async fn scatter_props(
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
+#[derive(Deserialize)]
+struct FurnishBody {
+    #[serde(default)]
+    floor: Option<String>,
+    spaces: Vec<String>,
+    #[serde(default)]
+    seed: u64,
+    /// Skip rooms that already have props (default true).
+    #[serde(default = "yes_bool")]
+    only_empty: bool,
+}
+fn yes_bool() -> bool {
+    true
+}
+
+/// `POST /api/docs/{id}/furnish` `{floor?, spaces:[room ids], seed, only_empty?}` —
+/// props chosen from each room's name and kind, never in a doorway. One undo step.
+async fn furnish_rooms(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<FurnishBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor_id = match &b.floor {
+        Some(f) => f.clone(),
+        None => doc.floors[0].id.clone(),
+    };
+    let idx = floors_by_id(&doc.floors, &floor_id)?;
+    let ops = ndcart_core::furnish::furnish(&doc.floors[idx], &b.spaces, b.seed, b.only_empty)?;
+    doc.apply_ops(&floor_id, &ops)?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+}
+
+/// `GET /api/search?q=` — "ask your maps": every project's rooms, notes, markers,
+/// zones, regions, routes and floors whose name or text holds ALL the words
+/// typed (case-insensitive). At most 100 hits; each says where it is.
+async fn search_maps(
+    State(app): State<App>,
+    axum::extract::Query(q): axum::extract::Query<SearchQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let words: Vec<String> = q.q.split_whitespace().map(|w| w.to_lowercase()).collect();
+    if words.is_empty() || q.q.chars().count() > 200 {
+        return Err(ApiError(CoreError::Invalid(
+            "search for 1-200 characters".into(),
+        )));
+    }
+    let store = app.store.read().await;
+    let mut hits: Vec<serde_json::Value> = Vec::new();
+    'all: for doc in store.docs.values() {
+        for f in &doc.floors {
+            let mut push = |kind: &str, name: &str, extra: &str, at: Option<(f32, f32)>| {
+                let hay = format!("{name} {extra}").to_lowercase();
+                if words.iter().all(|w| hay.contains(w)) {
+                    hits.push(serde_json::json!({
+                        "doc": doc.manifest.id, "doc_name": doc.manifest.name,
+                        "floor": f.id, "floor_name": f.name,
+                        "kind": kind, "name": name,
+                        "at": at.map(|(x, y)| [x, y]),
+                    }));
+                }
+            };
+            push("floor", &f.name, "", None);
+            let mut spans: std::collections::BTreeMap<&str, (i32, i32, i32, i32)> =
+                Default::default();
+            for (c, sp) in f.grid.cells() {
+                let e = spans.entry(sp).or_insert((c.x, c.y, c.x, c.y));
+                *e = (e.0.min(c.x), e.1.min(c.y), e.2.max(c.x), e.3.max(c.y));
+            }
+            for s in f.grid.spaces.values() {
+                let at = spans.get(s.id.as_str()).map(|b| {
+                    (
+                        (b.0 + b.2) as f32 / 2.0 + 0.5,
+                        (b.1 + b.3) as f32 / 2.0 + 0.5,
+                    )
+                });
+                push("room", &s.name, "", at);
+            }
+            for l in &f.labels {
+                push("note", &l.text, "", Some((l.x as f32, l.y as f32)));
+            }
+            for m in &f.markers {
+                push("marker", &m.label, &m.note, Some((m.x, m.y)));
+            }
+            for z in &f.zones {
+                push("zone", &z.name, "", None);
+            }
+            for r in &f.regions {
+                push(
+                    "region",
+                    &r.name,
+                    "",
+                    r.points.first().map(|p| (p[0], p[1])),
+                );
+            }
+            for r in &f.routes {
+                push("route", &r.name, "", r.points.first().map(|p| (p[0], p[1])));
+            }
+            if hits.len() >= 100 {
+                hits.truncate(100);
+                break 'all;
+            }
+        }
+        let n = doc.manifest.name.to_lowercase();
+        if words.iter().all(|w| n.contains(w)) {
+            hits.push(serde_json::json!({
+                "doc": doc.manifest.id, "doc_name": doc.manifest.name,
+                "floor": doc.floors.first().map(|f| f.id.clone()), "floor_name": "",
+                "kind": "project", "name": doc.manifest.name, "at": null,
+            }));
+        }
+    }
+    Ok(Json(serde_json::json!({ "hits": hits })))
+}
+
 /// `POST /api/docs/{id}/generate-map` `{floor?, kind, seed, width, height}` — a
 /// dungeon, cave, building, deck or city district drawn onto the floor as ONE
 /// undoable step (it adds to what is there; the same seed gives the same map).
@@ -1505,6 +1634,8 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/floors", post(floors_route))
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
         .route("/api/docs/{id}/generate-map", post(generate_map))
+        .route("/api/docs/{id}/furnish", post(furnish_rooms))
+        .route("/api/search", get(search_maps))
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
         .route("/api/draft", post(draft_spec))
@@ -2715,6 +2846,114 @@ mod tests {
         );
         let (st, _) = call(&router, "POST", "/api/draft", b"{}".to_vec()).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn furnishing_is_one_undo_step_and_search_finds_rooms_notes_and_markers_across_projects()
+    {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let mk = |name: &'static str| {
+            let router = router.clone();
+            async move {
+                let (_, b) = call(
+                    &router,
+                    "POST",
+                    "/api/docs",
+                    format!(r#"{{"name":"{name}"}}"#).into_bytes(),
+                )
+                .await;
+                let id = json(b)["id"].as_str().unwrap().to_string();
+                let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+                (id, json(d)["floors"][0]["id"].as_str().unwrap().to_string())
+            }
+        };
+        let (a, fa) = mk("Keep").await;
+        let (b, fb) = mk("Harbour").await;
+        let ops = |floor: &str, name: &str| {
+            serde_json::json!({"floor": floor, "ops": [
+              {"t":"upsert_space","space":{"id":"r","name":name,"color":"#7f5539","kind":"room"}},
+              {"t":"paint_cells","space":"r","cells":(0..6).flat_map(|x| (0..5).map(move |y| serde_json::json!({"x":x,"y":y}))).collect::<Vec<_>>()},
+              {"t":"upsert_label","label":{"id":"n","x":2.0,"y":2.0,"text":"Trapdoor under the rug","size":0.8,"color":"#222222","bold":false}}]})
+            .to_string()
+            .into_bytes()
+        };
+        call(
+            &router,
+            "POST",
+            &format!("/api/docs/{a}/ops"),
+            ops(&fa, "Armory"),
+        )
+        .await;
+        call(
+            &router,
+            "POST",
+            &format!("/api/docs/{b}/ops"),
+            ops(&fb, "Boathouse"),
+        )
+        .await;
+        let stamps = |id: String| {
+            let router = router.clone();
+            async move {
+                let d = json(
+                    call(&router, "GET", &format!("/api/docs/{id}"), vec![])
+                        .await
+                        .1,
+                );
+                d["floors"][0]["outline"]["stamps"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            }
+        };
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{a}/furnish"),
+            br#"{"spaces":["r"],"seed":2}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(stamps(a.clone()).await > 2);
+        // Already furnished: refused unless forced.
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{a}/furnish"),
+            br#"{"spaces":["r"],"seed":3}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        call(
+            &router,
+            "POST",
+            &format!("/api/docs/{a}/undo"),
+            format!(r#"{{"floor":"{fa}"}}"#).into_bytes(),
+        )
+        .await;
+        assert_eq!(stamps(a.clone()).await, 0);
+        let search = |q: &str| {
+            let (router, uri) = (router.clone(), format!("/api/search?q={q}"));
+            async move { call(&router, "GET", &uri, vec![]).await }
+        };
+        let (st, body) = search("trapdoor%20rug").await;
+        assert_eq!(st, StatusCode::OK);
+        let hits = json(body)["hits"].as_array().unwrap().clone();
+        assert_eq!(
+            hits.iter().filter(|h| h["kind"] == "note").count(),
+            2,
+            "one note in each project"
+        );
+        let (_, body) = search("BOATHOUSE").await;
+        let hits = json(body)["hits"].as_array().unwrap().clone();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            (hits[0]["kind"].as_str(), hits[0]["doc_name"].as_str()),
+            (Some("room"), Some("Harbour"))
+        );
+        assert!(hits[0]["at"].is_array());
+        assert_eq!(search("zzzz").await.0, StatusCode::OK);
+        assert_eq!(search("%20").await.0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
