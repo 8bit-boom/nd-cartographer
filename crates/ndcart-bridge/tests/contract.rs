@@ -128,6 +128,10 @@ async fn probe_tells_the_rust_only_image_from_hybrid() {
         assert_eq!(p.python_free, free, "{mode}");
         assert_eq!(p.import_uvtt, !free, "{mode}: import-uvtt is Python-only");
         assert!(p.per_part_publish);
+        assert_eq!(
+            p.read_back, !free,
+            "{mode}: walls.json/rooms.json are 501 on the Rust-only image"
+        );
         assert_eq!(p.build, "abc1234");
     }
 }

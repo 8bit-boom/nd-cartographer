@@ -14,7 +14,8 @@ use ndcart_core::NdWorldLink;
 use std::path::PathBuf;
 
 /// nd-world's default upload cap (`max_upload_mb`, adjustable per instance).
-const DEFAULT_UPLOAD_CAP: usize = 20 * 1024 * 1024;
+const DEFAULT_UPLOAD_CAP_MB: usize = 20;
+const MIN_PPC: i64 = 8; // nd-world's room grid needs cells of at least 8 px
 
 pub struct Args {
     pub doc: String,
@@ -25,11 +26,14 @@ pub struct Args {
     pub ppc: i64,
     pub format: tiles::ImageFormat,
     pub data_dir: PathBuf,
+    /// The server's upload cap in MB (`max_upload_mb`); the picture is fitted under it.
+    pub max_mb: usize,
 }
 
 pub fn parse(args: Vec<String>) -> Result<Args, String> {
     let (mut doc, mut server, mut world, mut email) = (None, None, None, None);
     let (mut floor, mut ppc, mut format, mut data_dir) = (None, 32i64, "webp".to_string(), None);
+    let mut max_mb = DEFAULT_UPLOAD_CAP_MB;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut val = |name: &str| it.next().ok_or(format!("{name} needs a value"));
@@ -45,6 +49,11 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
             }
             "--format" => format = val("--format")?,
             "--data-dir" => data_dir = Some(PathBuf::from(val("--data-dir")?)),
+            "--max-mb" => {
+                max_mb = val("--max-mb")?
+                    .parse()
+                    .map_err(|_| "--max-mb must be a number")?
+            }
             other if !other.starts_with("--") && doc.is_none() => doc = Some(other.to_string()),
             other => return Err(format!("unknown argument: {other}")),
         }
@@ -62,6 +71,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
         ppc,
         format,
         data_dir,
+        max_mb,
     })
 }
 
@@ -121,6 +131,34 @@ pub fn build_map(
     })
 }
 
+/// Build the map, stepping the resolution down (by a quarter each time, never
+/// below 8 px per square) until the picture fits under `cap_bytes`. Returns the
+/// map and the pixels-per-square it ended at. The lattice, walls, lights and
+/// rooms are all re-derived at the new scale, so they stay aligned.
+pub fn build_map_fitted(
+    doc: &store::StoredDoc,
+    floor_id: Option<&str>,
+    ppc: i64,
+    format: tiles::ImageFormat,
+    cap_bytes: usize,
+) -> Result<(PublishMap, i64), String> {
+    let mut ppc = ppc;
+    loop {
+        let map = build_map(doc, floor_id, ppc, format)?;
+        if map.image.len() <= cap_bytes {
+            return Ok((map, ppc));
+        }
+        if ppc <= MIN_PPC {
+            return Err(format!(
+                "even at {MIN_PPC} px per square the picture is {} bytes, over the {} MB cap; use --format avif or raise max_upload_mb in nd-world.",
+                map.image.len(),
+                cap_bytes / 1_048_576
+            ));
+        }
+        ppc = (ppc * 3 / 4).max(MIN_PPC);
+    }
+}
+
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let a = parse(args)?;
     let mut st = store::Store::default();
@@ -151,12 +189,18 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             return Err("fix the errors above first (nd-world would refuse this map)".into());
         }
     }
-    let map = build_map(&st.docs[&id], a.floor.as_deref(), a.ppc, a.format)?;
-    if map.image.len() > DEFAULT_UPLOAD_CAP {
-        return Err(format!(
-            "the picture is {} MB; nd-world's default upload cap is 20 MB. Lower --ppc or use --format avif (or raise max_upload_mb in nd-world).",
-            map.image.len() / 1_048_576
-        ));
+    let (map, used_ppc) = build_map_fitted(
+        &st.docs[&id],
+        a.floor.as_deref(),
+        a.ppc,
+        a.format,
+        a.max_mb * 1_048_576,
+    )?;
+    if used_ppc != a.ppc {
+        println!(
+            "note: lowered the picture from {} to {used_ppc} px per square to fit the {} MB upload cap",
+            a.ppc, a.max_mb
+        );
     }
     let pw = password()?;
     let totp = std::env::var("ND_CARTO_TOTP").ok();
@@ -171,6 +215,9 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         let bridge = Bridge::new(&a.server, a.world.as_deref()).map_err(|e| e.to_string())?;
         let probe = bridge.probe().await.map_err(|e| e.to_string())?;
         println!("nd-world build {} ({} mode)", probe.build, probe.mode);
+        if !probe.read_back {
+            println!("note: this image cannot hand a map's walls/rooms back (Rust-only); the studio keeps its own copy, so publishing is unaffected");
+        }
         bridge
             .login(&a.email, &pw, totp.as_deref())
             .await
@@ -255,6 +302,34 @@ mod tests {
             }
         }
         assert_eq!(m.rooms.as_ref().unwrap()["cols"], 2);
+    }
+
+    #[test]
+    fn the_picture_is_fitted_under_the_cap_and_stays_aligned() {
+        let d = doc();
+        let big = build_map(&d, None, 64, tiles::ImageFormat::Png).unwrap();
+        let cap = big.image.len() / 2;
+        let (m, ppc) = build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, cap).unwrap();
+        assert!((MIN_PPC..64).contains(&ppc), "{ppc}");
+        assert!(m.image.len() <= cap);
+        // Everything was re-derived at the new scale: canvas, cell, light, walls.
+        assert_eq!(m.cell_px, ppc as f64);
+        assert_eq!(m.canvas_w as i64, 2 * ppc);
+        assert_eq!(m.lights[0].x, ppc as f64); // the light sat at 1 cell
+        for w in &m.walls {
+            for p in &w.pts {
+                assert!(p[0] <= m.canvas_w as f64 && p[1] <= m.canvas_h as f64);
+            }
+        }
+        // An impossible cap is refused with advice, not looped on.
+        let e = build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, 10)
+            .err()
+            .unwrap();
+        assert!(e.contains("avif") && e.contains("max_upload_mb"), "{e}");
+        // A roomy cap changes nothing.
+        let (_, same) =
+            build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, usize::MAX).unwrap();
+        assert_eq!(same, 64);
     }
 
     #[test]

@@ -59,11 +59,26 @@ tracks what actually exists, crate by crate, as milestones land.
   PNG/JPEG/GIF/BMP/WebP in; PNG/WebP/AVIF out (AVIF *input* needs dav1d, a C
   library, so it is refused with a clear message).
 
-Verified end to end against a real nd-world (hybrid/Python mode, throwaway data
-directory): publish, re-publish with an AVIF background, walls/lights/rooms read
+Verified end to end against a real nd-world in Python mode *and* the Rust-only
+gateway (built from the current tree, no Python behind it), on throwaway data
+directories: publish, re-publish with an AVIF background, walls/lights/rooms read
 back correctly. That run found and fixed two bugs unit tests had missed — saving
 a document with a door panicked (edge marks were a struct-keyed map, which JSON
 cannot express), and `publish` started a nested tokio runtime.
+
+- **Linter** (`ndcart-core::lint`, `GET /api/docs/{id}/lint`) — unreachable rooms
+  (a window does not connect; a door, secret door or opening does), doors/windows
+  on nothing / inside a room / into the void, lights outside every room, unused
+  spaces, and nd-world's caps (errors that block publishing). Fixes are ordinary
+  undoable ops. `ndcart publish` lints first and refuses on errors.
+- **UI** — door and window tools (click a cell edge), a Problems panel with Go-to
+  and Fix, export links (PNG / WebP / AVIF / UVTT), F1 help generated from the same
+  table that handles the keys. Doors, windows and secret doors draw in their own
+  colours.
+- **Cap fitting** — `ndcart publish --max-mb N` (default 20) steps the picture's
+  resolution down by a quarter at a time (never below 8 px per square), re-deriving
+  lattice, walls, lights and rooms at each scale, until it fits under the server's
+  upload cap.
 
 ## Still open in M0
 

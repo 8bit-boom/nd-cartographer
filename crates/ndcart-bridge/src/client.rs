@@ -76,6 +76,9 @@ pub struct Probe {
     pub import_uvtt: bool,
     /// The per-part publish routes — served by every image.
     pub per_part_publish: bool,
+    /// `GET .../walls.json` and `rooms.json` (reopening a published map from
+    /// nd-world): the Rust-only gateway answers 501 for both (checked live).
+    pub read_back: bool,
 }
 
 pub struct PublishMap {
@@ -245,6 +248,7 @@ impl Bridge {
             python_free,
             import_uvtt: !python_free,
             per_part_publish: true,
+            read_back: !python_free,
             mode,
         })
     }

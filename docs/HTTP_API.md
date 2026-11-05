@@ -81,7 +81,7 @@ first run, printed once). 401 without it.
 ndcart serve [--listen 127.0.0.1:8300] [--data-dir DIR]   # env: ND_CARTO_LISTEN, ND_CARTO_DATA_DIR
 ndcart bench                                              # journal/walls/replay timings
 ndcart convert IN OUT [--format webp|avif|png] [--quality N]
-ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32] [--format webp] --data-dir DIR
+ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32] [--format webp] [--max-mb 20] --data-dir DIR
                                                           # password: ND_CARTO_PASSWORD / ND_CARTO_PASSWORD_FILE only
 ```
 

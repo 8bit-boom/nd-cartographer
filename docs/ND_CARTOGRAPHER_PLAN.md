@@ -1032,6 +1032,16 @@ These supersede the text above where they conflict.
   kinds come from a fixed list, cells are run-length coded, and an edge mark names
   the cell whose top (`h`) or left (`v`) edge it is.
 
+**Verified live on both images** (a real nd-world in Python mode, and the Rust-only
+`nd-gateway` built from the current tree with `ND_PYTHON_FREE=1`, no Python behind it,
+on throwaway data): create → picture → grid → walls → lights → rooms, then an in-place
+re-publish with an AVIF background, succeed on both and read back correctly on Python.
+**One gap on the Rust-only image:** `GET /maps/schematic/{slug}/walls.json` and
+`rooms.json` answer `501`; only `view.json` is served. So §9.2's "reopen a published
+map" works against Python/hybrid but not Rust-only. Publishing is unaffected (the
+studio keeps its own document); the probe reports `read_back`. Closing it is a Tier-1
+nd-world change (port those two GETs to the gateway) — noted, not done.
+
 **Image formats** — exports support PNG, WebP and AVIF (owner request). UVTT pictures
 stay PNG/WebP (the consumers can't read AVIF). Lossy WebP for cap-fitting is a
 follow-up (needs libwebp); until then cap-fitting uses AVIF for plain exports and
