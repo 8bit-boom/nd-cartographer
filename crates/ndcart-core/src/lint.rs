@@ -78,7 +78,9 @@ pub fn lint(floor: &FloorDoc, cell_size: f64) -> Vec<Problem> {
     let has_art = floor.underlay.is_some()
         || !floor.strokes.is_empty()
         || !floor.stamps.is_empty()
-        || !floor.imported_walls.is_empty();
+        || !floor.imported_walls.is_empty()
+        || floor.terrain.is_some()
+        || !floor.rivers.is_empty();
     if grid.cell_count() == 0 && !has_art {
         out.push(problem(
             Severity::Warning,
@@ -449,5 +451,20 @@ mod tests {
         })
         .unwrap();
         assert_eq!(codes(&lint(&f, 32.0)), ["light_in_void"]);
+    }
+
+    #[test]
+    fn a_world_map_with_terrain_is_not_empty() {
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        assert_eq!(codes(&lint(&f, 32.0)), ["empty_floor"]);
+        f.terrain_stroke(&crate::terrain::TerrainStroke {
+            mode: crate::terrain::TerrainMode::Raise,
+            points: vec![[3.0, 3.0]],
+            radius: 2.0,
+            strength: 1.0,
+            seed: 0,
+        })
+        .unwrap();
+        assert!(lint(&f, 32.0).is_empty(), "{:?}", lint(&f, 32.0));
     }
 }

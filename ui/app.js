@@ -87,12 +87,43 @@ async function openDoc(id) {
 
 document.getElementById('doc-select').onchange = (e) => openDoc(e.target.value);
 
-document.getElementById('btn-new').onclick = async () => {
-  const name = window.prompt('Name the new project', 'Untitled Battle Map');
-  if (name === null || !name.trim()) return;
-  const m = await api('POST', '/api/docs', { name: name.trim(), kind: 'battle' });
-  await openDoc(m.id);
+const newDialog = document.getElementById('new-dialog');
+const ndKind = () => document.querySelector('input[name=nd-kind]:checked').value;
+
+document.getElementById('btn-new').onclick = () => {
+  document.getElementById('nd-seed').value = String(Math.floor(Math.random() * 1e6));
+  newDialog.showModal();
 };
+for (const r of document.querySelectorAll('input[name=nd-kind]')) {
+  r.onchange = () => { document.getElementById('nd-world').hidden = ndKind() !== 'region'; };
+}
+document.getElementById('nd-dice').onclick = () => { document.getElementById('nd-seed').value = String(Math.floor(Math.random() * 4294967295)); };
+document.getElementById('nd-cancel').onclick = () => newDialog.close();
+document.getElementById('new-form').onsubmit = async (e) => {
+  e.preventDefault();
+  const name = document.getElementById('nd-name').value.trim();
+  if (!name) return;
+  const kind = ndKind();
+  newDialog.close();
+  try {
+    const m = await api('POST', '/api/docs', { name, kind });
+    if (kind === 'region') {
+      statusEl.textContent = 'Generating the world…';
+      await api('POST', `/api/docs/${m.id}/generate`, worldParams());
+    }
+    await openDoc(m.id);
+  } catch (err) {
+    statusEl.textContent = `Could not create the project: ${err.message}`;
+  }
+};
+
+function worldParams() {
+  const n = (id) => parseFloat(document.getElementById(id).value);
+  return {
+    seed: n('nd-seed') >>> 0, cols: n('nd-cols'), rows: n('nd-rows'), land: n('nd-land'),
+    continent: n('nd-cont'), ridges: n('nd-ridge'), rivers: n('nd-rivers'),
+  };
+}
 
 document.getElementById('btn-open').onclick = () => document.getElementById('file-open').click();
 document.getElementById('file-open').onchange = async (e) => {
@@ -118,8 +149,9 @@ async function refresh() {
   state.floorId = floor.id;
   docName.textContent = state.doc.manifest.name;
   docMeta.textContent =
-    `battle · ${floor.digest} · ${floor.walls.length} walls · rev ${state.rev}`;
+    `${state.doc.manifest.kind} · ${floor.digest} · ${floor.walls.length} walls · rev ${state.rev}`;
   render();
+  applyKind();
   setExportLinks();
   buildOutline();
   refreshProblems();
@@ -169,7 +201,8 @@ function render() {
   }
   drawStrokePreview();
   drawLiveStroke();
-  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); });
+  drawTerrainOverlay();
+  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); drawTerrainOverlay(); });
 }
 
 const tileCache = new Map(); // url -> Image
@@ -210,20 +243,24 @@ function drawStrokePreview() {
 // ---------- tools ----------
 
 const EDGE_TOOLS = { door: 'door', window: 'window' };
+const TERRAIN_TOOLS = ['raise', 'lower', 'smooth', 'flatten', 'roughen'];
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window']) {
+  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
   document.getElementById('brushbar').hidden = !(tool === 'brush' || tool === 'erase');
   document.getElementById('stampbar').hidden = tool !== 'stamp';
+  setTerrainBar(tool);
   statusEl.textContent =
     tool === 'paint' ? `Painting ${activeItem().name}`
     : tool === 'brush' ? `Brush: ${activeItem().name} — drag to paint (pressure and tilt count)`
     : tool === 'erase' ? 'Eraser: drag to reveal the room layer beneath'
     : tool === 'stamp' ? `Stamp: click to place a ${state.stamp?.name || 'prop'} (, . rotate · F flip)`
+    : TERRAIN_TOOLS.includes(tool) ? `${tool[0].toUpperCase()}${tool.slice(1)}: drag over the map`
+    : tool === 'river' ? 'River: click points from source to mouth · Enter finishes · Esc cancels'
     : tool in EDGE_TOOLS ? `Click a cell edge to place a ${tool}; click it again to remove`
     : 'Pan (drag) · wheel zooms';
 }
@@ -485,6 +522,135 @@ document.getElementById('st-rot').oninput = (e) => {
   document.getElementById('st-rot-o').textContent = `${e.target.value}°`;
 };
 
+// ---------- terrain (world maps) ----------
+
+const isRegion = () => state.doc?.manifest.kind === 'region';
+function regionOnly(tool) { if (isRegion()) setTool(tool); }
+
+function applyKind() {
+  const region = isRegion();
+  document.getElementById('terrain-tools').hidden = !region;
+  for (const el of document.querySelectorAll('.battle-only')) el.hidden = region;
+  if (region && ['paint', 'door', 'window'].includes(state.tool)) setTool('pan');
+  const t = state.doc.floors[0].terrain;
+  if (t) syncStyleControls(t.style);
+}
+
+function setTerrainBar(tool) {
+  const on = TERRAIN_TOOLS.includes(tool) || tool === 'river';
+  document.getElementById('terrainbar').hidden = !(on || (isRegion() && tool === 'pan'));
+  document.getElementById('tr-hint').textContent =
+    tool === 'river' ? 'click source → mouth, Enter to finish' : TERRAIN_TOOLS.includes(tool) ? 'drag to sculpt' : '';
+}
+
+const trVal = (id) => parseFloat(document.getElementById(id).value);
+let terrainStroke = null;   // {points:[[x,y]], mode}
+let riverDraft = null;      // [[x,y]]
+state.hover = null;
+
+function startTerrainStroke(wx, wy) {
+  terrainStroke = { points: [], mode: state.tool };
+  addTerrainPoint(wx, wy);
+}
+
+function addTerrainPoint(wx, wy) {
+  const s = ppc();
+  const p = [wx / s, wy / s];
+  const last = terrainStroke.points[terrainStroke.points.length - 1];
+  const spacing = Math.max(0.15, trVal('tr-radius') * 0.25);
+  if (last && Math.hypot(p[0] - last[0], p[1] - last[1]) < spacing) return;
+  if (terrainStroke.points.length >= 4000) return;
+  terrainStroke.points.push([+p[0].toFixed(3), +p[1].toFixed(3)]);
+  render();
+}
+
+async function finishTerrainStroke() {
+  const st = terrainStroke;
+  terrainStroke = null;
+  if (!st || !st.points.length) return;
+  await postOps([{ t: 'terrain_stroke', stroke: {
+    mode: st.mode, points: st.points, radius: trVal('tr-radius'),
+    strength: trVal('tr-strength'), seed: Math.floor(Math.random() * 4294967295),
+  } }]);
+}
+
+function addRiverPoint(wx, wy) {
+  const s = ppc();
+  (riverDraft ||= []).push([+(wx / s).toFixed(3), +(wy / s).toFixed(3)]);
+  render();
+}
+
+async function finishRiver() {
+  const pts = riverDraft;
+  riverDraft = null;
+  if (state.tool !== 'river') return;
+  if (!pts || pts.length < 2) { render(); return; }
+  const n = (state.doc.floors[0].rivers || []).length + 1;
+  await postOps([{ t: 'add_river', river: {
+    id: 'rv_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    name: `River ${n}`, points: pts, width: trVal('tr-rwidth'),
+  } }]);
+}
+
+function drawTerrainOverlay() {
+  const s = ppc();
+  ctx.save();
+  if (state.hover && (TERRAIN_TOOLS.includes(state.tool) || state.tool === 'river')) {
+    const [sx, sy] = worldToScreen(state.hover[0] * s, state.hover[1] * s);
+    const r = state.tool === 'river' ? trVal('tr-rwidth') * s * 0.5 : trVal('tr-radius') * s;
+    ctx.strokeStyle = '#fff'; ctx.globalAlpha = 0.8; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(sx, sy, Math.max(2, r), 0, Math.PI * 2); ctx.stroke();
+  }
+  const trace = (pts, color, width) => {
+    if (!pts || pts.length === 0) return;
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.beginPath();
+    pts.forEach((p, i) => { const [x, y] = worldToScreen(p[0] * s, p[1] * s); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke();
+  };
+  if (terrainStroke) trace(terrainStroke.points, 'rgba(255,255,255,0.7)', 2);
+  if (riverDraft) {
+    trace(riverDraft, 'rgba(110,190,255,0.95)', Math.max(2, trVal('tr-rwidth') * s * 0.6));
+    for (const p of riverDraft) { const [x, y] = worldToScreen(p[0] * s, p[1] * s); ctx.fillStyle = '#fff'; ctx.fillRect(x - 3, y - 3, 6, 6); }
+  }
+  ctx.restore();
+}
+
+// Style sliders -> one set_terrain_style (debounced, always the full style).
+function syncStyleControls(st) {
+  const set = (id, v) => { const el = document.getElementById(id); if (document.activeElement !== el) el.value = v; };
+  set('ts-sea', st.sea_level); set('ts-hill', st.hillshade); set('ts-contour', st.contour_interval);
+  set('ts-tint', st.tint); set('ts-tint-amt', st.tint_amount);
+  set('ts-sat', st.saturation); set('ts-con', st.contrast); set('ts-bri', st.brightness);
+}
+let styleTimer = null;
+function pushStyle() {
+  clearTimeout(styleTimer);
+  styleTimer = setTimeout(() => postOps([{ t: 'set_terrain_style', style: {
+    sea_level: Math.round(trVal('ts-sea')), hillshade: trVal('ts-hill'),
+    contour_interval: Math.round(trVal('ts-contour')),
+    tint: document.getElementById('ts-tint').value, tint_amount: trVal('ts-tint-amt'),
+    saturation: trVal('ts-sat'), contrast: trVal('ts-con'), brightness: trVal('ts-bri'),
+  } }]), 250);
+}
+for (const id of ['ts-sea', 'ts-hill', 'ts-contour', 'ts-tint', 'ts-tint-amt', 'ts-sat', 'ts-con', 'ts-bri']) {
+  document.getElementById(id).oninput = pushStyle;
+}
+document.getElementById('tr-radius').oninput = (e) => { document.getElementById('tr-radius-o').textContent = e.target.value; };
+document.getElementById('ts-regen').onclick = () => {
+  document.getElementById('nd-seed').value = String(Math.floor(Math.random() * 1e6));
+  const w = state.doc.floors[0].canvas;
+  if (w) { document.getElementById('nd-cols').value = w[0]; document.getElementById('nd-rows').value = w[1]; }
+  document.querySelector('input[name=nd-kind][value=region]').checked = true;
+  document.getElementById('nd-world').hidden = false;
+  document.getElementById('nd-name').value = state.doc.manifest.name;
+  // Regenerate in place: the dialog's submit creates a NEW project, so handle this one separately.
+  if (window.confirm('Generate a new world over this one? (Undo brings the old one back.)')) {
+    api('POST', `/api/docs/${state.docId}/generate`, worldParams()).then(() => { tileCache.clear(); return refresh(); })
+      .catch((err) => { statusEl.textContent = `Could not generate: ${err.message}`; });
+  }
+};
+
 // ---------- input ----------
 
 let dragging = null; // {sx, sy, px, py, moved}
@@ -496,6 +662,16 @@ canvas.addEventListener('pointerdown', (e) => {
   if ((state.tool === 'brush' || state.tool === 'erase') && e.button === 0) {
     startStroke(wx, wy, e);
     dragging = { stroking: true };
+    return;
+  }
+  if (TERRAIN_TOOLS.includes(state.tool) && e.button === 0) {
+    startTerrainStroke(wx, wy);
+    dragging = { terrain: true };
+    return;
+  }
+  if (state.tool === 'river' && e.button === 0) {
+    if (e.detail >= 2) finishRiver(); else addRiverPoint(wx, wy);
+    dragging = null;
     return;
   }
   if (state.tool === 'stamp' && e.button === 0) {
@@ -523,7 +699,15 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
+  const [hx, hy] = screenToWorld(e.offsetX, e.offsetY);
+  state.hover = [hx / ppc(), hy / ppc()];
+  if (TERRAIN_TOOLS.includes(state.tool) || state.tool === 'river') render();
   if (!dragging) return;
+  if (dragging.terrain) {
+    const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
+    addTerrainPoint(wx, wy);
+    return;
+  }
   if (dragging.stroking) {
     // Coalesced events keep fast pen strokes smooth.
     const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
@@ -547,6 +731,7 @@ canvas.addEventListener('pointermove', (e) => {
 
 canvas.addEventListener('pointerup', (e) => {
   if (dragging && dragging.stroking) finishStroke();
+  if (dragging && dragging.terrain) finishTerrainStroke();
   if (dragging && dragging.painting) {
     clearTimeout(state.pendingFlush);
     state.lastCell = null;
@@ -576,6 +761,13 @@ const KEYS = [
   { key: 'b', label: 'Paint tool', run: () => setTool('paint') },
   { key: 'r', label: 'Brush tool', run: () => setTool('brush') },
   { key: 'e', label: 'Eraser tool', run: () => setTool('erase') },
+  { key: 'h', label: 'Raise land (world maps)', run: () => regionOnly('raise') },
+  { key: 'l', label: 'Lower land (world maps)', run: () => regionOnly('lower') },
+  { key: 'm', label: 'Smooth land (world maps)', run: () => regionOnly('smooth') },
+  { key: 'g', label: 'Flatten land (world maps)', run: () => regionOnly('flatten') },
+  { key: 'x', label: 'Roughen land (world maps)', run: () => regionOnly('roughen') },
+  { key: 'i', label: 'River tool (world maps)', run: () => regionOnly('river') },
+  { key: 'Enter', label: 'Finish the river', run: () => finishRiver() },
   { key: 's', label: 'Stamp tool', run: () => setTool('stamp') },
   { key: ',', label: 'Rotate stamp left', run: () => rotateStamp(-15) },
   { key: '.', label: 'Rotate stamp right', run: () => rotateStamp(15) },
@@ -589,7 +781,7 @@ const KEYS = [
   { key: 'o', label: 'Outline (focus the tree)', run: () => toggleOutline() },
   { key: 'z', ctrl: true, label: 'Undo', run: () => undo() },
   { key: 'F1', label: 'This help', run: () => toggleHelp() },
-  { key: 'Escape', label: 'Pan tool / close panels', run: () => { toggleHelp(false); setTool('pan'); } },
+  { key: 'Escape', label: 'Pan tool / close panels', run: () => { riverDraft = null; toggleHelp(false); setTool('pan'); } },
 ];
 
 function keyLabel(k) { return (k.ctrl ? 'Ctrl+' : '') + (k.key.length === 1 ? k.key.toUpperCase() : k.key); }

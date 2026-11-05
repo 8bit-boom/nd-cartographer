@@ -10,19 +10,27 @@
 <header id="topbar">
   <strong id="doc-name">nd-cartographer</strong>
   <select id="doc-select" title="Switch project" aria-label="Project"></select>
-  <button id="btn-new" title="New project">＋ New</button>
+  <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
   <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
   <input type="file" id="file-open" accept=".dd2vtt,.uvtt,.df2vtt,application/json" hidden>
   <span id="doc-meta" class="dim"></span>
   <span class="spacer"></span>
   <div class="tools">
     <button id="tool-pan" class="tool active" title="Pan (drag / middle mouse)">✋ Pan</button>
-    <button id="tool-paint" class="tool" title="Paint cells (drag)">🖌 Paint</button>
+    <span id="terrain-tools" hidden>
+      <button id="tool-raise" class="tool" title="Raise land (H)">⛰ Raise</button>
+      <button id="tool-lower" class="tool" title="Lower land / dig sea (L)">🌊 Lower</button>
+      <button id="tool-smooth" class="tool" title="Smooth (M)">〰 Smooth</button>
+      <button id="tool-flatten" class="tool" title="Flatten to the height under the first point (G)">▬ Flatten</button>
+      <button id="tool-roughen" class="tool" title="Roughen (X)">⛏ Roughen</button>
+      <button id="tool-river" class="tool" title="River: click points, Enter to finish, Esc to cancel (I)">〰 River</button>
+    </span>
+    <button id="tool-paint" class="tool battle-only" title="Paint cells (drag)">🖌 Paint</button>
     <button id="tool-brush" class="tool" title="Brush: freehand material (R). Pen pressure and tilt shape the line">🖍 Brush</button>
     <button id="tool-erase" class="tool" title="Eraser: reveals the room layer beneath (E)">🧽 Erase</button>
     <button id="tool-stamp" class="tool" title="Stamp: place a prop (S). , and . rotate, F flips">📦 Stamp</button>
-    <button id="tool-door" class="tool" title="Door on a cell edge (click an edge again to remove)">🚪 Door</button>
-    <button id="tool-window" class="tool" title="Window on a cell edge">🪟 Window</button>
+    <button id="tool-door" class="tool battle-only" title="Door on a cell edge (click an edge again to remove)">🚪 Door</button>
+    <button id="tool-window" class="tool battle-only" title="Window on a cell edge">🪟 Window</button>
     <span id="palette"></span>
     <button id="btn-undo" title="Undo (Ctrl+Z)">↩ Undo</button>
     <button id="btn-outline" title="Outline (O)">☰ Outline</button>
@@ -45,6 +53,50 @@
     <p class="dim hint">↑↓ move · ←→ fold · Enter go to · F2 rename · Del remove</p>
   </nav>
   <div id="stage"><canvas id="canvas"></canvas>
+  <div id="terrainbar" hidden>
+    <div class="row">
+      <label>Radius <input type="range" id="tr-radius" min="0.5" max="24" step="0.5" value="4"><output id="tr-radius-o">4</output></label>
+      <label>Strength <input type="range" id="tr-strength" min="0.05" max="1" step="0.05" value="0.3"></label>
+      <label>River width <input type="range" id="tr-rwidth" min="0.4" max="4" step="0.1" value="1.2"></label>
+      <span class="dim" id="tr-hint"></span>
+    </div>
+    <details>
+      <summary>Look &amp; grading</summary>
+      <div class="row">
+        <label>Sea level <input type="range" id="ts-sea" min="2000" max="45000" step="500"></label>
+        <label>Relief <input type="range" id="ts-hill" min="0" max="2" step="0.1"></label>
+        <label>Contours <input type="range" id="ts-contour" min="0" max="6000" step="250"></label>
+        <label>Tint <input type="color" id="ts-tint" value="#ffffff"> <input type="range" id="ts-tint-amt" min="0" max="1" step="0.05"></label>
+        <label>Saturation <input type="range" id="ts-sat" min="0" max="2" step="0.05"></label>
+        <label>Contrast <input type="range" id="ts-con" min="0.4" max="1.8" step="0.05"></label>
+        <label>Brightness <input type="range" id="ts-bri" min="0.5" max="1.6" step="0.05"></label>
+        <button id="ts-regen" title="Generate a new world over this one (undoable)">🎲 Regenerate…</button>
+      </div>
+    </details>
+  </div>
+  <dialog id="new-dialog">
+    <form method="dialog" id="new-form">
+      <h3>New project</h3>
+      <label>Name <input id="nd-name" value="Untitled map" maxlength="80"></label>
+      <fieldset>
+        <label><input type="radio" name="nd-kind" value="battle" checked> Battle map (rooms, doors, props)</label>
+        <label><input type="radio" name="nd-kind" value="region"> World map (generated terrain, rivers)</label>
+      </fieldset>
+      <div id="nd-world" hidden>
+        <label>Width <input type="number" id="nd-cols" min="16" max="512" value="160"> cells</label>
+        <label>Height <input type="number" id="nd-rows" min="16" max="512" value="110"> cells</label>
+        <label>Land <input type="range" id="nd-land" min="0.1" max="0.9" step="0.05" value="0.42"></label>
+        <label>Continent <input type="range" id="nd-cont" min="0" max="1" step="0.1" value="0.6"></label>
+        <label>Mountains <input type="range" id="nd-ridge" min="0" max="1" step="0.1" value="0.6"></label>
+        <label>Rivers <input type="number" id="nd-rivers" min="0" max="40" value="7"></label>
+        <label>Seed <input type="number" id="nd-seed" min="0" max="4294967295" value="1"> <button type="button" id="nd-dice" title="Random seed">🎲</button></label>
+      </div>
+      <menu>
+        <button value="cancel" type="button" id="nd-cancel">Cancel</button>
+        <button value="ok" id="nd-ok" class="primary">Create</button>
+      </menu>
+    </form>
+  </dialog>
   <div id="brushbar" hidden>
     <label>Brush <select id="br-kind"><option value="round">Round</option><option value="scatter">Scatter</option></select></label>
     <label>Size <input type="range" id="br-size" min="0.2" max="10" step="0.1" value="2"><output id="br-size-o">2</output></label>
