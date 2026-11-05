@@ -217,6 +217,8 @@ impl StoredDoc {
 #[derive(Default)]
 pub struct Store {
     pub docs: BTreeMap<String, StoredDoc>,
+    /// The prefab library, shared by every document.
+    pub prefabs: BTreeMap<String, ndcart_core::Prefab>,
 }
 
 impl Store {
@@ -296,6 +298,16 @@ impl Store {
             );
             count += 1;
         }
+        if let Ok(rd) = std::fs::read_dir(dir.join("prefabs")) {
+            for e in rd.flatten() {
+                if let Some(p) = std::fs::read_to_string(e.path())
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<ndcart_core::Prefab>(&t).ok())
+                {
+                    self.prefabs.insert(p.id.clone(), p);
+                }
+            }
+        }
         if count > 0 {
             println!("ndcart: loaded {count} document(s) from {}", dir.display());
         }
@@ -342,6 +354,26 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
         if let Err(e) = write_atomic(&dir.join(name), body.as_bytes()) {
             eprintln!("ndcart: cannot save {name}: {e}");
         }
+    }
+}
+
+/// Prefabs live in `<data dir>/prefabs/<id>.json`, one file each.
+pub fn save_prefab(data_dir: Option<&Path>, p: &ndcart_core::Prefab) {
+    let Some(root) = data_dir else { return };
+    let dir = root.join("prefabs");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(body) = serde_json::to_string(p) {
+        if let Err(e) = write_atomic(&dir.join(format!("{}.json", p.id)), body.as_bytes()) {
+            eprintln!("ndcart: cannot save prefab: {e}");
+        }
+    }
+}
+
+pub fn delete_prefab_file(data_dir: Option<&Path>, id: &str) {
+    if let Some(root) = data_dir {
+        let _ = std::fs::remove_file(root.join("prefabs").join(format!("{id}.json")));
     }
 }
 

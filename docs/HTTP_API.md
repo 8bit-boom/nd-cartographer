@@ -36,6 +36,10 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
 
 | POST | `/api/docs/{id}/generate-map` | `{floor?, kind: dungeon\|cave\|building\|deck\|district, seed, width, height}` | 16–120 squares a side. Adds to the floor as one undoable step; same seed, same map. |
+| GET | `/api/prefabs` | – | The prefab library shared by every project. |
+| POST | `/api/docs/{id}/prefabs` | `{floor?, name, spaces:[room ids]}` | Copy rooms (with doors, lights, notes on them) into the library. |
+| DELETE | `/api/prefabs/{pid}` | – | |
+| POST | `/api/docs/{id}/place-prefab` | `{floor?, prefab, x, y, turns?}` | One undo step; fresh room ids; `turns` = quarter turns clockwise. |
 | GET / POST | `/api/docs/{id}/checkpoints` | POST `{name}` | Named save points of every floor (max 30). |
 | DELETE | `/api/docs/{id}/checkpoints/{cid}` | – | |
 | POST | `/api/docs/{id}/checkpoints/{cid}/restore` | – | Replaces all floors; the replaced state becomes a new "Before restoring…" checkpoint; undo history restarts. |

@@ -593,6 +593,115 @@ async fn restore_checkpoint(
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
+/// `GET /api/prefabs` — the library, newest last.
+async fn list_prefabs(State(app): State<App>) -> Json<serde_json::Value> {
+    let store = app.store.read().await;
+    let list: Vec<_> = store
+        .prefabs
+        .values()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id, "name": p.name, "w": p.w, "h": p.h,
+                "rooms": p.spaces.len(), "squares": p.cells.len(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "prefabs": list }))
+}
+
+#[derive(Deserialize)]
+struct CapturePrefab {
+    #[serde(default)]
+    floor: Option<String>,
+    name: String,
+    spaces: Vec<String>,
+}
+
+/// `POST /api/docs/{id}/prefabs` `{floor?, name, spaces:[room ids]}` — copy
+/// those rooms (doors, lights, notes on them) into the shared library.
+async fn capture_prefab(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<CapturePrefab>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let mut store = app.store.write().await;
+    if store.prefabs.len() >= ndcart_core::prefab::MAX_PREFABS {
+        return Err(ApiError(CoreError::CapExceeded(
+            "the prefab library is full; delete some first".into(),
+        )));
+    }
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &b.floor {
+        Some(f) => floors_by_id(&doc.floors, f)?,
+        None => 0,
+    };
+    let p =
+        ndcart_core::prefab::capture(&doc.floors[idx], &b.name, &b.spaces, doc.manifest.cell_size)?;
+    store::save_prefab(app.data_dir.as_deref(), &p);
+    let pid = p.id.clone();
+    store.prefabs.insert(pid.clone(), p);
+    Ok(Json(serde_json::json!({ "ok": true, "id": pid })))
+}
+
+/// `DELETE /api/prefabs/{pid}`.
+async fn delete_prefab(
+    State(app): State<App>,
+    Path(pid): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    if store.prefabs.remove(&pid).is_none() {
+        return Err(ApiError(CoreError::NotFound(format!("prefab {pid}"))));
+    }
+    store::delete_prefab_file(app.data_dir.as_deref(), &pid);
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct PlacePrefab {
+    #[serde(default)]
+    floor: Option<String>,
+    prefab: String,
+    x: i32,
+    y: i32,
+    #[serde(default)]
+    turns: u8,
+}
+
+/// `POST /api/docs/{id}/place-prefab` `{floor?, prefab, x, y, turns?}` — one undo step.
+async fn place_prefab(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<PlacePrefab>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let mut store = app.store.write().await;
+    let prefab = store
+        .prefabs
+        .get(&b.prefab)
+        .cloned()
+        .ok_or_else(|| CoreError::NotFound(format!("prefab {}", b.prefab)))?;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor_id = match &b.floor {
+        Some(f) => f.clone(),
+        None => doc.floors[0].id.clone(),
+    };
+    let ops = ndcart_core::prefab::place(&prefab, b.x, b.y, b.turns, doc.manifest.cell_size)?;
+    doc.apply_ops(&floor_id, &ops)?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
+}
+
 /// `POST /api/docs/{id}/generate-map` `{floor?, kind, seed, width, height}` — a
 /// dungeon, cave, building, deck or city district drawn onto the floor as ONE
 /// undoable step (it adds to what is there; the same seed gives the same map).
@@ -1093,6 +1202,10 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/floors", post(floors_route))
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
         .route("/api/docs/{id}/generate-map", post(generate_map))
+        .route("/api/prefabs", get(list_prefabs))
+        .route("/api/prefabs/{pid}", axum::routing::delete(delete_prefab))
+        .route("/api/docs/{id}/prefabs", post(capture_prefab))
+        .route("/api/docs/{id}/place-prefab", post(place_prefab))
         .route(
             "/api/docs/{id}/checkpoints",
             get(list_checkpoints).post(create_checkpoint),
@@ -2170,6 +2283,89 @@ mod tests {
             "players see the open label"
         );
         assert_eq!(count(&player, [0, 0, 0xc0]), 0, "and not the GM's note");
+    }
+
+    #[tokio::test]
+    async fn a_prefab_saved_from_one_project_places_into_another() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let mk = |name: &'static str| {
+            let router = router.clone();
+            async move {
+                let (_, b) = call(
+                    &router,
+                    "POST",
+                    "/api/docs",
+                    format!(r#"{{"name":"{name}"}}"#).into_bytes(),
+                )
+                .await;
+                let id = json(b)["id"].as_str().unwrap().to_string();
+                let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+                let floor = json(d)["floors"][0]["id"].as_str().unwrap().to_string();
+                (id, floor)
+            }
+        };
+        let (a, fa) = mk("A").await;
+        let (b, fb) = mk("B").await;
+        let ops = serde_json::json!({"floor": fa, "ops": [
+            {"t":"upsert_space","space":{"id":"hall","name":"Hall","color":"#7f5539","kind":"room"}},
+            {"t":"paint_cells","space":"hall","cells":[{"x":4,"y":4},{"x":5,"y":4},{"x":4,"y":5}]}]});
+        call(
+            &router,
+            "POST",
+            &format!("/api/docs/{a}/ops"),
+            ops.to_string().into_bytes(),
+        )
+        .await;
+        let (st, r) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{a}/prefabs"),
+            br#"{"name":"L hall","spaces":["hall"]}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let pid = json(r)["id"].as_str().unwrap().to_string();
+        let (_, l) = call(&router, "GET", "/api/prefabs", vec![]).await;
+        assert_eq!(json(l)["prefabs"][0]["squares"], 3);
+        let place = |turns: u8, x: i32| {
+            format!(r#"{{"prefab":"{pid}","x":{x},"y":10,"turns":{turns}}}"#).into_bytes()
+        };
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{b}/place-prefab"),
+            place(0, 20),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{b}"), vec![]).await;
+        assert_eq!(
+            json(d)["floors"][0]["grid"]["cells"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{b}/place-prefab"),
+            place(1, ndcart_core::MAX_CELL),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        let (st, _) = call(&router, "DELETE", &format!("/api/prefabs/{pid}"), vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{b}/place-prefab"),
+            place(0, 1),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let _ = fb;
     }
 
     #[tokio::test]

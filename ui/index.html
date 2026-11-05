@@ -31,6 +31,7 @@
     <button id="tool-paint" class="tool battle-only" title="Paint cells (drag)">🖌 Paint</button>
     <button id="tool-brush" class="tool" title="Brush: freehand material (R). Pen pressure and tilt shape the line">🖍 Brush</button>
     <button id="tool-erase" class="tool" title="Eraser: reveals the room layer beneath (E)">🧽 Erase</button>
+    <button id="tool-prefab" class="tool" title="Prefabs: pick one from the Outline panel, then click the map to place it">🧩 Prefab</button>
     <button id="tool-stairs" class="tool" title="Stairs: place a way to another floor (double-click one with the pan tool to follow it)">🪜 Stairs</button>
     <button id="tool-label" class="tool" title="Label: click to place text (T)">🔤 Label</button>
     <button id="tool-pathlabel" class="tool" title="Text along a path: click points, Enter to finish (Y)">〰 Text on path</button>
@@ -78,6 +79,12 @@
       <button id="bk-delete" title="Delete the selected rooms (undoable)">Delete</button>
     </div>
     <ul id="tree" role="tree" aria-label="Rooms, lights and notes"></ul>
+    <details id="ppanel">
+      <summary>Prefabs</summary>
+      <button id="pf-save" title="Copy the selected rooms into the library, shared by every project">Save selection…</button>
+      <ul id="pf-list" aria-label="Prefab library"></ul>
+      <p class="dim">Pick one, then click the map to place it. R turns it.</p>
+    </details>
     <details id="cpanel">
       <summary>Checkpoints</summary>
       <button id="cp-save" title="Save the whole map as it is now, under a name">Save checkpoint…</button>

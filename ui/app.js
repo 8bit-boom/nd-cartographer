@@ -347,7 +347,7 @@ const TERRAIN_TOOLS = ['raise', 'lower', 'smooth', 'flatten', 'roughen'];
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'stairs', 'region', 'route', 'label', 'pathlabel']) {
+  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'stairs', 'prefab', 'region', 'route', 'label', 'pathlabel']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
@@ -364,6 +364,7 @@ function setTool(tool) {
     : TERRAIN_TOOLS.includes(tool) ? `${tool[0].toUpperCase()}${tool.slice(1)}: drag over the map`
     : tool === 'river' ? 'River: click points from source to mouth · Enter finishes · Esc cancels'
     : tool === 'marker' ? 'Marker: click to place a point of interest'
+    : tool === 'prefab' ? `Prefab ${state.prefab?.name || ''}: click to place its top-left corner (R turns it, now ${state.prefabTurns * 90}°)`
     : tool === 'stairs' ? 'Stairs: click where they are, then say which floor they lead to'
     : tool === 'label' ? 'Label: click where the text goes'
     : tool === 'pathlabel' ? 'Text on a path: click points along the way · Enter finishes · Esc cancels'
@@ -934,6 +935,11 @@ canvas.addEventListener('pointerdown', (e) => {
     dragging = null;
     return;
   }
+  if (state.tool === 'prefab' && e.button === 0) {
+    placePrefabAt(wx, wy);
+    dragging = null;
+    return;
+  }
   if (state.tool === 'stairs' && e.button === 0) {
     placeStairs(wx, wy);
     dragging = null;
@@ -1043,7 +1049,7 @@ canvas.addEventListener('wheel', (e) => {
 // ONE table is both the key handler and the F1 help (they cannot drift).
 const KEYS = [
   { key: 'b', label: 'Paint tool', run: () => setTool('paint') },
-  { key: 'r', label: 'Brush tool', run: () => setTool('brush') },
+  { key: 'r', label: 'Brush tool (turns the prefab while placing one)', run: () => { if (state.tool === 'prefab') { state.prefabTurns = (state.prefabTurns + 1) % 4; setTool('prefab'); } else setTool('brush'); } },
   { key: 'e', label: 'Eraser tool', run: () => setTool('erase') },
   { key: 'h', label: 'Raise land (world maps)', run: () => regionOnly('raise') },
   { key: 'l', label: 'Lower land (world maps)', run: () => regionOnly('lower') },
@@ -1323,6 +1329,63 @@ document.getElementById('gen-form').onsubmit = async () => {
     statusEl.textContent = `Generated a ${body.kind} (seed ${body.seed}). Ctrl+Z takes it back.`;
   } catch (e) { statusEl.textContent = `Error: ${e.message}`; }
 };
+
+// ---------- prefabs ----------
+state.prefab = null;       // {id, name, w, h} being placed
+state.prefabTurns = 0;
+async function loadPrefabs() {
+  const list = document.getElementById('pf-list');
+  let ps = [];
+  try { ps = (await api('GET', '/api/prefabs')).prefabs; } catch { return; }
+  list.textContent = '';
+  if (ps.length === 0) { const li = document.createElement('li'); li.className = 'dim'; li.textContent = 'None yet'; list.appendChild(li); }
+  for (const p of ps) {
+    const li = document.createElement('li');
+    li.setAttribute('aria-current', String(state.prefab?.id === p.id));
+    const name = document.createElement('span');
+    name.className = 'pf-name'; name.textContent = p.name;
+    name.title = `${p.w}×${p.h} squares, ${p.rooms} room(s)`;
+    const use = document.createElement('button'); use.textContent = state.prefab?.id === p.id ? 'Stop' : 'Place';
+    use.onclick = () => {
+      state.prefab = state.prefab?.id === p.id ? null : p;
+      state.prefabTurns = 0;
+      if (state.prefab) setTool('prefab'); else setTool('pan');
+      document.activeElement?.blur();      // so R (turn) reaches the map, not the panel
+      loadPrefabs();
+    };
+    const del = document.createElement('button'); del.textContent = 'Delete';
+    del.onclick = async () => {
+      try { await api('DELETE', `/api/prefabs/${p.id}`); if (state.prefab?.id === p.id) { state.prefab = null; setTool('pan'); } await loadPrefabs(); }
+      catch (e) { statusEl.textContent = `Error: ${e.message}`; }
+    };
+    li.append(name, use, del);
+    list.appendChild(li);
+  }
+}
+document.getElementById('tool-prefab').onclick = () => {
+  const d = document.getElementById('ppanel');
+  d.open = true; loadPrefabs();
+  if (state.prefab) setTool('prefab'); else statusEl.textContent = 'Pick a prefab in the Outline panel (Prefabs), then click the map.';
+};
+document.getElementById('ppanel').addEventListener('toggle', (e) => { if (e.target.open) loadPrefabs(); });
+document.getElementById('pf-save').onclick = async () => {
+  if (state.sel.size === 0) { statusEl.textContent = 'Select some rooms in the outline first (Ctrl+click).'; return; }
+  const name = window.prompt('Prefab name', selSpaces()[0]?.name || 'My prefab');
+  if (name === null || !name.trim()) return;
+  try {
+    await api('POST', `/api/docs/${state.docId}/prefabs`, { floor: state.floorId, name: name.trim().slice(0, 80), spaces: [...state.sel] });
+    await loadPrefabs();
+    statusEl.textContent = `Saved "${name.trim()}" to the prefab library.`;
+  } catch (e) { statusEl.textContent = `Error: ${e.message}`; }
+};
+async function placePrefabAt(wx, wy) {
+  if (!state.prefab) return;
+  const [cx, cy] = worldToCell(wx, wy);
+  try {
+    const res = await api('POST', `/api/docs/${state.docId}/place-prefab`, { floor: state.floorId, prefab: state.prefab.id, x: cx, y: cy, turns: state.prefabTurns });
+    state.rev = res.rev; tileCache.clear(); await refresh();
+  } catch (e) { statusEl.textContent = `Error: ${e.message}`; }
+}
 
 // ---------- checkpoints ----------
 async function loadCheckpoints() {
