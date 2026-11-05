@@ -189,7 +189,7 @@ document.getElementById('btn-new').onclick = () => {
   newDialog.showModal();
 };
 for (const r of document.querySelectorAll('input[name=nd-kind]')) {
-  r.onchange = () => { document.getElementById('nd-world').hidden = ndKind() !== 'region'; };
+  r.onchange = () => { document.getElementById('nd-world').hidden = ndKind() !== 'region'; document.getElementById('nd-battle').hidden = ndKind() !== 'battle'; };
 }
 document.getElementById('nd-dice').onclick = () => { document.getElementById('nd-seed').value = String(Math.floor(Math.random() * 4294967295)); };
 document.getElementById('nd-cancel').onclick = () => newDialog.close();
@@ -201,6 +201,11 @@ document.getElementById('new-form').onsubmit = async (e) => {
   newDialog.close();
   try {
     const m = await api('POST', '/api/docs', { name, kind });
+    const start = kind === 'battle' ? document.getElementById('nd-start').value : '';
+    if (start) {
+      statusEl.textContent = `Generating a ${start}…`;
+      await api('POST', `/api/docs/${m.id}/generate-map`, { kind: start, seed: Math.floor(Math.random() * 1e6), width: 64, height: 48 });
+    }
     if (kind === 'region') {
       statusEl.textContent = 'Generating the world…';
       await api('POST', `/api/docs/${m.id}/generate`, worldParams());
@@ -253,6 +258,8 @@ async function refresh() {
   setExportLinks();
   buildOutline();
   refreshProblems();
+  loadMiniImage();
+  buildViews();
 }
 
 // ---------- screen <-> world ----------
@@ -302,7 +309,7 @@ function render() {
   drawLiveStroke();
   drawTerrainOverlay();
   drawOverlayDraft();
-  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); drawTerrainOverlay(); drawOverlayDraft(); });
+  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); drawTerrainOverlay(); drawOverlayDraft(); });  drawMinimap();
 }
 
 const tileCache = new Map(); // url -> Image
@@ -1306,6 +1313,151 @@ function buildOutline() {
     if (hadFocus) keep.focus();
   }
 }
+
+// ---------- minimap, saved views, copy view ----------
+const mini = document.getElementById('minimap');
+const miniImg = { img: null, key: '', cols: 0, rows: 0 };
+let miniTimer = null;
+
+function loadMiniImage() {
+  clearTimeout(miniTimer);
+  miniTimer = setTimeout(() => {
+    if (!state.doc) return;
+    const key = `${state.docId}/${state.floorId}/${state.rev}`;
+    if (miniImg.key === key) return;
+    const img = new Image();
+    img.onload = () => { miniImg.img = img; miniImg.key = key; miniImg.cols = img.naturalWidth / 3; miniImg.rows = img.naturalHeight / 3; drawMinimap(); };
+    img.onerror = () => { miniImg.img = null; miniImg.key = key; drawMinimap(); };   // an empty floor has no picture
+    img.src = `/api/docs/${state.docId}/export/png?floor=${state.floorId}&ppc=3&format=webp&quality=50&rev=${state.rev}`;
+  }, 500);
+}
+
+// Minimap geometry: the whole floor fitted into the little canvas.
+function miniScale() {
+  const cols = miniImg.cols || 1, rows = miniImg.rows || 1;
+  const k = Math.min(mini.width / cols, mini.height / rows);
+  return { k, ox: (mini.width - cols * k) / 2, oy: (mini.height - rows * k) / 2 };
+}
+
+function drawMinimap() {
+  const g = mini.getContext('2d');
+  g.clearRect(0, 0, mini.width, mini.height);
+  if (!miniImg.img) return;
+  const { k, ox, oy } = miniScale();
+  g.drawImage(miniImg.img, ox, oy, miniImg.cols * k, miniImg.rows * k);
+  // The part of the map the main view is showing.
+  const s = ppc();
+  const [wx0, wy0] = screenToWorld(0, 0);
+  g.strokeStyle = '#4cc2ff'; g.lineWidth = 1.5;
+  g.strokeRect(ox + (wx0 / s) * k, oy + (wy0 / s) * k, (canvas.clientWidth / s) * k, (canvas.clientHeight / s) * k);
+}
+
+function miniJump(e) {
+  const r = mini.getBoundingClientRect();
+  const { k, ox, oy } = miniScale();
+  const px = (e.clientX - r.left) * (mini.width / r.width), py = (e.clientY - r.top) * (mini.height / r.height);
+  centerOn({ x: (px - ox) / k - 0.5, y: (py - oy) / k - 0.5 });
+}
+let miniDrag = false;
+mini.addEventListener('pointerdown', (e) => { miniDrag = true; mini.setPointerCapture(e.pointerId); miniJump(e); });
+mini.addEventListener('pointermove', (e) => { if (miniDrag) miniJump(e); });
+mini.addEventListener('pointerup', () => { miniDrag = false; });
+
+// Saved views live in this browser only (a convenience, not part of the map).
+function bmKey() { return `ndcart.views.${state.docId}`; }
+function readViews() {
+  try { const v = JSON.parse(localStorage.getItem(bmKey()) || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+function writeViews(v) { try { localStorage.setItem(bmKey(), JSON.stringify(v.slice(0, 50))); } catch { /* storage blocked: views just don't persist */ } }
+function buildViews() {
+  const sel = document.getElementById('bm-list');
+  sel.textContent = '';
+  const first = document.createElement('option'); first.value = ''; first.textContent = 'Saved views…'; sel.appendChild(first);
+  readViews().forEach((v, i) => { const o = document.createElement('option'); o.value = String(i); o.textContent = v.name; sel.appendChild(o); });
+}
+document.getElementById('bm-save').onclick = () => {
+  const name = window.prompt('Name this view', 'View');
+  if (name === null || !name.trim()) return;
+  const s = ppc();
+  const [wx, wy] = screenToWorld(canvas.clientWidth / 2, canvas.clientHeight / 2);
+  const v = readViews();
+  v.push({ name: name.trim().slice(0, 40), floor: state.floorId, x: wx / s, y: wy / s, z: state.z });
+  writeViews(v); buildViews();
+};
+document.getElementById('bm-list').onchange = async (e) => {
+  const v = readViews()[Number(e.target.value)];
+  e.target.value = '';
+  if (!v) return;
+  if (v.floor !== state.floorId && state.doc.floors.some(f => f.id === v.floor)) await selectFloor(v.floor);
+  state.z = v.z;
+  centerOn({ x: v.x - 0.5, y: v.y - 0.5 });
+};
+document.getElementById('bm-del').onclick = () => {
+  const i = Number(document.getElementById('bm-list').value);
+  const v = readViews();
+  if (Number.isInteger(i) && v[i] && document.getElementById('bm-list').value !== '') { v.splice(i, 1); writeViews(v); buildViews(); }
+  else statusEl.textContent = 'Pick a saved view in the list, then press ✕.';
+};
+
+document.getElementById('view-copy').onclick = () => {
+  canvas.toBlob(async (blob) => {
+    if (!blob) { statusEl.textContent = 'Nothing to copy yet.'; return; }
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      statusEl.textContent = 'Copied the view to the clipboard.';
+    } catch {
+      // No clipboard permission (or no secure context): offer the picture as a file instead.
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${state.doc.manifest.name} (view).png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      statusEl.textContent = 'The clipboard was not available, so the view was saved as a file.';
+    }
+  }, 'image/png');
+};
+
+// ---------- projects gallery ----------
+const galleryDialog = document.getElementById('gallery-dialog');
+document.getElementById('btn-gallery').onclick = async () => {
+  const grid = document.getElementById('gallery-grid');
+  grid.textContent = '';
+  let docs = [];
+  try { docs = (await api('GET', '/api/docs')).docs; } catch (e) { statusEl.textContent = `Error: ${e.message}`; return; }
+  for (const d of docs) {
+    const card = document.createElement('button');
+    card.className = 'card'; card.setAttribute('role', 'listitem');
+    card.setAttribute('aria-current', String(d.id === state.docId));
+    const img = document.createElement('img');
+    img.alt = ''; img.loading = 'lazy';
+    img.src = `/api/docs/${d.id}/export/png?ppc=4&format=webp&quality=50&rev=${d.rev}`;
+    img.onerror = () => { img.removeAttribute('src'); };      // an empty map has no picture
+    const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = d.name;
+    const mt = document.createElement('div'); mt.className = 'mt';
+    mt.textContent = `${d.kind} · ${d.floors.length} floor${d.floors.length === 1 ? '' : 's'}`;
+    card.append(img, nm, mt);
+    card.onclick = () => { galleryDialog.close(); if (d.id !== state.docId) openDoc(d.id); };
+    grid.appendChild(card);
+  }
+  galleryDialog.showModal();
+};
+document.getElementById('gallery-close').onclick = () => galleryDialog.close();
+
+// ---------- live refresh ----------
+// If the project changes from outside (another tab, the HTTP API, a script),
+// pick the change up instead of editing a stale copy.
+setInterval(async () => {
+  if (!state.doc || document.hidden || state.painting || dragging || document.querySelector('dialog[open]')) return;
+  try {
+    const { docs } = await api('GET', '/api/docs');
+    const mine = docs.find(d => d.id === state.docId);
+    if (mine && mine.rev > state.rev) {
+      tileCache.clear();
+      await refresh();
+      statusEl.textContent = 'Updated: this project was changed elsewhere.';
+    }
+  } catch { /* server briefly away: try again next tick */ }
+}, 3000);
 
 // ---------- generate onto a floor ----------
 const genDialog = document.getElementById('gen-dialog');

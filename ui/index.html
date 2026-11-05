@@ -10,6 +10,7 @@
 <header id="topbar">
   <strong id="doc-name">nd-cartographer</strong>
   <select id="doc-select" title="Switch project" aria-label="Project"></select>
+  <button id="btn-gallery" title="All projects as thumbnails">🗂 Projects</button>
   <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
   <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
   <input type="file" id="file-open" accept=".dd2vtt,.uvtt,.df2vtt,application/json" hidden>
@@ -114,6 +115,11 @@
       </div>
     </details>
   </div>
+  <dialog id="gallery-dialog">
+    <h3>Projects</h3>
+    <div id="gallery-grid" role="list"></div>
+    <menu><button id="gallery-close" type="button">Close</button></menu>
+  </dialog>
   <dialog id="gen-dialog">
     <form method="dialog" id="gen-form">
       <h3>Generate onto this floor</h3>
@@ -142,6 +148,16 @@
         <label><input type="radio" name="nd-kind" value="battle" checked> Battle map (rooms, doors, props)</label>
         <label><input type="radio" name="nd-kind" value="region"> World map (generated terrain, rivers)</label>
       </fieldset>
+      <div id="nd-battle">
+        <label>Start from <select id="nd-start">
+          <option value="">Blank</option>
+          <option value="dungeon">A generated dungeon</option>
+          <option value="cave">A generated cave</option>
+          <option value="building">A generated building</option>
+          <option value="deck">A generated ship deck</option>
+          <option value="district">A generated city district</option>
+        </select></label>
+      </div>
       <div id="nd-world" hidden>
         <label>Width <input type="number" id="nd-cols" min="16" max="512" value="160"> cells</label>
         <label>Height <input type="number" id="nd-rows" min="16" max="512" value="110"> cells</label>
@@ -157,6 +173,15 @@
       </menu>
     </form>
   </dialog>
+  <div id="viewtools">
+    <canvas id="minimap" width="180" height="120" title="Click or drag to move the view" aria-label="Minimap"></canvas>
+    <div class="row">
+      <select id="bm-list" aria-label="Saved views"><option value="">Saved views…</option></select>
+      <button id="bm-save" title="Remember this view under a name">★ Save</button>
+      <button id="bm-del" title="Forget the selected saved view">✕</button>
+      <button id="view-copy" title="Copy what you see to the clipboard as a picture">📋 Copy view</button>
+    </div>
+  </div>
   <div id="brushbar" hidden>
     <label>Brush <select id="br-kind"><option value="round">Round</option><option value="scatter">Scatter</option></select></label>
     <label>Size <input type="range" id="br-size" min="0.2" max="10" step="0.1" value="2"><output id="br-size-o">2</output></label>
