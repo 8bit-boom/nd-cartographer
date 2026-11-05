@@ -23,7 +23,7 @@ COPY crates crates
 COPY ui ui
 RUN touch crates/ndcart-core/src/lib.rs crates/ndcart-server/src/main.rs \
     && cargo build --release --locked --target x86_64-unknown-linux-musl \
-    && cp target/x86_64-unknown-linux-musl/release/ndcart /out/ndcart
+    && mkdir -p /out && cp target/x86_64-unknown-linux-musl/release/ndcart /out/ndcart
 
 FROM debian:stable-slim
 RUN apt-get update \
