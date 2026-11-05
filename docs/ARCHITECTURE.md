@@ -40,6 +40,31 @@ tracks what actually exists, crate by crate, as milestones land.
   size because lattice pixels were scaled by pixels-per-cell.
 - Light range is capped at 60 squares (nd-world's cap), not 200.
 
+- **`ndcart-bridge`** — the optional nd-world client (cargo feature `bridge`,
+  default on; CI also builds `--no-default-features` for standalone parity).
+  `login` (`POST /api/login`, 2FA / lockout / non-GM mapped to plain errors),
+  `probe` (`/health` → build + mode; `import_uvtt` is false on the Rust-only
+  image), and `publish`: create → picture → grid → walls → lights → rooms through
+  the *per-part* routes that both images serve, in place on re-publish, every
+  cap (5,000 walls, 60 lights, 100..20,000 px canvas, picture type) checked
+  before the first request, and a failure after creation reports the slug.
+  `rooms` translates our grid into nd-world's room-tool state (small integer
+  space ids, run-length cells, marks as top/left edges).
+- **`ndcart publish DOC --server URL --email E [--world W] [--floor ID] [--ppc 32]
+  [--format webp|avif|png] [--data-dir DIR]`** — password only from
+  `ND_CARTO_PASSWORD` / `ND_CARTO_PASSWORD_FILE` (never an argument), 2FA from
+  `ND_CARTO_TOTP`. The slug is stored in the manifest (`nd_world`), so the next
+  publish updates the same map; a half-finished publish is resumed, not duplicated.
+- **`ndcart convert IN OUT [--format] [--quality]`** and `POST /api/convert` —
+  PNG/JPEG/GIF/BMP/WebP in; PNG/WebP/AVIF out (AVIF *input* needs dav1d, a C
+  library, so it is refused with a clear message).
+
+Verified end to end against a real nd-world (hybrid/Python mode, throwaway data
+directory): publish, re-publish with an AVIF background, walls/lights/rooms read
+back correctly. That run found and fixed two bugs unit tests had missed — saving
+a document with a door panicked (edge marks were a struct-keyed map, which JSON
+cannot express), and `publish` started a nested tokio runtime.
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

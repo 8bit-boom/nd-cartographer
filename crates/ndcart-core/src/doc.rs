@@ -23,6 +23,16 @@ impl DocKind {
     }
 }
 
+/// Where this document was last published (plan §9: slug capture, so a
+/// re-publish updates the same map in place). Pinned to one server + world.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct NdWorldLink {
+    pub server: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world: Option<String>,
+    pub slug: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Manifest {
     pub id: String,
@@ -32,6 +42,8 @@ pub struct Manifest {
     pub cell_size: f64,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nd_world: Option<NdWorldLink>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]

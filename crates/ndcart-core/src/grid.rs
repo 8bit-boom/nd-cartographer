@@ -135,17 +135,35 @@ pub struct RoomGrid {
 struct RoomGridSerde {
     #[serde(default)]
     spaces: BTreeMap<String, Space>,
+    /// A list, not a map: JSON object keys must be strings, and an edge is a
+    /// struct (a map here made every save and `GET /api/docs/{id}` of a
+    /// document with a door fail).
     #[serde(default)]
-    marks: BTreeMap<EdgeKey, Mark>,
+    marks: Vec<MarkEntry>,
     #[serde(default)]
     cells: Vec<CellPaint>,
+}
+
+/// One edge mark in the serde shape — the same `{edge:{cell,edge}, mark}` the
+/// `set_mark` op uses.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+struct MarkEntry {
+    edge: EdgeKey,
+    mark: Mark,
 }
 
 impl From<&RoomGrid> for RoomGridSerde {
     fn from(g: &RoomGrid) -> Self {
         RoomGridSerde {
             spaces: g.spaces.clone(),
-            marks: g.marks.clone(),
+            marks: g
+                .marks
+                .iter()
+                .map(|(edge, mark)| MarkEntry {
+                    edge: *edge,
+                    mark: *mark,
+                })
+                .collect(),
             cells: g
                 .cells
                 .iter()
@@ -163,7 +181,7 @@ impl From<RoomGridSerde> for RoomGrid {
     fn from(s: RoomGridSerde) -> Self {
         let mut g = RoomGrid {
             spaces: s.spaces,
-            marks: s.marks,
+            marks: s.marks.into_iter().map(|m| (m.edge, m.mark)).collect(),
             cells: BTreeMap::new(),
         };
         for p in s.cells {
@@ -415,5 +433,38 @@ mod tests {
         let back: RoomGrid = serde_json::from_str(&s).unwrap();
         assert_eq!(back, g);
         assert_eq!(back.cell_count(), 2);
+    }
+
+    #[test]
+    fn serde_roundtrip_keeps_marks() {
+        // Regression: marks used to be a map keyed by a struct, which JSON
+        // cannot express ("key must be a string") — saving any document with
+        // a door failed.
+        let mut g = RoomGrid::default();
+        g.upsert_space(default_space("a", "A", SpaceKind::Room))
+            .unwrap();
+        g.paint(&[CellKey::new(0, 0), CellKey::new(1, 0)], Some("a"))
+            .unwrap();
+        let e = EdgeKey {
+            cell: CellKey::new(0, 0),
+            edge: Edge::East,
+        };
+        g.set_mark(e, Some(Mark::new(MarkKind::Door))).unwrap();
+        g.set_mark(
+            EdgeKey {
+                cell: CellKey::new(0, 0),
+                edge: Edge::North,
+            },
+            Some(Mark::new(MarkKind::Window)),
+        )
+        .unwrap();
+        let s = serde_json::to_string(&g).unwrap();
+        assert!(s.contains(r#""marks":[{"#), "{s}");
+        let back: RoomGrid = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, g);
+        assert_eq!(
+            back.mark_between(CellKey::new(1, 0), Edge::West),
+            Some(Mark::new(MarkKind::Door))
+        );
     }
 }

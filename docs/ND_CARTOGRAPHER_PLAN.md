@@ -1018,6 +1018,20 @@ These supersede the text above where they conflict.
   until then. M0's remaining items (WebGL viewport, WS change feed, bench budgets in
   CI, the 100k-object and kill -9 tests) are tracked in ARCHITECTURE.md.
 
+**More verified nd-world facts (read from the handlers, then confirmed live)**
+- `POST /maps/schematic/{slug}/grid` takes `{"grid_type": "square", "config":
+  {cell_size, offset_x, offset_y, unit_per_cell, unit_label}}`, not the flat body
+  §9.2 shows. `POST /maps/schematic/new` is a form post answering `303` with the
+  slug in `Location` (it also needs a 100..20,000 px canvas).
+- The Rust-only gateway *does* serve `/new`, `/upload`, `/embed-image`, `/grid`,
+  `/walls`, `/lights`, `/rooms`, `/elements` (`edits.rs`); only `import-uvtt` is
+  Python-only. Publish A therefore uses the per-part routes on every image.
+- Background upload accepts WebP and AVIF as well as PNG/JPEG, so a publish can
+  send the smaller formats.
+- nd-world's room state is not a pass-through: space ids are integers 1..9999,
+  kinds come from a fixed list, cells are run-length coded, and an edge mark names
+  the cell whose top (`h`) or left (`v`) edge it is.
+
 **Image formats** — exports support PNG, WebP and AVIF (owner request). UVTT pictures
 stay PNG/WebP (the consumers can't read AVIF). Lossy WebP for cap-fitting is a
 follow-up (needs libwebp); until then cap-fitting uses AVIF for plain exports and

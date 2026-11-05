@@ -30,6 +30,7 @@ impl StoredDoc {
             cell_size: 32.0,
             created_at: now.clone(),
             updated_at: now,
+            nd_world: None,
         };
         let floor = FloorDoc::new(new_id("fl"), "Ground".to_string());
         StoredDoc {
@@ -152,8 +153,25 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
         eprintln!("ndcart: cannot create {}", dir.display());
         return;
     }
-    let manifest = serde_json::to_string_pretty(&doc.manifest).expect("manifest serializes");
-    let floors = serde_json::to_string_pretty(&doc.floors).expect("floors serialize");
+    // A failed serialize must never take the server down mid-edit: report it
+    // and keep the previous files (the journal is the source of truth anyway).
+    let (manifest, floors) = match (
+        serde_json::to_string_pretty(&doc.manifest),
+        serde_json::to_string_pretty(&doc.floors),
+    ) {
+        (Ok(m), Ok(f)) => (m, f),
+        (m, f) => {
+            eprintln!(
+                "ndcart: cannot serialize {}: {}",
+                doc.manifest.id,
+                m.err()
+                    .map(|e| e.to_string())
+                    .or(f.err().map(|e| e.to_string()))
+                    .unwrap_or_default()
+            );
+            return;
+        }
+    };
     let journal = doc.journal.to_ndjson();
     // Crash-safe: write to a temp file, fsync, then rename over the target, so
     // a kill -9 mid-save leaves either the old or the new file, never a torn one.
@@ -187,4 +205,33 @@ pub fn apply_ops_direct(floor: &mut FloorDoc, journal: &mut Journal, ops: &[Op])
         journal.push_entry(op.clone(), inverse);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    use ndcart_core::journal::Op;
+    use ndcart_core::DocKind;
+
+    #[test]
+    fn a_document_with_doors_saves_and_reloads() {
+        let dir = std::env::temp_dir().join(format!("ndcart-persist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut d = StoredDoc::new("Doors", DocKind::Battle);
+        let fid = d.floors[0].id.clone();
+        let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+            {"t":"upsert_space","space":{"id":"s","name":"H","color":"#7f5539","kind":"room"}},
+            {"t":"paint_cells","cells":[{"x":0,"y":0},{"x":1,"y":0}],"space":"s"},
+            {"t":"set_mark","edge":{"cell":{"x":0,"y":0},"edge":"east"},"mark":{"kind":"door","state":"closed"}}
+        ]))
+        .unwrap();
+        d.apply_ops(&fid, &ops).unwrap();
+        save_doc(Some(&dir), &d);
+        let mut st = Store::default();
+        st.load_dir(&dir).unwrap();
+        let back = &st.docs[&d.manifest.id];
+        assert_eq!(back.floors[0].grid, d.floors[0].grid);
+        assert!(!back.floors[0].grid.marks.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

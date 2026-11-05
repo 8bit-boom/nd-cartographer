@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ndcart-core", "crates/ndcart-formats", "crates/ndcart-server"]
+members = ["crates/ndcart-core", "crates/ndcart-bridge", "crates/ndcart-formats", "crates/ndcart-server"]
 
 [workspace.package]
 edition = "2021"

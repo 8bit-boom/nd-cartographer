@@ -4,6 +4,8 @@
 
 mod auth;
 mod convert;
+#[cfg(feature = "bridge")]
+mod publish;
 mod store;
 mod tiles;
 
@@ -634,6 +636,13 @@ async fn main() {
     match cmd.as_str() {
         "bench" => run_bench(),
         "convert" => run_convert(args.collect()),
+        #[cfg(feature = "bridge")]
+        "publish" => {
+            if let Err(m) = publish::run(args.collect()).await {
+                eprintln!("ndcart: {m}");
+                std::process::exit(1);
+            }
+        }
         "serve" => {
             let mut listen: Option<String> = None;
             let mut data_dir: Option<PathBuf> = None;
@@ -696,7 +705,7 @@ async fn main() {
         }
         other => {
             eprintln!(
-                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT]"
+                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | publish DOC ...]"
             );
             eprintln!("  unknown command: {other}");
             std::process::exit(2);
