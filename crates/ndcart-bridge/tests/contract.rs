@@ -1,7 +1,7 @@
 //! Contract tests against a faked nd-world (plan §12: wiremock per route).
 //! They pin the request shapes read out of nd-world's own handlers.
 
-use ndcart_bridge::{Bridge, BridgeError, PublishMap, PublishRegion};
+use ndcart_bridge::{Bridge, BridgeError, DirectChat, PublishMap, PublishRegion};
 use ndcart_core::{Light, Wall, WallKind};
 use serde_json::json;
 use wiremock::matchers::{body_json, method, path, query_param};
@@ -528,4 +528,98 @@ async fn chat_failures_are_told_apart() {
         let e = b.chat("s", "u", Some("m")).await.unwrap_err().to_string();
         assert!(e.contains(want), "{status}: {e}");
     }
+}
+
+#[tokio::test]
+async fn location_names_keeps_only_locations() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/entities/picker"))
+        .and(query_param("w", "neon"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"entities": [
+                {"id": 1, "name": "Port Neon", "kind": "location", "folder": ""},
+                {"id": 2, "name": "Mara", "kind": "character", "folder": ""},
+                {"id": 3, "name": "The Drowned Abbey", "kind": "location", "folder": "ruins"},
+            ]})),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    assert_eq!(
+        b.location_names().await.unwrap(),
+        ["Port Neon", "The Drowned Abbey"]
+    );
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/entities/picker"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    assert!(b
+        .location_names()
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not logged in"));
+}
+
+#[tokio::test]
+async fn direct_chat_speaks_the_openai_shape_and_never_overlaps_two_requests() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::header("authorization", "Bearer sk-test"))
+        .and(body_json(json!({
+            "model": "llama3", "stream": false,
+            "messages": [{"role": "system", "content": "be strict"}, {"role": "user", "content": "a crypt"}],
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices": [{"message": {"role": "assistant", "content": "{\"ok\":1}"}}]})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let d = DirectChat::new(
+        &format!("{}/v1/", s.uri()),
+        "llama3",
+        Some("sk-test".into()),
+    )
+    .unwrap();
+    assert_eq!(d.chat("be strict", "a crypt").await.unwrap(), "{\"ok\":1}");
+    assert!(d.describe().contains("llama3"));
+    // Bad settings are refused before any request.
+    assert!(DirectChat::new("ftp://x", "m", None).is_err());
+    assert!(DirectChat::new("http://x", " ", None).is_err());
+}
+
+#[tokio::test]
+async fn direct_chat_failures_are_told_apart() {
+    for (status, body, want) in [
+        (401, json!({}), "not logged in"),
+        (404, json!({"error": "model not found"}), "refused"),
+        (200, json!({"choices": []}), "no choices"),
+        (
+            200,
+            json!({"choices": [{"message": {"content": "  "}}]}),
+            "empty reply",
+        ),
+    ] {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&s)
+            .await;
+        let d = DirectChat::new(&s.uri(), "m", None).unwrap();
+        let e = d.chat("s", "u").await.unwrap_err().to_string();
+        assert!(e.contains(want), "{status}: {e}");
+    }
+    // A server that is not there at all.
+    let d = DirectChat::new("http://127.0.0.1:9", "m", None).unwrap();
+    assert!(d
+        .chat("s", "u")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("cannot reach"));
 }

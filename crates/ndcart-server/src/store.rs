@@ -67,6 +67,7 @@ impl StoredDoc {
             created_at: now.clone(),
             updated_at: now,
             nd_world: None,
+            style: None,
         };
         let floor = FloorDoc::new(new_id("fl"), "Ground".to_string());
         StoredDoc {
@@ -177,7 +178,13 @@ impl StoredDoc {
         spec: ndcart_core::mapspec::MapSpec,
         seed: u64,
     ) -> CoreResult<&Proposal> {
-        let floors = ndcart_core::mapspec::compile(&spec, seed)?;
+        let palette = self
+            .manifest
+            .style
+            .as_ref()
+            .map(|s| s.palette.clone())
+            .unwrap_or_default();
+        let floors = ndcart_core::mapspec::compile_styled(&spec, seed, &palette)?;
         if self.proposals.len() >= MAX_PROPOSALS {
             self.proposals.remove(0);
         }

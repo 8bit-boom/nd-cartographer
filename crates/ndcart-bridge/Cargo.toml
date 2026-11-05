@@ -11,6 +11,7 @@ ndcart-core = { path = "../ndcart-core" }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "cookies", "json", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

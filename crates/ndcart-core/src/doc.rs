@@ -48,6 +48,43 @@ pub struct Manifest {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nd_world: Option<NdWorldLink>,
+    /// The project's look, handed to AI drafts and used for generated room colours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<StyleProfile>,
+}
+
+/// A project's house style.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct StyleProfile {
+    /// In words: "gritty cyberpunk, neon and rust".
+    pub tone: String,
+    /// Up to 8 `#rrggbb` colours generated rooms are painted with, in order.
+    #[serde(default)]
+    pub palette: Vec<String>,
+}
+
+impl StyleProfile {
+    pub fn validate(&self) -> CoreResult<()> {
+        if self.tone.chars().count() > 300 {
+            return Err(CoreError::Invalid(
+                "the tone is at most 300 characters".into(),
+            ));
+        }
+        if self.palette.len() > 8 {
+            return Err(CoreError::Invalid(
+                "a palette holds at most 8 colours".into(),
+            ));
+        }
+        for c in &self.palette {
+            let b = c.as_bytes();
+            if !(b.len() == 7 && b[0] == b'#' && b[1..].iter().all(u8::is_ascii_hexdigit)) {
+                return Err(CoreError::Invalid(format!(
+                    "palette colour {c:?} must be #rrggbb"
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]

@@ -321,6 +321,33 @@ impl Bridge {
         Ok(out.to_string())
     }
 
+    /// The names of the world's locations (`GET /api/entities/picker`, kind
+    /// "location"), so generated names can agree with existing lore.
+    pub async fn location_names(&self) -> Result<Vec<String>, BridgeError> {
+        let resp = self
+            .send(self.req(Method::GET, "/api/entities/picker"))
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        let v: Value = check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("entities/picker answer: {e}")))?;
+        let list = v
+            .get("entities")
+            .and_then(Value::as_array)
+            .ok_or_else(|| BridgeError::Protocol("entities/picker had no entities list".into()))?;
+        Ok(list
+            .iter()
+            .filter(|e| e.get("kind").and_then(Value::as_str) == Some("location"))
+            .filter_map(|e| e.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect())
+    }
+
     fn precheck(map: &PublishMap) -> Result<(), BridgeError> {
         let bad = |m: String| Err(BridgeError::Precheck(m));
         if map.walls.len() > WALL_CAP {

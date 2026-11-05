@@ -152,88 +152,276 @@ pub fn parse_world_reply(reply: &str) -> Result<crate::worldspec::WorldSpec, Str
     Ok(spec)
 }
 
+/// Where the model lives: nd-world's AI queue, or a direct OpenAI-compatible endpoint.
 pub struct Config {
-    pub server: String,
+    pub server: Option<String>,
     pub world: Option<String>,
-    pub email: String,
+    pub email: Option<String>,
     pub model: Option<String>,
+    /// Standalone mode: `(base url, model)`; the key comes from `ND_CARTO_LLM_KEY[_FILE]`.
+    pub direct: Option<(String, String)>,
+}
+
+fn env(k: &str) -> Option<String> {
+    std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
 impl Config {
-    /// The studio's own configuration, from the environment.
+    /// The studio's own configuration, from the environment. A direct model
+    /// (`ND_CARTO_LLM_URL` + `ND_CARTO_LLM_MODEL`) wins over nd-world.
     pub fn from_env() -> Result<Config, String> {
-        let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        Ok(Config {
-            server: get("ND_CARTO_SERVER")
-                .ok_or("set ND_CARTO_SERVER (the nd-world address) to draft with AI")?,
-            world: get("ND_CARTO_WORLD"),
-            email: get("ND_CARTO_EMAIL").ok_or("set ND_CARTO_EMAIL to draft with AI")?,
-            model: get("ND_CARTO_MODEL"),
-        })
+        let direct = match (env("ND_CARTO_LLM_URL"), env("ND_CARTO_LLM_MODEL")) {
+            (Some(u), Some(m)) => Some((u, m)),
+            (Some(_), None) => {
+                return Err(
+                    "set ND_CARTO_LLM_MODEL (the model name) as well as ND_CARTO_LLM_URL".into(),
+                )
+            }
+            _ => None,
+        };
+        let cfg = Config {
+            server: env("ND_CARTO_SERVER"),
+            world: env("ND_CARTO_WORLD"),
+            email: env("ND_CARTO_EMAIL"),
+            model: env("ND_CARTO_MODEL"),
+            direct,
+        };
+        if cfg.direct.is_none() && (cfg.server.is_none() || cfg.email.is_none()) {
+            return Err("to draft with AI set ND_CARTO_SERVER and ND_CARTO_EMAIL (nd-world), or ND_CARTO_LLM_URL and ND_CARTO_LLM_MODEL (a model you run yourself)".into());
+        }
+        Ok(cfg)
+    }
+
+    /// One line for the UI banner, or None when no AI is configured.
+    pub fn describe(&self) -> String {
+        match (&self.direct, &self.server) {
+            (Some((u, m)), _) => format!("standalone: {u} ({m})"),
+            (None, Some(s)) => format!("nd-world: {s}"),
+            _ => "not configured".into(),
+        }
     }
 }
 
-/// Log in to nd-world and draft a spec from `prompt`.
-pub async fn draft(cfg: &Config, prompt: &str) -> Result<MapSpec, String> {
+/// A connected model.
+pub enum Backend {
+    World(Bridge, Option<String>),
+    Direct(ndcart_bridge::DirectChat),
+}
+
+impl Backend {
+    pub async fn connect(cfg: &Config) -> Result<Backend, String> {
+        if let Some((url, model)) = &cfg.direct {
+            let key = env("ND_CARTO_LLM_KEY").or_else(|| {
+                env("ND_CARTO_LLM_KEY_FILE")
+                    .and_then(|f| std::fs::read_to_string(f).ok())
+                    .map(|k| k.trim().to_string())
+            });
+            return Ok(Backend::Direct(
+                ndcart_bridge::DirectChat::new(url, model, key).map_err(|e| e.to_string())?,
+            ));
+        }
+        let (server, email) = (
+            cfg.server.as_deref().ok_or("--server is required")?,
+            cfg.email.as_deref().ok_or("--email is required")?,
+        );
+        let pw = crate::publish::password()?;
+        let totp = std::env::var("ND_CARTO_TOTP").ok();
+        let bridge = Bridge::new(server, cfg.world.as_deref()).map_err(|e| e.to_string())?;
+        bridge
+            .login(email, &pw, totp.as_deref())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(Backend::World(bridge, cfg.model.clone()))
+    }
+
+    pub async fn chat(&self, system: &str, user: &str) -> Result<String, String> {
+        match self {
+            Backend::World(b, model) => b
+                .chat(system, user, model.as_deref())
+                .await
+                .map_err(|e| e.to_string()),
+            Backend::Direct(d) => d.chat(system, user).await.map_err(|e| e.to_string()),
+        }
+    }
+
+    /// The world's location names for lore-grounded naming (nd-world only).
+    pub async fn locations(&self) -> Result<Vec<String>, String> {
+        match self {
+            Backend::World(b, _) => b.location_names().await.map_err(|e| e.to_string()),
+            Backend::Direct(_) => {
+                Err("lore grounding needs nd-world (this is a standalone model)".into())
+            }
+        }
+    }
+}
+
+/// What a draft may lean on besides the prompt.
+#[derive(Default, Clone)]
+pub struct Context {
+    /// The project's look: "gritty cyberpunk, neon and rust".
+    pub tone: Option<String>,
+    /// Location names to reuse where they fit.
+    pub locations: Vec<String>,
+    /// Fetch the world's location names from nd-world before asking.
+    pub lore: bool,
+}
+
+impl Context {
+    /// Fill in the lore if it was asked for (a failure is reported, not ignored).
+    async fn with_lore(&self, backend: &Backend) -> Result<Context, String> {
+        let mut c = self.clone();
+        if c.lore {
+            c.locations = backend.locations().await?;
+        }
+        Ok(c)
+    }
+}
+
+/// The system prompt with the project's style and the world's places added.
+pub fn with_context(base: &str, ctx: &Context) -> String {
+    let mut out = base.to_string();
+    if let Some(t) = ctx.tone.as_deref().filter(|t| !t.trim().is_empty()) {
+        out.push_str(&format!(
+            "\n\nHouse style for this project (let it shape names and feel): {}",
+            t.trim()
+        ));
+    }
+    if !ctx.locations.is_empty() {
+        let names: Vec<&str> = ctx.locations.iter().take(60).map(String::as_str).collect();
+        out.push_str(&format!(
+            "\n\nPlaces that already exist in this world. Reuse these names where they genuinely fit, and invent new names in the same voice for the rest: {}",
+            names.join("; ")
+        ));
+    }
+    out
+}
+
+fn too_long(prompt: &str) -> Result<(), String> {
     if prompt.trim().is_empty() || prompt.chars().count() > 2_000 {
         return Err("describe the map in 1-2000 characters".into());
     }
-    let pw = crate::publish::password()?;
-    let totp = std::env::var("ND_CARTO_TOTP").ok();
-    let bridge = Bridge::new(&cfg.server, cfg.world.as_deref()).map_err(|e| e.to_string())?;
-    bridge
-        .login(&cfg.email, &pw, totp.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
-    let model = cfg.model.clone();
+    Ok(())
+}
+
+/// Draft a battle-map spec from `prompt`.
+pub async fn draft(cfg: &Config, prompt: &str, ctx: &Context) -> Result<MapSpec, String> {
+    too_long(prompt)?;
+    let backend = Backend::connect(cfg).await?;
+    let system = with_context(SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
     draft_with(prompt, 2, |user| {
-        let (bridge, model) = (&bridge, model.clone());
-        async move {
-            bridge
-                .chat(SYSTEM_PROMPT, &user, model.as_deref())
-                .await
-                .map_err(|e| e.to_string())
-        }
+        let (backend, system) = (&backend, system.clone());
+        async move { backend.chat(&system, &user).await }
     })
     .await
 }
 
-/// Log in to nd-world and draft a WORLD spec from `prompt`.
+/// Draft a WORLD spec from `prompt`.
 pub async fn draft_world(
     cfg: &Config,
     prompt: &str,
+    ctx: &Context,
 ) -> Result<crate::worldspec::WorldSpec, String> {
-    if prompt.trim().is_empty() || prompt.chars().count() > 2_000 {
-        return Err("describe the map in 1-2000 characters".into());
-    }
-    let pw = crate::publish::password()?;
-    let totp = std::env::var("ND_CARTO_TOTP").ok();
-    let bridge = Bridge::new(&cfg.server, cfg.world.as_deref()).map_err(|e| e.to_string())?;
-    bridge
-        .login(&cfg.email, &pw, totp.as_deref())
-        .await
-        .map_err(|e| e.to_string())?;
-    let model = cfg.model.clone();
+    too_long(prompt)?;
+    let backend = Backend::connect(cfg).await?;
+    let system = with_context(WORLD_SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
     draft_loop(
         prompt,
         2,
         |user| {
-            let (bridge, model) = (&bridge, model.clone());
-            async move {
-                bridge
-                    .chat(WORLD_SYSTEM_PROMPT, &user, model.as_deref())
-                    .await
-                    .map_err(|e| e.to_string())
-            }
+            let (backend, system) = (&backend, system.clone());
+            async move { backend.chat(&system, &user).await }
         },
         parse_world_reply,
     )
     .await
 }
 
+pub const REFINE_SYSTEM_PROMPT: &str = r##"You revise an existing tabletop battle-map floor, given as a room graph. Reply with ONE JSON object and nothing else: the COMPLETE revised map spec in the same schema as the one you are shown (name, floors[], rooms[], links[], stairs[]), with exactly one floor.
+
+Rules: PINNED rooms must come back unchanged: same id, name, w, h and kind. Every other room may be changed, replaced or removed, and new rooms may be added (give them new unique ids). Keep every room reachable from the first through links. Do not describe positions; the layout is computed."##;
+
+/// The user turn for a refinement: the current floor, the pins, the request.
+pub fn refine_user_turn(
+    current: &ndcart_core::mapspec::FloorSpec,
+    pins: &[String],
+    instruction: &str,
+) -> Result<String, String> {
+    let json = serde_json::to_string(&MapSpec {
+        name: current.name.clone(),
+        floors: vec![current.clone()],
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Current map:\n{json}\n\nPinned room ids (keep exactly): {}\n\nChange request: {}",
+        if pins.is_empty() {
+            "none".into()
+        } else {
+            pins.join(", ")
+        },
+        instruction.trim()
+    ))
+}
+
+/// A refined reply is valid when it is a valid one-floor spec that still holds every pinned room unchanged.
+pub fn judge_refine(
+    current: &ndcart_core::mapspec::FloorSpec,
+    pins: Vec<String>,
+) -> impl Fn(&str) -> Result<MapSpec, String> {
+    let current = current.clone();
+    move |reply: &str| {
+        let spec = parse_reply(reply)?;
+        if spec.floors.len() != 1 {
+            return Err("The spec must have exactly one floor.".into());
+        }
+        for id in &pins {
+            let before = current.rooms.iter().find(|r| &r.id == id);
+            let after = spec.floors[0].rooms.iter().find(|r| &r.id == id);
+            match (before, after) {
+                (Some(b), Some(a)) if a.name == b.name && a.w == b.w && a.h == b.h && a.kind == b.kind => {}
+                (Some(_), Some(_)) => return Err(format!("Pinned room '{id}' was changed; pinned rooms must keep their id, name, w, h and kind.")),
+                (Some(_), None) => return Err(format!("Pinned room '{id}' was dropped; pinned rooms must stay.")),
+                (None, _) => return Err(format!("'{id}' is not a room of the current map and cannot be pinned.")),
+            }
+        }
+        Ok(spec)
+    }
+}
+
+/// Revise `current` per `instruction`, keeping the pinned rooms.
+pub async fn refine(
+    cfg: &Config,
+    current: &ndcart_core::mapspec::FloorSpec,
+    pins: &[String],
+    instruction: &str,
+    ctx: &Context,
+) -> Result<MapSpec, String> {
+    too_long(instruction)?;
+    let backend = Backend::connect(cfg).await?;
+    let system = with_context(REFINE_SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
+    let first = refine_user_turn(current, pins, instruction)?;
+    let judge = judge_refine(current, pins.to_vec());
+    // The repair rounds quote the complaint after the same current map and request.
+    let mut turn = first.clone();
+    let mut last = String::new();
+    for _ in 0..3 {
+        let reply = backend.chat(&system, &turn).await?;
+        match judge(&reply) {
+            Ok(spec) => return Ok(spec),
+            Err(problem) => {
+                turn = format!("{first}\n\nYour previous reply was refused. {problem}\nReply again with the corrected JSON object only.");
+                last = problem;
+            }
+        }
+    }
+    Err(format!(
+        "the model did not produce a usable revision after 3 tries; last problem: {last}"
+    ))
+}
+
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let (mut prompt, mut server, mut world, mut email, mut model, mut out) =
         (None, None, None, None, None, None);
+    let (mut llm_url, mut llm_model) = (None, None);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut val = |n: &str| it.next().ok_or(format!("{n} needs a value"));
@@ -242,18 +430,34 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             "--world" => world = Some(val("--world")?),
             "--email" => email = Some(val("--email")?),
             "--model" => model = Some(val("--model")?),
+            "--llm-url" => llm_url = Some(val("--llm-url")?),
+            "--llm-model" => llm_model = Some(val("--llm-model")?),
             "--out" => out = Some(val("--out")?),
             o if !o.starts_with("--") && prompt.is_none() => prompt = Some(o.to_string()),
             o => return Err(format!("unknown argument: {o}")),
         }
     }
-    let cfg = Config {
-        server: server.ok_or("--server is required")?,
-        world,
-        email: email.ok_or("--email is required")?,
-        model,
+    let direct = match (llm_url, llm_model) {
+        (Some(u), Some(m)) => Some((u, m)),
+        (None, None) => None,
+        _ => return Err("--llm-url and --llm-model go together".into()),
     };
-    let spec = draft(&cfg, &prompt.ok_or("describe the map, in quotes")?).await?;
+    if direct.is_none() && (server.is_none() || email.is_none()) {
+        return Err("use --server and --email (nd-world), or --llm-url and --llm-model (a model you run yourself)".into());
+    }
+    let cfg = Config {
+        server,
+        world,
+        email,
+        model,
+        direct,
+    };
+    let spec = draft(
+        &cfg,
+        &prompt.ok_or("describe the map, in quotes")?,
+        &Context::default(),
+    )
+    .await?;
     let text = serde_json::to_string_pretty(&spec).map_err(|e| e.to_string())?;
     match out {
         Some(f) => {
@@ -351,6 +555,65 @@ mod tests {
         assert_eq!(spec.name, "Isles");
         assert!(seen[1].contains("land must be"), "{}", seen[1]);
         assert!(WORLD_SYSTEM_PROMPT.contains("biomes") && WORLD_SYSTEM_PROMPT.contains("0..1"));
+    }
+
+    #[test]
+    fn style_and_lore_are_added_to_the_system_prompt_only_when_present() {
+        assert_eq!(
+            with_context(SYSTEM_PROMPT, &Context::default()),
+            SYSTEM_PROMPT
+        );
+        let ctx = Context {
+            tone: Some("gritty cyberpunk".into()),
+            locations: vec!["Port Neon".into(), "The Drowned Abbey".into()],
+            lore: false,
+        };
+        let s = with_context(SYSTEM_PROMPT, &ctx);
+        assert!(
+            s.contains("gritty cyberpunk")
+                && s.contains("Port Neon; The Drowned Abbey")
+                && s.starts_with(SYSTEM_PROMPT)
+        );
+    }
+
+    #[test]
+    fn a_refinement_must_keep_its_pinned_rooms_exactly() {
+        let current = parse_reply(GOOD).unwrap().floors.remove(0);
+        let turn = refine_user_turn(&current, &["a".into()], "add a barracks").unwrap();
+        assert!(
+            turn.contains("Pinned room ids (keep exactly): a")
+                && turn.contains("add a barracks")
+                && turn.contains("Nave")
+        );
+        let judge = judge_refine(&current, vec!["a".into()]);
+        let with_barracks = GOOD
+            .replace(
+                r#"{"id":"b","#,
+                r#"{"id":"c","name":"Barracks","w":6,"h":4},{"id":"b","#,
+            )
+            .replace(
+                r#""links":[{"a":"a","b":"b","kind":"secret"}]"#,
+                r#""links":[{"a":"a","b":"b","kind":"secret"},{"a":"a","b":"c"}]"#,
+            );
+        assert!(
+            judge(&with_barracks).is_ok(),
+            "{:?}",
+            judge(&with_barracks).err()
+        );
+        // Changing a pinned room, dropping it, or pinning a stranger is refused with the reason.
+        assert!(judge(&GOOD.replace(r#""w":8"#, r#""w":9"#))
+            .unwrap_err()
+            .contains("was changed"));
+        assert!(judge(&GOOD.replace("Nave", "Chapel"))
+            .unwrap_err()
+            .contains("was changed"));
+        let no_a = r#"{"name":"Crypt","floors":[{"name":"G","rooms":[{"id":"b","name":"Ossuary","w":5,"h":5}],"links":[]}]}"#;
+        assert!(judge(no_a).unwrap_err().contains("was dropped"));
+        assert!(judge_refine(&current, vec!["zzz".into()])(GOOD)
+            .unwrap_err()
+            .contains("not a room"));
+        let two = r#"{"name":"C","floors":[{"name":"G","rooms":[{"id":"a","name":"Nave","w":8,"h":6}],"links":[]},{"name":"H","rooms":[{"id":"a","name":"Nave","w":8,"h":6}],"links":[]}]}"#;
+        assert!(judge(two).unwrap_err().contains("exactly one floor"));
     }
 
     #[tokio::test]

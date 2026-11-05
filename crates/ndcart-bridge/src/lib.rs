@@ -2,6 +2,8 @@
 //! the studio depends on it; with no server configured it is never used.
 
 pub mod client;
+pub mod direct;
 pub mod rooms;
 
 pub use client::{Bridge, BridgeError, Probe, PublishMap, PublishRegion, PublishReport};
+pub use direct::DirectChat;

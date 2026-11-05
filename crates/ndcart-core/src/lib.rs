@@ -32,7 +32,7 @@ pub mod zone;
 
 pub use doc::{
     DocKind, FloorDoc, ImportedWall, Label, Light, Manifest, MapGrid, MapGridKind, NdWorldLink,
-    Underlay,
+    StyleProfile, Underlay,
 };
 pub use error::{CoreError, CoreResult, MAX_CELL, MAX_LIGHTS};
 pub use grid::{CellKey, Edge, EdgeKey, Mark, MarkKind, MarkState, RoomGrid, Space, SpaceKind};

@@ -5,7 +5,7 @@
 //! validated before anything is drawn, and can never place a wall wrongly.
 
 use crate::error::{CoreError, CoreResult};
-use crate::gen::{Canvas, Rng, PALETTE};
+use crate::gen::{Canvas, Rng};
 use crate::grid::{MarkKind, SpaceKind};
 use crate::journal::Op;
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ pub struct LinkSpec {
     pub kind: LinkKind,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum LinkKind {
     Door,
@@ -213,6 +213,15 @@ fn overlaps(a: &Placed, b: &Placed, margin: i32) -> bool {
 /// tree, a corridor of 2-6 squares between neighbours; extra links get an
 /// L-shaped corridor.
 pub fn compile_floor(f: &FloorSpec, seed: u64) -> CoreResult<CompiledFloor> {
+    compile_floor_styled(f, seed, &[])
+}
+
+/// Like [`compile_floor`], with the project's room palette.
+pub fn compile_floor_styled(
+    f: &FloorSpec,
+    seed: u64,
+    palette: &[String],
+) -> CoreResult<CompiledFloor> {
     let mut rng = Rng(seed ^ 0xA5A5_5A5A_1234_8765);
     let idx: BTreeMap<&str, usize> = f
         .rooms
@@ -331,17 +340,18 @@ pub fn compile_floor(f: &FloorSpec, seed: u64) -> CoreResult<CompiledFloor> {
         return Err(CoreError::Invalid("the layout came out too large".into()));
     }
     let mut c = Canvas::new(cw, ch);
+    c.palette = palette.to_vec();
     let ids: Vec<u16> = f
         .rooms
         .iter()
         .enumerate()
         .map(|(i, r)| {
             let colour = if r.kind == SpaceKind::Corridor {
-                "#4a4e57"
+                "#4a4e57".to_string()
             } else {
-                PALETTE[i % PALETTE.len()]
+                c.pal(i)
             };
-            let s = c.space(&r.name, colour, r.kind);
+            let s = c.space(&r.name, &colour, r.kind);
             let p = rects[i];
             c.rect(p.x + ox, p.y + oy, p.x + p.w + ox, p.y + p.h + oy, s, true);
             s
@@ -422,13 +432,155 @@ pub fn compile_floor(f: &FloorSpec, seed: u64) -> CoreResult<CompiledFloor> {
     })
 }
 
+/// Describe an existing floor as a spec (for refining it): each room-kind
+/// space becomes a room sized by its bounding box; two rooms are linked when a
+/// door, opening or secret door joins them, directly or through corridors.
+/// Spaces too big for a spec (over 30 squares across) are left out, and so
+/// are the links that depend on them.
+pub fn floor_to_spec(floor: &crate::doc::FloorDoc, light_cell: f64) -> FloorSpec {
+    use crate::grid::{CellKey, Edge, MarkKind};
+    let grid = &floor.grid;
+    let mut bbox: BTreeMap<&str, (i32, i32, i32, i32)> = BTreeMap::new();
+    for (c, sp) in grid.cells() {
+        let e = bbox.entry(sp).or_insert((c.x, c.y, c.x, c.y));
+        *e = (e.0.min(c.x), e.1.min(c.y), e.2.max(c.x), e.3.max(c.y));
+    }
+    let lit: BTreeSet<&str> = floor
+        .lights
+        .iter()
+        .filter_map(|l| {
+            grid.cell_space(CellKey {
+                x: (l.x / light_cell).floor() as i32,
+                y: (l.y / light_cell).floor() as i32,
+            })
+        })
+        .collect();
+    let clean = |id: &str| -> String {
+        let t: String = id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(40)
+            .collect();
+        if t.is_empty() {
+            "room".into()
+        } else {
+            t
+        }
+    };
+    let mut rooms: Vec<RoomSpec> = Vec::new();
+    let mut ids: BTreeMap<&str, String> = BTreeMap::new();
+    for (id, sp) in &grid.spaces {
+        let Some(b) = bbox.get(id.as_str()) else {
+            continue;
+        };
+        let (w, h) = (b.2 - b.0 + 1, b.3 - b.1 + 1);
+        if sp.kind == SpaceKind::Corridor || w > 30 || h > 30 || rooms.len() >= MAX_ROOMS {
+            continue;
+        }
+        let rid = clean(id);
+        ids.insert(id.as_str(), rid.clone());
+        rooms.push(RoomSpec {
+            id: rid,
+            name: sp.name.chars().take(60).collect(),
+            kind: sp.kind,
+            w: w.max(2),
+            h: h.max(2),
+            lit: lit.contains(id.as_str()),
+        });
+    }
+    // Space-to-space joins through marks, then rooms joined through corridor chains.
+    let mut joins: BTreeMap<&str, BTreeMap<&str, LinkKind>> = BTreeMap::new();
+    for (c, sp) in grid.cells() {
+        for e in [Edge::East, Edge::South] {
+            let n = match e {
+                Edge::East => c.east(),
+                _ => c.south(),
+            };
+            let Some(other) = grid.cell_space(n) else {
+                continue;
+            };
+            if other == sp {
+                continue;
+            }
+            let kind = match grid.mark_between(c, e).map(|m| m.kind) {
+                Some(MarkKind::Door) => LinkKind::Door,
+                Some(MarkKind::Opening) => LinkKind::Opening,
+                Some(MarkKind::Secret) => LinkKind::Secret,
+                _ => continue,
+            };
+            joins.entry(sp).or_default().entry(other).or_insert(kind);
+            joins.entry(other).or_default().entry(sp).or_insert(kind);
+        }
+    }
+    let corridor = |id: &str| {
+        grid.spaces
+            .get(id)
+            .is_some_and(|s| s.kind == SpaceKind::Corridor)
+    };
+    let mut links: Vec<LinkSpec> = Vec::new();
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for (start, rid) in &ids {
+        // Walk out through corridor spaces only.
+        let mut stack: Vec<(&str, LinkKind)> = joins
+            .get(start)
+            .map(|m| m.iter().map(|(k, v)| (*k, *v)).collect())
+            .unwrap_or_default();
+        let mut visited: BTreeSet<&str> = BTreeSet::from([*start]);
+        while let Some((id, kind)) = stack.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            if corridor(id) {
+                if let Some(m) = joins.get(id) {
+                    stack.extend(m.keys().map(|k| (*k, kind)));
+                }
+            } else if let Some(other) = ids.get(id) {
+                let key = if rid < other {
+                    (rid.clone(), other.clone())
+                } else {
+                    (other.clone(), rid.clone())
+                };
+                if seen.insert(key.clone()) {
+                    links.push(LinkSpec {
+                        a: key.0,
+                        b: key.1,
+                        kind,
+                    });
+                }
+            }
+        }
+    }
+    links.sort_by(|a, b| (&a.a, &a.b).cmp(&(&b.a, &b.b)));
+    FloorSpec {
+        name: floor.name.chars().take(40).collect(),
+        rooms,
+        links,
+        stairs: Vec::new(),
+    }
+}
+
 /// Compile every floor.
 pub fn compile(spec: &MapSpec, seed: u64) -> CoreResult<Vec<CompiledFloor>> {
+    compile_styled(spec, seed, &[])
+}
+
+/// [`compile`] with the project's room palette.
+pub fn compile_styled(
+    spec: &MapSpec,
+    seed: u64,
+    palette: &[String],
+) -> CoreResult<Vec<CompiledFloor>> {
     spec.validate()?;
     spec.floors
         .iter()
         .enumerate()
-        .map(|(i, f)| compile_floor(f, seed.wrapping_add(i as u64 * 7919)))
+        .map(|(i, f)| compile_floor_styled(f, seed.wrapping_add(i as u64 * 7919), palette))
         .collect()
 }
 
@@ -533,6 +685,67 @@ mod tests {
                 && kinds.contains(&MarkKind::Secret)
         );
         assert_eq!(floors[0].centres.len(), 4);
+    }
+
+    #[test]
+    fn an_existing_floor_describes_itself_as_a_spec_that_lays_out_again() {
+        let floors = compile(&station(), 11).unwrap();
+        let f = apply(&floors[0]);
+        let spec = floor_to_spec(&f, 32.0);
+        let names: BTreeSet<&str> = spec.rooms.iter().map(|r| r.name.as_str()).collect();
+        for n in ["Ticket Hall", "Platform", "Control Office", "Store"] {
+            assert!(names.contains(n), "{n} in {names:?}");
+        }
+        let hall = spec.rooms.iter().find(|r| r.name == "Ticket Hall").unwrap();
+        assert_eq!((hall.w, hall.h), (8, 6));
+        // The hall-to-office door and the office-to-store secret door survive as links.
+        let by_name = |id: &str| spec.rooms.iter().find(|r| r.id == id).unwrap().name.clone();
+        let pairs: BTreeSet<(String, String, LinkKind)> = spec
+            .links
+            .iter()
+            .map(|l| {
+                let (a, b) = (by_name(&l.a), by_name(&l.b));
+                let (a, b) = if a < b { (a, b) } else { (b, a) };
+                (a, b, l.kind)
+            })
+            .collect();
+        assert!(
+            pairs.contains(&(
+                "Control Office".into(),
+                "Ticket Hall".into(),
+                LinkKind::Door
+            )),
+            "{pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("Control Office".into(), "Store".into(), LinkKind::Secret)),
+            "{pairs:?}"
+        );
+        // And it round-trips: the described floor is a valid spec that lays out.
+        let again = MapSpec {
+            name: "again".into(),
+            floors: vec![spec],
+        };
+        again.validate().unwrap();
+        compile(&again, 3).unwrap();
+    }
+
+    #[test]
+    fn the_project_palette_colours_the_rooms_in_order() {
+        let pal = vec!["#112233".to_string(), "#445566".to_string()];
+        let c = compile_styled(&station(), 2, &pal).unwrap();
+        let f = apply(&c[0]);
+        let cols: BTreeSet<&str> = f
+            .grid
+            .spaces
+            .values()
+            .filter(|s| s.kind == SpaceKind::Room)
+            .map(|s| s.color.as_str())
+            .collect();
+        assert_eq!(cols, BTreeSet::from(["#112233", "#445566"]));
+        // No palette: the built-in colours as before.
+        let d = apply(&compile(&station(), 2).unwrap()[0]);
+        assert!(d.grid.spaces.values().any(|s| s.color == "#7f5539"));
     }
 
     #[test]

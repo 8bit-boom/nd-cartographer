@@ -67,6 +67,8 @@ pub(crate) struct Canvas {
     pub(crate) cells: Vec<u16>,
     pub(crate) spaces: Vec<Space>,
     doors: BTreeMap<(i32, i32, u8), MarkKind>,
+    /// Room colours, in order (empty = the built-in palette).
+    pub(crate) palette: Vec<String>,
     pub(crate) lights: Vec<(i32, i32, f64)>,
     pub(crate) labels: Vec<(f64, f64, String)>,
 }
@@ -79,8 +81,17 @@ impl Canvas {
             cells: vec![0; (w * h) as usize],
             spaces: Vec::new(),
             doors: BTreeMap::new(),
+            palette: Vec::new(),
             lights: Vec::new(),
             labels: Vec::new(),
+        }
+    }
+    /// The i-th room colour: the project's palette, else the built-in one.
+    pub(crate) fn pal(&self, i: usize) -> String {
+        if self.palette.is_empty() {
+            PALETTE[i % PALETTE.len()].to_string()
+        } else {
+            self.palette[i % self.palette.len()].clone()
         }
     }
     pub(crate) fn space(&mut self, name: &str, color: &str, kind: SpaceKind) -> u16 {
@@ -223,6 +234,11 @@ impl Canvas {
 
 /// Generate a map as one batch op.
 pub fn generate(p: &GenParams) -> CoreResult<Vec<Op>> {
+    generate_styled(p, &[])
+}
+
+/// Like [`generate`], painting rooms from `palette` (the project's style) when given.
+pub fn generate_styled(p: &GenParams, palette: &[String]) -> CoreResult<Vec<Op>> {
     if !(MIN_SIDE..=MAX_SIDE).contains(&p.width) || !(MIN_SIDE..=MAX_SIDE).contains(&p.height) {
         return Err(CoreError::Invalid(format!(
             "width and height must be {MIN_SIDE}-{MAX_SIDE} squares"
@@ -230,6 +246,7 @@ pub fn generate(p: &GenParams) -> CoreResult<Vec<Op>> {
     }
     let mut rng = Rng(p.seed ^ 0xD1B5_4A32_D192_ED03);
     let mut c = Canvas::new(p.width, p.height);
+    c.palette = palette.to_vec();
     match p.kind {
         GenKind::Dungeon => dungeon(&mut c, &mut rng),
         GenKind::Cave => cave(&mut c, &mut rng),
@@ -290,7 +307,7 @@ fn dungeon(c: &mut Canvas, rng: &mut Rng) {
             } else {
                 rng.pick(&DUNGEON_NAMES).to_string()
             };
-            let s = c.space(&name, PALETTE[i % PALETTE.len()], SpaceKind::Room);
+            let s = c.space(&name, &c.pal(i), SpaceKind::Room);
             c.rect(r.0, r.1, r.2, r.3, s, true);
             s
         })
@@ -488,7 +505,7 @@ fn building(c: &mut Canvas, rng: &mut Rng, deck: bool) {
                 (hall_bot, hall_bot + depth)
             };
             let name = rng.pick(names).to_string();
-            let s = c.space(&name, PALETTE[ids.len() % PALETTE.len()], SpaceKind::Room);
+            let s = c.space(&name, &c.pal(ids.len()), SpaceKind::Room);
             c.rect(x, ry0, x + cw, ry1, s, false);
             // Door on the middle of the wall facing the corridor.
             let dx = x + cw / 2;
@@ -546,7 +563,7 @@ fn district(c: &mut Canvas, rng: &mut Rng) {
                         break;
                     }
                     let name = rng.pick(&SHOP_NAMES).to_string();
-                    let s = c.space(&name, PALETTE[n % PALETTE.len()], SpaceKind::Room);
+                    let s = c.space(&name, &c.pal(n), SpaceKind::Room);
                     n += 1;
                     c.rect(x, y0, x + cw, y1, s, true);
                     let dx = x + cw / 2;

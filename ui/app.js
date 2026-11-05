@@ -1441,7 +1441,20 @@ async function runSpec(seed) {
     msg.textContent = e.message;       // the server says what to fix
   }
 }
-document.getElementById('btn-spec').onclick = () => { document.getElementById('spec-msg').textContent = ''; specDialog.showModal(); };
+async function showAiStatus() {
+  const el = document.getElementById('spec-ai');
+  const btn = document.getElementById('spec-draft');
+  try {
+    const st = await api('GET', '/api/ai/status');
+    const icon = st.mode === 'nd-world' ? '🌐' : st.mode === 'standalone' ? '🏠' : '⛔';
+    el.textContent = `${icon} AI: ${st.mode === 'off' ? 'not set up. ' : ''}${st.detail}`;
+    btn.disabled = st.mode === 'off';
+    btn.title = st.mode === 'off' ? st.detail : 'Ask the AI for a spec';
+    document.getElementById('spec-lore').disabled = st.mode !== 'nd-world';
+  } catch { el.textContent = ''; }
+}
+function openSpecDialog() { document.getElementById('spec-msg').textContent = ''; specDialog.showModal(); showAiStatus(); }
+document.getElementById('btn-spec').onclick = openSpecDialog;
 document.getElementById('spec-draft').onclick = async () => {
   const prompt = document.getElementById('spec-prompt').value.trim();
   const msg = document.getElementById('spec-msg');
@@ -1449,7 +1462,7 @@ document.getElementById('spec-draft').onclick = async () => {
   const btn = document.getElementById('spec-draft');
   btn.disabled = true; msg.textContent = 'Asking the AI (this can take a minute)…';
   try {
-    const { spec } = await api('POST', specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt });
+    const { spec } = await api('POST', specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt, doc: state.docId, lore: document.getElementById('spec-lore').checked });
     document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
     await runSpec(Math.floor(Math.random() * 1e6));
   } catch (e) { msg.textContent = e.message; }
@@ -1481,6 +1494,21 @@ document.getElementById('spec-reject').onclick = async () => {
   document.getElementById('spec-msg').textContent = 'Rejected. Nothing was added.';
 };
 document.getElementById('spec-close').onclick = () => specDialog.close();
+
+// ---------- house style ----------
+document.getElementById('btn-style').onclick = async () => {
+  const cur = state.doc.manifest.style || { tone: '', palette: [] };
+  const tone = window.prompt('The look of this project, in a few words (blank clears it)', cur.tone);
+  if (tone === null) return;
+  const pal = window.prompt('Room colours, comma-separated #rrggbb (up to 8; blank for the default set)', cur.palette.join(', '));
+  if (pal === null) return;
+  const palette = pal.split(',').map(x => x.trim()).filter(Boolean);
+  try {
+    await api('POST', `/api/docs/${state.docId}/style`, { tone, palette });
+    await refresh();
+    statusEl.textContent = tone || palette.length ? 'Style saved: AI drafts and generators will follow it.' : 'Style cleared.';
+  } catch (e) { statusEl.textContent = e.message; }
+};
 
 // ---------- search all maps ----------
 const searchBox = document.getElementById('search-box');
@@ -1915,6 +1943,19 @@ document.getElementById('bk-prefix').onclick = () => {
   const p = window.prompt('Text to put before each name', 'East – ');
   if (p === null || !p) return;
   postOps([{ t: 'batch', ops: selSpaces().map(s => spaceOp(s, { name: (p + s.name).slice(0, 60) })) }]);
+};
+document.getElementById('bk-refine').onclick = async () => {
+  const instruction = window.prompt(`What should change? (${state.sel.size} room(s) selected stay exactly as they are)`, 'Add a barracks next to the entrance');
+  if (instruction === null || !instruction.trim()) return;
+  statusEl.textContent = 'Asking the AI to revise this floor…';
+  try {
+    const { spec } = await api('POST', `/api/docs/${state.docId}/refine`, { floor: state.floorId, pins: [...state.sel], instruction: instruction.trim() });
+    document.querySelector('input[name=spec-mode][value=battle]').checked = true;
+    document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
+    openSpecDialog();
+    await runSpec(Math.floor(Math.random() * 1e6));
+    statusEl.textContent = 'Revision ready to preview. Accepting adds it as a new floor; this floor is untouched.';
+  } catch (e) { statusEl.textContent = e.message; }
 };
 document.getElementById('bk-furnish').onclick = async () => {
   try {

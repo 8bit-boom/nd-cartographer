@@ -914,17 +914,26 @@ async fn generate_map(
     body: Result<Json<GenMapBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
-    let ops = ndcart_core::gen::generate(&ndcart_core::gen::GenParams {
-        kind: b.kind,
-        seed: b.seed,
-        width: b.width,
-        height: b.height,
-    })?;
     let mut store = app.store.write().await;
     let doc = store
         .docs
         .get_mut(&id)
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let palette = doc
+        .manifest
+        .style
+        .as_ref()
+        .map(|s| s.palette.clone())
+        .unwrap_or_default();
+    let ops = ndcart_core::gen::generate_styled(
+        &ndcart_core::gen::GenParams {
+            kind: b.kind,
+            seed: b.seed,
+            width: b.width,
+            height: b.height,
+        },
+        &palette,
+    )?;
     let floor_id = match &b.floor {
         Some(f) => f.clone(),
         None => doc
@@ -1246,41 +1255,48 @@ async fn reject_proposal(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// `POST /api/draft-world` `{prompt}` — like `/api/draft`, for an overland map.
-async fn draft_world_spec(
-    body: Result<Json<DraftBody>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let Json(b) =
-        body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
-    #[cfg(feature = "bridge")]
-    {
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
-        let spec = draft::draft_world(&cfg, &b.prompt)
-            .await
-            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
-        Ok(Json(serde_json::json!({ "spec": spec })))
-    }
-    #[cfg(not(feature = "bridge"))]
-    {
-        let _ = b;
-        Err(ApiError(CoreError::NotFound(
-            "this build has no nd-world client (built without the bridge feature)".into(),
-        )))
-    }
-}
-
 #[derive(Deserialize)]
 struct DraftBody {
     #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
     prompt: String,
+    /// The project whose house style to follow.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    doc: Option<String>,
+    /// Reuse the names of the world's existing locations (nd-world only).
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    lore: bool,
 }
 
-/// `POST /api/draft` `{prompt}` — ask nd-world's AI (through its queue) for a
-/// MapSpec. Needs `ND_CARTO_SERVER` and `ND_CARTO_EMAIL` plus the password in
-/// `ND_CARTO_PASSWORD[_FILE]` in the studio's own environment; without them it
-/// says what to set. Nothing is added to any document: the spec comes back
-/// for the GM to preview.
+#[cfg(not(feature = "bridge"))]
+const NO_BRIDGE: &str = "this build has no AI client (built without the bridge feature)";
+
+#[cfg(feature = "bridge")]
+async fn draft_context(app: &App, doc: &Option<String>, lore: bool) -> draft::Context {
+    let tone = match doc {
+        Some(id) => app
+            .store
+            .read()
+            .await
+            .docs
+            .get(id)
+            .and_then(|d| d.manifest.style.as_ref().map(|s| s.tone.clone())),
+        None => None,
+    };
+    draft::Context {
+        tone,
+        locations: Vec::new(),
+        lore,
+    }
+}
+
+/// `POST /api/draft` `{prompt, doc?, lore?}` — ask the AI (nd-world's queue, or
+/// a model you run yourself) for a MapSpec. Configured in the studio's own
+/// environment, never in a request (404 naming what to set otherwise). Nothing is
+/// added to any document: the spec comes back for the GM to preview.
 async fn draft_spec(
+    State(app): State<App>,
     body: Result<Json<DraftBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(b) =
@@ -1288,18 +1304,155 @@ async fn draft_spec(
     #[cfg(feature = "bridge")]
     {
         let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
-        let spec = draft::draft(&cfg, &b.prompt)
+        let ctx = draft_context(&app, &b.doc, b.lore).await;
+        let spec = draft::draft(&cfg, &b.prompt, &ctx)
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;
         Ok(Json(serde_json::json!({ "spec": spec })))
     }
     #[cfg(not(feature = "bridge"))]
     {
-        let _ = b;
-        Err(ApiError(CoreError::NotFound(
-            "this build has no nd-world client (built without the bridge feature)".into(),
-        )))
+        let _ = (app, b);
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
     }
+}
+
+/// `POST /api/draft-world` `{prompt, doc?, lore?}` — like `/api/draft`, for an overland map.
+async fn draft_world_spec(
+    State(app): State<App>,
+    body: Result<Json<DraftBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) =
+        body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
+    #[cfg(feature = "bridge")]
+    {
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let ctx = draft_context(&app, &b.doc, b.lore).await;
+        let spec = draft::draft_world(&cfg, &b.prompt, &ctx)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        Ok(Json(serde_json::json!({ "spec": spec })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = (app, b);
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
+}
+
+#[derive(Deserialize)]
+struct RefineBody {
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    floor: Option<String>,
+    /// Room ids to keep exactly as they are.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    pins: Vec<String>,
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    instruction: String,
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    lore: bool,
+}
+
+/// `POST /api/docs/{id}/refine` `{floor?, pins:[room ids], instruction}` — describe
+/// the floor as a spec, ask the AI to revise it keeping the pinned rooms, and
+/// return the revised spec for preview (it becomes a proposal, a NEW floor; the
+/// floor being refined is never touched).
+async fn refine_floor(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<RefineBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    #[cfg(feature = "bridge")]
+    {
+        let (current, cell) = {
+            let store = app.store.read().await;
+            let doc = store
+                .docs
+                .get(&id)
+                .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+            let idx = match &b.floor {
+                Some(f) => floors_by_id(&doc.floors, f)?,
+                None => 0,
+            };
+            (
+                ndcart_core::mapspec::floor_to_spec(&doc.floors[idx], doc.manifest.cell_size),
+                doc.manifest.cell_size,
+            )
+        };
+        let _ = cell;
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let ctx = draft_context(&app, &Some(id.clone()), b.lore).await;
+        let spec = draft::refine(&cfg, &current, &b.pins, &b.instruction, &ctx)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        Ok(Json(serde_json::json!({ "spec": spec })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = (app, id, b);
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
+}
+
+/// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
+/// `{mode: "nd-world" | "standalone" | "off", detail}`.
+async fn ai_status() -> Json<serde_json::Value> {
+    Json(ai_status_value())
+}
+
+#[cfg(feature = "bridge")]
+fn ai_status_value() -> serde_json::Value {
+    match draft::Config::from_env() {
+        Ok(c) => serde_json::json!({
+            "mode": if c.direct.is_some() { "standalone" } else { "nd-world" },
+            "detail": c.describe(),
+        }),
+        Err(m) => serde_json::json!({ "mode": "off", "detail": m }),
+    }
+}
+
+#[cfg(not(feature = "bridge"))]
+fn ai_status_value() -> serde_json::Value {
+    serde_json::json!({ "mode": "off", "detail": NO_BRIDGE })
+}
+
+#[derive(Deserialize)]
+struct StyleBody {
+    tone: String,
+    #[serde(default)]
+    palette: Vec<String>,
+}
+
+/// `POST /api/docs/{id}/style` `{tone, palette}` — the project's house style:
+/// handed to AI drafts, and its palette colours generated rooms. An empty tone
+/// and palette clear it.
+async fn set_style(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<StyleBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let style = ndcart_core::StyleProfile {
+        tone: b.tone.trim().to_string(),
+        palette: b.palette,
+    };
+    style.validate()?;
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.manifest.style = if style.tone.is_empty() && style.palette.is_empty() {
+        None
+    } else {
+        Some(style)
+    };
+    doc.manifest.updated_at = ndcart_core::doc::now_iso();
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -1800,6 +1953,9 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
         .route("/api/draft", post(draft_spec))
+        .route("/api/ai/status", get(ai_status))
+        .route("/api/docs/{id}/refine", post(refine_floor))
+        .route("/api/docs/{id}/style", post(set_style))
         .route("/api/draft-world", post(draft_world_spec))
         .route("/api/docs/{id}/propose", post(propose_map))
         .route("/api/docs/{id}/propose-world", post(propose_world))
@@ -2998,6 +3154,87 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
         let _ = fb;
+    }
+
+    #[tokio::test]
+    async fn a_project_style_is_saved_validated_cleared_and_colours_generated_rooms() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"S"}"#.to_vec()).await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let style = |body: &str| {
+            let (router, uri, body) = (
+                router.clone(),
+                format!("/api/docs/{id}/style"),
+                body.as_bytes().to_vec(),
+            );
+            async move { call(&router, "POST", &uri, body).await.0 }
+        };
+        assert_eq!(
+            style(r##"{"tone":"gritty cyberpunk","palette":["#112233","#445566"]}"##).await,
+            StatusCode::OK
+        );
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(json(d)["manifest"]["style"]["tone"], "gritty cyberpunk");
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/generate-map"),
+            br#"{"kind":"building","seed":2}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let colours: std::collections::BTreeSet<String> = json(d)["floors"][0]["outline"]["spaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["kind"] == "room")
+            .map(|s| s["color"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            colours,
+            ["#112233".to_string(), "#445566".to_string()]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            style(r##"{"tone":"x","palette":["red"]}"##).await,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(style(r##"{"tone":"","palette":[]}"##).await, StatusCode::OK);
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert!(json(d)["manifest"]["style"].is_null());
+    }
+
+    #[tokio::test]
+    async fn ai_status_and_refine_say_what_is_missing_when_nothing_is_configured() {
+        if std::env::var("ND_CARTO_SERVER").is_ok() || std::env::var("ND_CARTO_LLM_URL").is_ok() {
+            return; // a developer's own environment
+        }
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (st, b) = call(&router, "GET", "/api/ai/status", vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json(b)["mode"], "off");
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"R"}"#.to_vec()).await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/refine"),
+            br#"{"instruction":"add a barracks"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/refine"),
+            b"{}".to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
