@@ -121,6 +121,10 @@
   <dialog id="spec-dialog">
     <h3>Map from a spec</h3>
     <p class="dim">Rooms and how they connect, as JSON (an AI can write this for you). Nothing changes until you accept.</p>
+    <div class="row">
+      <input id="spec-prompt" type="text" maxlength="2000" placeholder="Describe a map: abandoned metro station, 3 levels, flooded bottom" aria-label="Describe the map" style="flex:1;min-width:240px">
+      <button id="spec-draft" type="button" title="Ask nd-world's AI for a spec (needs the studio to be configured for nd-world)">✨ Draft with AI</button>
+    </div>
     <textarea id="spec-text" rows="12" spellcheck="false" aria-label="MapSpec JSON"></textarea>
     <div class="row">
       <button id="spec-example" type="button">Insert an example</button>

@@ -290,7 +290,7 @@ pub fn compile_floor(f: &FloorSpec, seed: u64) -> CoreResult<CompiledFloor> {
                             },
                         };
                         let shared = if dir % 2 == 0 {
-                            c.y.max(par.y) < (c.y + h).min(par.y + par.h) - 0
+                            c.y.max(par.y) < (c.y + h).min(par.y + par.h)
                         } else {
                             c.x.max(par.x) < (c.x + w).min(par.x + par.w)
                         };

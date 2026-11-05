@@ -6,6 +6,7 @@ mod assets;
 mod auth;
 mod convert;
 #[cfg(feature = "bridge")]
+mod draft;
 mod publish;
 mod store;
 mod text;
@@ -1114,6 +1115,28 @@ async fn reject_proposal(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+struct DraftBody {
+    prompt: String,
+}
+
+/// `POST /api/draft` `{prompt}` — ask nd-world's AI (through its queue) for a
+/// MapSpec. Needs `ND_CARTO_SERVER` and `ND_CARTO_EMAIL` plus the password in
+/// `ND_CARTO_PASSWORD[_FILE]` in the studio's own environment; without them it
+/// says what to set. Nothing is added to any document: the spec comes back
+/// for the GM to preview.
+async fn draft_spec(
+    body: Result<Json<DraftBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) =
+        body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
+    let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+    let spec = draft::draft(&cfg, &b.prompt)
+        .await
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok(Json(serde_json::json!({ "spec": spec })))
+}
+
 /// `GET /api/docs/{id}/preview?x=&y=&radius=&darkness=&ppc=` — what the table
 /// sees from one point: the player's copy of the floor (secrets stripped)
 /// under fog, with sight blocked by walls and closed doors and lamps lighting
@@ -1472,6 +1495,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/generate-map", post(generate_map))
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
+        .route("/api/draft", post(draft_spec))
         .route("/api/docs/{id}/propose", post(propose_map))
         .route(
             "/api/docs/{id}/proposals/{pid}",
@@ -1670,6 +1694,12 @@ async fn main() {
         "bench" => run_bench(args.collect()),
         "convert" => run_convert(args.collect()),
         #[cfg(feature = "bridge")]
+        "draft" => {
+            if let Err(m) = draft::run(args.collect()).await {
+                eprintln!("ndcart: {m}");
+                std::process::exit(1);
+            }
+        }
         "publish" => {
             if let Err(m) = publish::run(args.collect()).await {
                 eprintln!("ndcart: {m}");
@@ -1739,7 +1769,7 @@ async fn main() {
         }
         other => {
             eprintln!(
-                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | publish DOC ...]"
+                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | publish DOC ... | draft PROMPT ...]"
             );
             eprintln!("  unknown command: {other}");
             std::process::exit(2);
@@ -2649,6 +2679,25 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
         let _ = fb;
+    }
+
+    #[tokio::test]
+    async fn drafting_without_nd_world_configured_says_what_to_set() {
+        if std::env::var("ND_CARTO_SERVER").is_ok() {
+            return; // a developer's own environment: do not call out
+        }
+        let router = build_router(test_app());
+        let (st, body) = call(
+            &router,
+            "POST",
+            "/api/draft",
+            br#"{"prompt":"a crypt"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        assert!(String::from_utf8_lossy(&body).contains("ND_CARTO_SERVER"));
+        let (st, _) = call(&router, "POST", "/api/draft", b"{}".to_vec()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

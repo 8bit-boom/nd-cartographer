@@ -472,3 +472,60 @@ async fn publish_b_refuses_over_cap_before_any_request_and_reports_a_partial_fai
         other => panic!("expected Partial, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn chat_sends_one_user_turn_and_returns_the_result_text() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/ai/chat"))
+        .and(query_param("w", "neon"))
+        .and(body_json(json!({
+            "messages": [{"role": "user", "content": "a crypt"}],
+            "system": "be strict", "model": "", "options": {},
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"result": "{\"name\":\"x\"}"})),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    assert_eq!(
+        b.chat("be strict", "a crypt", None).await.unwrap(),
+        "{\"name\":\"x\"}"
+    );
+}
+
+#[tokio::test]
+async fn chat_failures_are_told_apart() {
+    for (status, body, want) in [
+        (401, json!({"detail": "no"}), "not logged in"),
+        (500, json!({"detail": "boom"}), "refused"),
+        (
+            200,
+            json!({"result": "[AI error: model not loaded]"}),
+            "refused",
+        ),
+        (
+            200,
+            json!({"result": "[AI unavailable: connection refused]"}),
+            "refused",
+        ),
+        (
+            200,
+            json!({"result": "[empty response from the model]"}),
+            "refused",
+        ),
+        (200, json!({"nope": 1}), "no result"),
+    ] {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ai/chat"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&s)
+            .await;
+        let b = Bridge::new(&s.uri(), None).unwrap();
+        let e = b.chat("s", "u", Some("m")).await.unwrap_err().to_string();
+        assert!(e.contains(want), "{status}: {e}");
+    }
+}

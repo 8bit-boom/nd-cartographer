@@ -36,6 +36,11 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
 
 | POST | `/api/docs/{id}/generate-map` | `{floor?, kind: dungeon\|cave\|building\|deck\|district, seed, width, height}` | 16–120 squares a side. Adds to the floor as one undoable step; same seed, same map. |
+| POST | `/api/docs/{id}/propose` | `{spec: MapSpec, seed?}` | Lay a room-graph spec out and hold it as a proposal (nothing changes). 400 with a fix-it message if the spec breaks a rule. |
+| GET | `/api/docs/{id}/proposals/{pid}/preview?floor=N&ppc=` | – | PNG of one proposed floor. |
+| POST | `/api/docs/{id}/proposals/{pid}/accept` | – | Adds the floors (and stairs) as new floors; undo with `undo-structure` once per floor. |
+| DELETE | `/api/docs/{id}/proposals/{pid}` | – | Reject. |
+| POST | `/api/draft` | `{prompt}` | Ask nd-world's AI for a MapSpec. Needs `ND_CARTO_SERVER`, `ND_CARTO_EMAIL`, `ND_CARTO_PASSWORD[_FILE]` in the studio's environment (404 naming what is missing otherwise). |
 | GET | `/api/docs/{id}/preview?floor&x&y&radius&darkness&ppc` | – | PNG of what the table sees from a point (players' copy, fog, sight blocked by walls and closed doors, lamps light what they reach). |
 | POST | `/api/docs/{id}/scatter` | `{floor?, points:[[x,y]…], biome? \| assets[], spacing?, density?, seed}` | Fill an area with props (and, for a biome, a tinted region) as one undoable step. Biomes: forest, meadow, rocky, swamp, desert. |
 | GET | `/api/prefabs` | – | The prefab library shared by every project. |

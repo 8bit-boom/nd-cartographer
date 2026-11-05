@@ -126,7 +126,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
     })
 }
 
-fn password() -> Result<String, String> {
+pub(crate) fn password() -> Result<String, String> {
     if let Ok(p) = std::env::var("ND_CARTO_PASSWORD") {
         return Ok(p);
     }

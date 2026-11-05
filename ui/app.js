@@ -1416,6 +1416,19 @@ async function runSpec(seed) {
   }
 }
 document.getElementById('btn-spec').onclick = () => { document.getElementById('spec-msg').textContent = ''; specDialog.showModal(); };
+document.getElementById('spec-draft').onclick = async () => {
+  const prompt = document.getElementById('spec-prompt').value.trim();
+  const msg = document.getElementById('spec-msg');
+  if (!prompt) { msg.textContent = 'Describe the map first.'; return; }
+  const btn = document.getElementById('spec-draft');
+  btn.disabled = true; msg.textContent = 'Asking the AI (this can take a minute)…';
+  try {
+    const { spec } = await api('POST', '/api/draft', { prompt });
+    document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
+    await runSpec(Math.floor(Math.random() * 1e6));
+  } catch (e) { msg.textContent = e.message; }
+  finally { btn.disabled = false; }
+};
 document.getElementById('spec-example').onclick = () => { document.getElementById('spec-text').value = JSON.stringify(SPEC_EXAMPLE, null, 2); };
 document.getElementById('spec-go').onclick = () => runSpec(Math.floor(Math.random() * 1e6));
 document.getElementById('spec-again').onclick = () => runSpec(Math.floor(Math.random() * 1e6));

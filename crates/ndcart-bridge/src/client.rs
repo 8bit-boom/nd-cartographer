@@ -272,6 +272,55 @@ impl Bridge {
         })
     }
 
+    /// One non-streaming chat turn through nd-world's AI queue
+    /// (`POST /api/ai/chat` -> `{"result": text}`). The model is whatever the
+    /// world has configured unless `model` names one.
+    pub async fn chat(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+    ) -> Result<String, BridgeError> {
+        let body = json!({
+            "messages": [{"role": "user", "content": user}],
+            "system": system,
+            "model": model.unwrap_or(""),
+            "options": {},
+        });
+        let resp = self
+            .send(self.req(Method::POST, "/api/ai/chat").json(&body))
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| BridgeError::Protocol(e.to_string()))?;
+        if !status.is_success() {
+            return Err(BridgeError::Rejected(format!(
+                "{status}: {}",
+                text.chars().take(300).collect::<String>()
+            )));
+        }
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| BridgeError::Protocol(format!("/api/ai/chat answer: {e}")))?;
+        let out = v
+            .get("result")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::Protocol("/api/ai/chat had no result".into()))?;
+        // nd-world reports a backend failure as a bracketed sentinel string ("[AI error: …]",
+        // "[AI unavailable: …]", "[empty response …]") with HTTP 200, not as an error status.
+        let t = out.trim_start();
+        if t.starts_with("[AI ") || t.starts_with("[empty response") {
+            return Err(BridgeError::Rejected(
+                out.trim().chars().take(300).collect(),
+            ));
+        }
+        Ok(out.to_string())
+    }
+
     fn precheck(map: &PublishMap) -> Result<(), BridgeError> {
         let bad = |m: String| Err(BridgeError::Precheck(m));
         if map.walls.len() > WALL_CAP {
