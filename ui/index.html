@@ -175,6 +175,10 @@
   </dialog>
   <div id="viewtools">
     <canvas id="minimap" width="180" height="120" title="Click or drag to move the view" aria-label="Minimap"></canvas>
+    <div class="row" title="A lattice over the map, for distances and hex crawls">
+      <select id="mg-kind" aria-label="Map grid"><option value="">No grid</option><option value="square">Square grid</option><option value="hex">Hex grid</option></select>
+      <label class="dim">size <input type="number" id="mg-size" min="0.5" max="200" step="0.5" value="6" style="width:4.5em"></label>
+    </div>
     <div class="row">
       <select id="bm-list" aria-label="Saved views"><option value="">Saved views…</option></select>
       <button id="bm-save" title="Remember this view under a name">★ Save</button>
@@ -191,7 +195,7 @@
     <label>Density <input type="range" id="br-density" min="0.05" max="1" step="0.05" value="0.6"></label>
     <span class="dim">[ ] size</span>
   </div>
-  <div id="symbar" title="Mirror what you paint about axis lines">
+  <div id="symbar" class="battle-only" title="Mirror what you paint about axis lines">
     <label><input type="checkbox" id="sym-v"> mirror left/right</label>
     <label>at x <input type="number" id="sym-ax" value="20" step="1" style="width:4em"></label>
     <label><input type="checkbox" id="sym-h"> mirror up/down</label>

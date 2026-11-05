@@ -113,6 +113,10 @@ pub enum Op {
         id: String,
     },
     /// The map's size in cells (region maps), or null for "as big as the content".
+    /// Show, change or hide the square/hex lattice over the map.
+    SetMapGrid {
+        grid: Option<crate::doc::MapGrid>,
+    },
     SetCanvas {
         canvas: Option<[u32; 2]>,
     },
@@ -346,6 +350,9 @@ impl Op {
                     index: Some(index),
                 })
             }
+            Op::SetMapGrid { .. } => Ok(Op::SetMapGrid {
+                grid: floor.map_grid.clone(),
+            }),
             Op::SetCanvas { .. } => Ok(Op::SetCanvas {
                 canvas: floor.canvas,
             }),
@@ -430,6 +437,7 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
             index,
         } => floor.add_river(river.clone(), *carve, *index)?,
         Op::RemoveRiver { id } => floor.remove_river(id)?,
+        Op::SetMapGrid { grid } => floor.set_map_grid(grid.clone())?,
         Op::SetCanvas { canvas } => floor.set_canvas(*canvas)?,
         Op::PutOverlay { item, index } => floor.put_overlay(item.clone(), *index)?,
         Op::RemoveOverlay { kind, id } => floor.remove_overlay(*kind, id)?,

@@ -92,6 +92,8 @@ struct FloorView {
     regions: Vec<ndcart_core::Region>,
     routes: Vec<ndcart_core::Route>,
     zones: Vec<ndcart_core::Zone>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    map_grid: Option<ndcart_core::MapGrid>,
 }
 
 #[derive(Serialize)]
@@ -136,6 +138,7 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         regions: floor.regions.clone(),
         routes: floor.routes.clone(),
         zones: floor.zones.clone(),
+        map_grid: floor.map_grid.clone(),
     }
 }
 

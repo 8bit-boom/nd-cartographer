@@ -464,6 +464,128 @@ pub fn stamp_icon(def: &ndcart_paint::StampDef, px: u32) -> Vec<u8> {
     pm.encode_png().expect("png")
 }
 
+/// The square or hex lattice over the map. Geometry is built in WORLD pixels
+/// and shifted by an exact integer, all lines go into ONE path (so crossings
+/// and shared hex edges never blend twice), and only lines inside the floor's
+/// extent are drawn: a tile and the crop of the full render agree.
+fn draw_map_grid(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+    use ndcart_core::MapGridKind;
+    use tiny_skia::{Paint, PathBuilder, Stroke, Transform};
+    const SQRT_3: f32 = 1.732_050_8;
+    let Some(g) = &floor.map_grid else { return };
+    let (cols, rows) = grid_extent(floor);
+    let s = ppc as f32;
+    let (maxx, maxy) = (cols as f32 * s, rows as f32 * s);
+    let (w, h) = (pixmap.width() as f32, pixmap.height() as f32);
+    let (tx0, ty0) = (x0 as f32, y0 as f32);
+    let pad = 2.0 + s; // a hex reaches a little beyond its centre cell
+    let mut pb = PathBuilder::new();
+    let mut count = 0usize;
+    let step = g.size * s;
+    match g.kind {
+        MapGridKind::Square => {
+            let first = ((tx0 - pad) / step).floor().max(0.0) as i64;
+            let last = (((tx0 + w + pad) / step).ceil() as i64).max(first);
+            for i in first..=last.min(first + 4_000) {
+                let x = i as f32 * step;
+                if x > maxx {
+                    break;
+                }
+                pb.move_to(x, 0.0);
+                pb.line_to(x, maxy);
+                count += 1;
+            }
+            let first = ((ty0 - pad) / step).floor().max(0.0) as i64;
+            let last = (((ty0 + h + pad) / step).ceil() as i64).max(first);
+            for j in first..=last.min(first + 4_000) {
+                let y = j as f32 * step;
+                if y > maxy {
+                    break;
+                }
+                pb.move_to(0.0, y);
+                pb.line_to(maxx, y);
+                count += 1;
+            }
+            // The closing edges of the canvas (unless a line already sits on them).
+            if maxx % step > 0.5 {
+                pb.move_to(maxx, 0.0);
+                pb.line_to(maxx, maxy);
+            }
+            if maxy % step > 0.5 {
+                pb.move_to(0.0, maxy);
+                pb.line_to(maxx, maxy);
+            }
+        }
+        MapGridKind::Hex => {
+            // Pointy-top hexes, `step` wide flat to flat; rows nest 1.5 radii apart.
+            let rad = step / SQRT_3;
+            let row_h = rad * 1.5;
+            let row_lo = ((ty0 - pad - rad) / row_h).floor().max(0.0) as i64;
+            let row_hi = ((ty0 + h + pad + rad) / row_h).ceil() as i64;
+            for r in row_lo..=row_hi.min(row_lo + 4_000) {
+                let cy = r as f32 * row_h;
+                if cy > maxy + rad {
+                    break;
+                }
+                let off = if r % 2 == 0 { 0.0 } else { step / 2.0 };
+                let col_lo = ((tx0 - pad - off - step) / step).floor().max(0.0) as i64;
+                let col_hi = ((tx0 + w + pad - off + step) / step).ceil() as i64;
+                for c in col_lo..=col_hi.min(col_lo + 4_000) {
+                    let cx = c as f32 * step + off;
+                    if cx > maxx + step / 2.0 {
+                        break;
+                    }
+                    let hw = step / 2.0;
+                    let v = [
+                        (cx, cy - rad),
+                        (cx + hw, cy - rad / 2.0),
+                        (cx + hw, cy + rad / 2.0),
+                        (cx, cy + rad),
+                        (cx - hw, cy + rad / 2.0),
+                        (cx - hw, cy - rad / 2.0),
+                    ];
+                    // Only hexes whose centre lies on the map.
+                    if cx > maxx || cy > maxy {
+                        continue;
+                    }
+                    // Each hex draws only three of its six edges (upper-left, upper-right
+                    // and right); its neighbours draw the rest, so no edge is stroked
+                    // twice (two coincident anti-aliased strokes would blend darker).
+                    pb.move_to(v[5].0, v[5].1);
+                    pb.line_to(v[0].0, v[0].1);
+                    pb.line_to(v[1].0, v[1].1);
+                    pb.line_to(v[2].0, v[2].1);
+                    count += 1;
+                }
+            }
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    let Some(path) = pb.finish() else { return };
+    let rgb = parse_hex(&g.color);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(
+        rgb[0],
+        rgb[1],
+        rgb[2],
+        (g.opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+    );
+    paint.anti_alias = true;
+    let stroke = Stroke {
+        width: (s / 24.0).max(1.0),
+        ..Default::default()
+    };
+    pixmap.stroke_path(
+        &path,
+        &paint,
+        &stroke,
+        Transform::from_translate(-tx0, -ty0),
+        None,
+    );
+}
+
 /// Regions, then routes, then marker pins, over everything. Paths are built in
 /// WORLD pixels and shifted by an exact integer translation, so a tile and the
 /// matching crop of the full render rasterize identical geometry.
@@ -1290,6 +1412,7 @@ fn render_pixmap_onion(
     apply_strokes(&mut pixmap, floor, ppc, x0, y0);
     apply_stamps(&mut pixmap, floor, ppc, x0, y0);
     draw_overlay(&mut pixmap, floor, ppc, x0, y0);
+    draw_map_grid(&mut pixmap, floor, ppc, x0, y0);
     draw_labels(&mut pixmap, floor, ppc, x0, y0);
 
     // Walls on top: stroke width grows with zoom, min 1px, so z0 reads.
@@ -2410,6 +2533,83 @@ mod tests {
             }
             assert_eq!(worst, 0, "tile ({tx},{ty}) differs by {worst}");
         }
+    }
+
+    fn grid_floor(kind: ndcart_core::MapGridKind, size: f32) -> FloorDoc {
+        let mut f = light_floor();
+        f.set_map_grid(Some(ndcart_core::MapGrid {
+            kind,
+            size,
+            color: "#000000".into(),
+            opacity: 0.8,
+        }))
+        .unwrap();
+        f
+    }
+
+    #[test]
+    fn a_map_grid_bakes_the_same_in_tiles_and_in_the_full_render() {
+        use ndcart_core::MapGridKind::{Hex, Square};
+        // Square lines are axis-aligned: exactly equal. Hex edges are diagonal and
+        // cross tile borders, where the rasterizer's fixed-point edge walk can tip a
+        // pixel's coverage by one sample (a few per tile, at most 1/16 of the ink).
+        for (f, exact) in [
+            (grid_floor(Square, 1.5), true),
+            (grid_floor(Hex, 2.0), false),
+            (grid_floor(Hex, 0.75), false),
+        ] {
+            let (png, ..) = bake_full_stroked(&f, 64);
+            let full = decode(&png);
+            for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
+                let (mut differing, mut worst) = (0usize, 0u8);
+                for y in 0..256u32 {
+                    for x in 0..256u32 {
+                        let (a, b) = (
+                            rgb(&tile, x, y),
+                            rgb(&full, tx as u32 * 256 + x, ty as u32 * 256 + y),
+                        );
+                        if a != b {
+                            differing += 1;
+                            worst = worst.max(a[0].abs_diff(b[0]));
+                        }
+                    }
+                }
+                if exact {
+                    assert_eq!(differing, 0, "{:?} tile ({tx},{ty})", f.map_grid);
+                } else {
+                    assert!(
+                        differing <= 40 && worst <= 24,
+                        "{:?} tile ({tx},{ty}): {differing} pixels, worst {worst}",
+                        f.map_grid
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_map_grid_draws_lines_where_it_says_and_not_without_it() {
+        use ndcart_core::MapGridKind::{Hex, Square};
+        let plain = bake_stamped(&light_floor(), 32);
+        let sq = bake_stamped(&grid_floor(Square, 2.0), 32);
+        // A vertical line at x = 2 cells (64 px) is dark; the middle of a square is not.
+        assert!(rgb(&sq, 64, 20)[0] < 120, "{:?}", rgb(&sq, 64, 20));
+        assert_eq!(rgb(&sq, 32, 32), rgb(&plain, 32, 32));
+        let hx = bake_stamped(&grid_floor(Hex, 2.0), 32);
+        let dark = |pm: &tiny_skia::Pixmap| {
+            (0..pm.height())
+                .flat_map(|y| (0..pm.width()).map(move |x| (x, y)))
+                .filter(|(x, y)| rgb(pm, *x, *y)[0] < 120)
+                .count()
+        };
+        let base = dark(&plain);
+        assert!(
+            dark(&sq) > base + 300 && dark(&hx) > base + 300,
+            "{base} {} {}",
+            dark(&sq),
+            dark(&hx)
+        );
     }
 
     /// Count pixels close to `want` inside a pixel rectangle `[x0, y0, x1, y1)`.

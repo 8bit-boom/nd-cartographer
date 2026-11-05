@@ -44,6 +44,8 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | DELETE | `/api/docs/{id}/checkpoints/{cid}` | – | |
 | POST | `/api/docs/{id}/checkpoints/{cid}/restore` | – | Replaces all floors; the replaced state becomes a new "Before restoring…" checkpoint; undo history restarts. |
 
+Floors carry an optional `map_grid {kind: square|hex, size (cells, 0.5-200), color, opacity}` set with the op `set_map_grid` (null removes it).
+
 Tiles accept `?onion=<floor id>`: that floor is drawn at 30% opacity under the current floor (404 if the id is unknown).
 
 ### Ops (internally tagged, `"t"`)

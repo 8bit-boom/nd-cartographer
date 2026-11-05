@@ -120,6 +120,48 @@ impl Label {
     }
 }
 
+/// A lattice over the map. `size` is the width of one square, or the
+/// flat-to-flat width of one pointy-top hex, in cells.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct MapGrid {
+    pub kind: MapGridKind,
+    pub size: f32,
+    #[serde(default = "grid_colour")]
+    pub color: String,
+    #[serde(default = "grid_opacity")]
+    pub opacity: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum MapGridKind {
+    Square,
+    Hex,
+}
+
+fn grid_colour() -> String {
+    "#ffffff".into()
+}
+fn grid_opacity() -> f32 {
+    0.35
+}
+
+impl MapGrid {
+    pub fn validate(&self) -> CoreResult<()> {
+        if !self.size.is_finite() || !(0.5..=200.0).contains(&self.size) {
+            return Err(CoreError::Invalid("grid size must be 0.5-200 cells".into()));
+        }
+        if !self.opacity.is_finite() || !(0.05..=1.0).contains(&self.opacity) {
+            return Err(CoreError::Invalid("grid opacity must be 0.05-1".into()));
+        }
+        let c = self.color.as_bytes();
+        if !(c.len() == 7 && c[0] == b'#' && c[1..].iter().all(u8::is_ascii_hexdigit)) {
+            return Err(CoreError::Invalid("grid color must be #rrggbb".into()));
+        }
+        Ok(())
+    }
+}
+
 /// A raster picture behind everything (imported art, an opened `.dd2vtt`'s map
 /// image, later an AI generation): plan §5.3 "image underlays remain referenced
 /// assets with blend mode + opacity". The bytes live in the asset store, named
@@ -243,6 +285,9 @@ pub struct FloorDoc {
     /// at least this big even where nothing is painted (open sea, empty land).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canvas: Option<[u32; 2]>,
+    /// A square or hex lattice drawn over the map (travel distances, hex crawls).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_grid: Option<MapGrid>,
     /// Points of interest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<crate::overlay::Marker>,
@@ -282,6 +327,7 @@ impl FloorDoc {
             lights: Vec::new(),
             labels: Vec::new(),
             zones: Vec::new(),
+            map_grid: None,
             strokes: Vec::new(),
             stamps: Vec::new(),
             underlay: None,
@@ -495,6 +541,14 @@ impl FloorDoc {
             }
         }
         self.canvas = canvas;
+        Ok(())
+    }
+
+    pub fn set_map_grid(&mut self, grid: Option<MapGrid>) -> CoreResult<()> {
+        if let Some(g) = &grid {
+            g.validate()?;
+        }
+        self.map_grid = grid;
         Ok(())
     }
 

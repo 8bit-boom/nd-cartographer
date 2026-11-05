@@ -260,6 +260,7 @@ async function refresh() {
   refreshProblems();
   loadMiniImage();
   buildViews();
+  syncMapGrid();
 }
 
 // ---------- screen <-> world ----------
@@ -1313,6 +1314,22 @@ function buildOutline() {
     if (hadFocus) keep.focus();
   }
 }
+
+// ---------- map grid (square / hex) ----------
+function syncMapGrid() {
+  const g = curFloor().map_grid;
+  document.getElementById('mg-kind').value = g ? g.kind : '';
+  if (g) document.getElementById('mg-size').value = g.size;
+}
+function applyMapGrid() {
+  const kind = document.getElementById('mg-kind').value;
+  const size = Number(document.getElementById('mg-size').value);
+  if (kind && !(size >= 0.5 && size <= 200)) { statusEl.textContent = 'Grid size must be 0.5 to 200 cells.'; return; }
+  const prev = curFloor().map_grid;
+  postOps([{ t: 'set_map_grid', grid: kind ? { kind, size, color: prev?.color || '#ffffff', opacity: prev?.opacity || 0.35 } : null }]);
+}
+document.getElementById('mg-kind').onchange = applyMapGrid;
+document.getElementById('mg-size').onchange = () => { if (document.getElementById('mg-kind').value) applyMapGrid(); };
 
 // ---------- minimap, saved views, copy view ----------
 const mini = document.getElementById('minimap');
