@@ -383,6 +383,44 @@ mod tests {
     }
 
     #[test]
+    fn strokes_reach_the_published_picture_but_not_the_walls_or_rooms() {
+        let plain = doc();
+        let mut painted = doc();
+        let fid = painted.floors[0].id.clone();
+        let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+            {"t":"add_stroke","stroke":{"id":"s1","kind":"paint","brush":"round","material":"grass",
+             "color":"#5a8a3c","size":1.5,"opacity":1,"seed":3,
+             "points":[{"x":0.2,"y":0.5},{"x":1.8,"y":0.5}]}}
+        ]))
+        .unwrap();
+        painted.apply_ops(&fid, &ops).unwrap();
+        let a = build_map(&plain, None, 16, tiles::ImageFormat::Png, Audience::Gm).unwrap();
+        let b = build_map(&painted, None, 16, tiles::ImageFormat::Png, Audience::Gm).unwrap();
+        assert_ne!(a.image, b.image, "the stroke is in the picture");
+        // Strokes are cosmetic: geometry nd-world stores is identical.
+        // (Wall ids are fresh on every derivation, so compare geometry without them.)
+        let geom = |m: &PublishMap| {
+            let walls: Vec<_> = m
+                .walls
+                .iter()
+                .map(|w| (w.kind, w.pts.clone(), w.state))
+                .collect();
+            serde_json::json!({"w": format!("{walls:?}"), "l": m.lights, "r": m.rooms})
+        };
+        assert_eq!(geom(&a), geom(&b));
+        // The player copy keeps strokes (they are the look), as the filter only removes secrets.
+        let p = build_map(
+            &painted,
+            None,
+            16,
+            tiles::ImageFormat::Png,
+            Audience::Player,
+        )
+        .unwrap();
+        assert_eq!(p.image, b.image);
+    }
+
+    #[test]
     fn password_never_comes_from_arguments() {
         let a = parse(
             [

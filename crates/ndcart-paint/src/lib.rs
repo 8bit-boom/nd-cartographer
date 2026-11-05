@@ -11,9 +11,11 @@
 //! shared edge compute the *same* mix (0.5 exactly on the edge), so the join is
 //! continuous and the jitter follows world coordinates, not the cell.
 
+mod brush;
 mod noise;
 mod pack;
 
+pub use brush::{stroke_salt, Prepared, MAX_DOTS};
 pub use noise::{fbm, hash2, rand01, value_noise};
 pub use pack::{find, starter, Material, Pattern};
 

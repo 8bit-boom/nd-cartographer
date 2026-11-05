@@ -1146,6 +1146,9 @@ dependencies = [
 [[package]]
 name = "ndcart-paint"
 version = "0.1.0"
+dependencies = [
+ "ndcart-core",
+]
 
 [[package]]
 name = "ndcart-server"

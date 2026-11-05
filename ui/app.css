@@ -97,3 +97,15 @@ canvas#canvas.panning { cursor: grabbing; }
 #exports label { margin-right: 6px; cursor: pointer; }
 #doc-meta { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tools { flex-wrap: wrap; }
+
+#brushbar {
+  position: absolute; left: 10px; top: 10px; z-index: 4;
+  display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+  background: rgba(29, 32, 38, 0.92); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 12px; max-width: calc(100% - 20px);
+}
+#brushbar[hidden] { display: none; }
+#brushbar label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+#brushbar input[type=range] { width: 90px; }
+#brushbar select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; }
+#brushbar output { min-width: 2.2em; color: var(--text); }

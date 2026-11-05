@@ -84,6 +84,10 @@ pub struct FloorDoc {
     pub lights: Vec<Light>,
     #[serde(default)]
     pub labels: Vec<Label>,
+    /// Paint strokes in z-order (later draws over earlier). Cosmetic: they
+    /// shape the baked picture, never walls or rooms.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strokes: Vec<crate::stroke::Stroke>,
 }
 
 pub fn now_iso() -> String {
@@ -113,7 +117,42 @@ impl FloorDoc {
             grid: RoomGrid::default(),
             lights: Vec::new(),
             labels: Vec::new(),
+            strokes: Vec::new(),
         }
+    }
+
+    /// Add a stroke (validated), at `index` in the z-order or on top.
+    pub fn add_stroke(
+        &mut self,
+        stroke: crate::stroke::Stroke,
+        index: Option<usize>,
+    ) -> CoreResult<()> {
+        stroke.validate()?;
+        if self.strokes.iter().any(|s| s.id == stroke.id) {
+            return Err(CoreError::Invalid(format!(
+                "duplicate stroke {}",
+                stroke.id
+            )));
+        }
+        if self.strokes.len() >= crate::stroke::MAX_STROKES {
+            return Err(CoreError::CapExceeded(format!(
+                "at most {} strokes per floor",
+                crate::stroke::MAX_STROKES
+            )));
+        }
+        let at = index.unwrap_or(self.strokes.len()).min(self.strokes.len());
+        self.strokes.insert(at, stroke);
+        Ok(())
+    }
+
+    pub fn remove_stroke(&mut self, id: &str) -> CoreResult<()> {
+        let i = self
+            .strokes
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or_else(|| CoreError::NotFound(format!("stroke {id}")))?;
+        self.strokes.remove(i);
+        Ok(())
     }
 
     pub fn validate_light(light: &Light) -> CoreResult<()> {
@@ -204,10 +243,11 @@ impl FloorDoc {
         let spaces = self.grid.spaces.len();
         let cells = self.grid.cell_count();
         format!(
-            "{}: {cells} cells, {spaces} spaces, {} lights, {} labels",
+            "{}: {cells} cells, {spaces} spaces, {} lights, {} labels, {} strokes",
             self.name,
             self.lights.len(),
-            self.labels.len()
+            self.labels.len(),
+            self.strokes.len()
         )
     }
 }

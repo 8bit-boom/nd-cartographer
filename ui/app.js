@@ -119,7 +119,8 @@ function render() {
     }
   }
   drawStrokePreview();
-  Promise.allSettled(pending).then(drawStrokePreview);
+  drawLiveStroke();
+  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); });
 }
 
 const tileCache = new Map(); // url -> Image
@@ -163,12 +164,15 @@ const EDGE_TOOLS = { door: 'door', window: 'window' };
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'door', 'window']) {
+  for (const t of ['pan', 'paint', 'brush', 'erase', 'door', 'window']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
+  document.getElementById('brushbar').hidden = !(tool === 'brush' || tool === 'erase');
   statusEl.textContent =
     tool === 'paint' ? `Painting ${activeItem().name}`
+    : tool === 'brush' ? `Brush: ${activeItem().name} — drag to paint (pressure and tilt count)`
+    : tool === 'erase' ? 'Eraser: drag to reveal the room layer beneath'
     : tool in EDGE_TOOLS ? `Click a cell edge to place a ${tool}; click it again to remove`
     : 'Pan (drag) · wheel zooms';
 }
@@ -272,14 +276,120 @@ function queuePaint(cellX, cellY) {
   state.pendingFlush = setTimeout(flushStroke, 120);
 }
 
+// ---------- freehand brush ----------
+// A stroke is sent as ONE op (points with pressure and tilt, size, opacity,
+// seed). Feedback is drawn on the canvas at once; the server's baked tiles
+// replace it when the op lands (plan §6: strokes composite client-side first,
+// the authoritative bake trails behind).
+
+const brushEl = (id) => document.getElementById(id);
+const brushSettings = () => ({
+  brush: brushEl('br-kind').value,
+  size: parseFloat(brushEl('br-size').value),
+  opacity: parseFloat(brushEl('br-opacity').value),
+  hardness: parseFloat(brushEl('br-hardness').value),
+  roughness: parseFloat(brushEl('br-rough').value),
+  density: parseFloat(brushEl('br-density').value),
+});
+
+function nudgeSize(dir) {
+  const el = brushEl('br-size');
+  const v = Math.min(10, Math.max(0.2, parseFloat(el.value) * (dir > 0 ? 1.25 : 0.8)));
+  el.value = v.toFixed(1);
+  brushEl('br-size-o').textContent = el.value;
+}
+
+let liveStroke = null;   // {points:[{x,y,pressure,tilt}], erase}
+
+function startStroke(wx, wy, e) {
+  liveStroke = { points: [], erase: state.tool === 'erase' };
+  addStrokePoint(wx, wy, e);
+}
+
+function addStrokePoint(wx, wy, e) {
+  const s = ppc();
+  const x = wx / s, y = wy / s;
+  const last = liveStroke.points[liveStroke.points.length - 1];
+  if (last && Math.hypot(x - last.x, y - last.y) < 0.04) return;   // thin the samples
+  if (liveStroke.points.length >= 4000) return;                      // the server's cap
+  // A mouse reports pressure 0.5 with no buttons quirks; treat "mouse" as full pressure.
+  const pen = e.pointerType === 'pen';
+  const tilt = pen ? Math.min(1, Math.hypot(e.tiltX || 0, e.tiltY || 0) / 90) : 0;
+  liveStroke.points.push({ x, y, pressure: pen ? Math.min(1, Math.max(0, e.pressure)) : 1, tilt });
+  render();
+}
+
+function drawLiveStroke() {
+  if (!liveStroke || liveStroke.points.length === 0) return;
+  const b = brushSettings();
+  const s = ppc();
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = liveStroke.erase ? '#d8e2ec' : state.color;
+  ctx.fillStyle = ctx.strokeStyle;
+  ctx.globalAlpha = (liveStroke.erase ? 0.35 : 0.8) * b.opacity;
+  const pts = liveStroke.points;
+  const w = (p) => b.size * (0.35 + 0.65 * p.pressure) * (1 + 0.5 * p.tilt) * s;
+  for (let i = 0; i < pts.length; i++) {
+    const [sx, sy] = worldToScreen(pts[i].x * s, pts[i].y * s);
+    if (b.brush === 'scatter' && !liveStroke.erase) {
+      ctx.beginPath();
+      ctx.arc(sx, sy, Math.max(1.5, w(pts[i]) * 0.1), 0, Math.PI * 2);
+      ctx.fill();
+      continue;
+    }
+    if (i > 0) {
+      const [px, py] = worldToScreen(pts[i - 1].x * s, pts[i - 1].y * s);
+      ctx.lineWidth = Math.max(1, w(pts[i]));
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(sx, sy); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.arc(sx, sy, Math.max(0.5, w(pts[i]) / 2), 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+async function finishStroke() {
+  const st = liveStroke;
+  liveStroke = null;
+  if (!st || st.points.length === 0) return;
+  const b = brushSettings();
+  const item = activeItem();
+  const stroke = {
+    id: 'st_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    kind: st.erase ? 'erase' : 'paint',
+    brush: st.erase ? 'round' : b.brush,
+    color: item.color,
+    size: b.size,
+    opacity: b.opacity,
+    hardness: b.hardness,
+    roughness: b.roughness,
+    density: b.density,
+    seed: Math.floor(Math.random() * 4294967295),
+    points: st.points.map(p => ({ x: +p.x.toFixed(3), y: +p.y.toFixed(3), pressure: +p.pressure.toFixed(3), tilt: +p.tilt.toFixed(3) })),
+  };
+  if (item.id && !st.erase) stroke.material = item.id;
+  await postOps([{ t: 'add_stroke', stroke }]);
+}
+
+for (const id of ['br-size']) {
+  brushEl(id).oninput = () => { brushEl('br-size-o').textContent = brushEl(id).value; };
+}
+
 // ---------- input ----------
 
 let dragging = null; // {sx, sy, px, py, moved}
 
 canvas.addEventListener('pointerdown', (e) => {
-  canvas.setPointerCapture(e.pointerId);
+  try { canvas.setPointerCapture(e.pointerId); } catch { /* an inactive pointer id: keep going */ }
   const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
   const wantPaint = state.tool === 'paint' && e.button === 0;
+  if ((state.tool === 'brush' || state.tool === 'erase') && e.button === 0) {
+    startStroke(wx, wy, e);
+    dragging = { stroking: true };
+    return;
+  }
   if (state.tool in EDGE_TOOLS && e.button === 0) {
     const edge = pickEdge(wx, wy);
     if (edge) toggleMark(edge, EDGE_TOOLS[state.tool]);
@@ -301,7 +411,14 @@ canvas.addEventListener('pointerdown', (e) => {
 
 canvas.addEventListener('pointermove', (e) => {
   if (!dragging) return;
-  if (dragging.painting) {
+  if (dragging.stroking) {
+    // Coalesced events keep fast pen strokes smooth.
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+    for (const ev of (evs.length ? evs : [e])) {
+      const [wx, wy] = screenToWorld(ev.offsetX ?? e.offsetX, ev.offsetY ?? e.offsetY);
+      addStrokePoint(wx, wy, ev);
+    }
+  } else if (dragging.painting) {
     const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
     const [cx, cy] = worldToCell(wx, wy);
     paintTo(cx, cy);
@@ -316,6 +433,7 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 canvas.addEventListener('pointerup', (e) => {
+  if (dragging && dragging.stroking) finishStroke();
   if (dragging && dragging.painting) {
     clearTimeout(state.pendingFlush);
     state.lastCell = null;
@@ -343,6 +461,10 @@ canvas.addEventListener('wheel', (e) => {
 // ONE table is both the key handler and the F1 help (they cannot drift).
 const KEYS = [
   { key: 'b', label: 'Paint tool', run: () => setTool('paint') },
+  { key: 'r', label: 'Brush tool', run: () => setTool('brush') },
+  { key: 'e', label: 'Eraser tool', run: () => setTool('erase') },
+  { key: '[', label: 'Smaller brush', run: () => nudgeSize(-1) },
+  { key: ']', label: 'Larger brush', run: () => nudgeSize(1) },
   { key: 'd', label: 'Door tool', run: () => setTool('door') },
   { key: 'w', label: 'Window tool', run: () => setTool('window') },
   { key: 'v', label: 'Pan tool', run: () => setTool('pan') },
@@ -585,6 +707,8 @@ async function undo() {
 
 document.getElementById('tool-pan').onclick = () => setTool('pan');
 document.getElementById('tool-paint').onclick = () => setTool('paint');
+document.getElementById('tool-brush').onclick = () => setTool('brush');
+document.getElementById('tool-erase').onclick = () => setTool('erase');
 document.getElementById('tool-door').onclick = () => setTool('door');
 document.getElementById('tool-window').onclick = () => setTool('window');
 document.getElementById('btn-problems').onclick = () => toggleProblems();
@@ -607,7 +731,9 @@ function buildPalette() {
       state.color = item.color;
       state.materialId = item.id || null;
       buildPalette();
-      setTool('paint');
+      // Picking a material keeps a paint-like tool (cell paint, brush, eraser);
+      // from any other tool it starts cell painting.
+      setTool(['paint', 'brush', 'erase'].includes(state.tool) ? state.tool : 'paint');
     };
     wrap.appendChild(sw);
   }

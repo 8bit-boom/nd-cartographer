@@ -120,9 +120,33 @@ cannot express), and `publish` started a nested tokio runtime.
   measures it and asserts the budget. Textured pictures are big as lossless
   PNG/WebP (17 MB for that slice), so the cap-fitting step and, still to do,
   lossy WebP matter more now.
-  *Not yet in M1b:* brush engine (pressure/tilt, round/pattern/scatter brushes),
-  stamps with shadows, eraser/roughen. The UI paints with the existing cell tool,
-  now interpolated so fast strokes no longer skip cells.
+- **Brush engine** (plan §5.3, §7.1) — painting is *data, not pixels*. A `Stroke`
+  (`ndcart-core::stroke`) is one journal op: brush, material or colour, pointer
+  samples with pressure and tilt, size, opacity, hardness, roughness, density and
+  a seed. Strokes sit in z-order on the floor (`strokes`), are validated at the
+  boundary (finite, bounded, ≤ 4,000 points, ≤ 20,000 strokes, ids unique), are
+  cosmetic (walls, rooms and what nd-world stores are unchanged; only the baked
+  picture differs), and `add_stroke` / `remove_stroke` have exact inverses — an
+  undone removal returns to its original z-index. `ndcart-paint::Prepared` turns
+  a stroke into deterministic coverage at any world position: **Round** (width
+  from pressure and tilt, soft↔hard edge, hand-drawn roughness) and **Scatter**
+  (seeded pebbles/tufts laid along the path, density-controlled). A spatial index
+  sized to the brush means a pixel only looks at nearby segments or dots. The
+  baker composites strokes over the cell layer in z-order; the **eraser reveals
+  the room layer beneath** (mixes back toward the pre-stroke pixels), so
+  removing or erasing never leaves holes. Tests: a tile equals the matching crop
+  of the full render with strokes crossing tile boundaries; eraser, z-order and
+  removal restore the exact picture; hostile numbers are refused; scatter is
+  capped and seeded. Heavy case (300 small + 40 long rough strokes of 500
+  points, 40x40 cells at 16 px): ~300 ms debug, ~60 ms release.
+  UI: Brush (R) and Eraser (E) tools with size / opacity / hardness / rough edge
+  / density controls and a Round/Scatter choice, `[` `]` for size; the pen's
+  pressure and tilt are recorded (a mouse counts as full pressure), the stroke
+  previews on the canvas at once and is sent as one op when you lift. Picking a
+  material swatch keeps the current paint-like tool.
+  *Not yet:* pattern-stamp brushes, stamps/props with drop shadows, fill, line and
+  rectangle brush variants, a stroke list in the outliner, and caching prepared
+  strokes across tiles.
 
 ## Still open in M0
 

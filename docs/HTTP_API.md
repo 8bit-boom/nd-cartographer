@@ -37,6 +37,8 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 
 - `{"t":"paint_cells","cells":[{"x","y"}…],"space":"id"|null}` — paint or clear
 - `{"t":"upsert_space","space":{"id","name","color":"#rrggbb","kind":"room|corridor|area","material?":"stone_floor"}}` — `material` is an id from `GET /api/materials` (1–40 chars `a-z0-9_`); without one the flat `color` paints
+- `{"t":"add_stroke","stroke":{"id","kind":"paint|erase","brush":"round|scatter","material?","color":"#rrggbb","size":0.05-64,"opacity":0-1,"hardness?":0-1,"roughness?":0-1,"density?":0-1,"seed","points":[{"x","y","pressure?":0-1,"tilt?":0-1}]},"index?"}` — a paint stroke in cell coordinates (1–4,000 points, ≤ 20,000 per floor); `index` is its z-order position (default: on top)
+- `{"t":"remove_stroke","id"}`
 - `{"t":"remove_space","id"}`
 - `{"t":"set_mark","edge":{"cell":{"x","y"},"edge":"west|north|east|south"},"mark":{"kind":"opening|door|window|secret","state":"open|closed"}|null}`
 - `{"t":"add_light","light":{"id","x","y","range","color","intensity","on","label?"}}` — ≤ 60 per floor (nd-world publish cap)

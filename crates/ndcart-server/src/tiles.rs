@@ -236,6 +236,87 @@ fn render_region(
         .expect("png encode")
 }
 
+/// Composite the floor's paint strokes over the baked cells, in z-order.
+/// A paint stroke mixes its material toward each pixel by `coverage * opacity`;
+/// an eraser mixes back toward what was there before any stroke (the room
+/// layer), so it reveals rather than cuts. Only strokes that can touch this
+/// region are prepared. Deterministic: same strokes, same pixels.
+fn apply_strokes(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+    use ndcart_core::stroke::StrokeKind;
+    if floor.strokes.is_empty() {
+        return;
+    }
+    let (w, h) = (pixmap.width() as i64, pixmap.height() as i64);
+    let scale = ppc as f32;
+    let region = [
+        x0 as f32 / scale,
+        y0 as f32 / scale,
+        (x0 + w) as f32 / scale,
+        (y0 + h) as f32 / scale,
+    ];
+    // Cheap reject on the raw points first (a stroke's reach is under one `size`).
+    let prepared: Vec<(&ndcart_core::Stroke, ndcart_paint::Prepared)> = floor
+        .strokes
+        .iter()
+        .filter(|s| {
+            let b = s.point_bounds();
+            let pad = s.size;
+            b[0] - pad <= region[2]
+                && b[2] + pad >= region[0]
+                && b[1] - pad <= region[3]
+                && b[3] + pad >= region[1]
+        })
+        .map(|s| (s, ndcart_paint::Prepared::new(s)))
+        .filter(|(_, p)| p.touches(region))
+        .collect();
+    if prepared.is_empty() {
+        return;
+    }
+    // What the erasers reveal: the pixels before any stroke.
+    let base: Option<Vec<u8>> = prepared
+        .iter()
+        .any(|(s, _)| s.kind == StrokeKind::Erase)
+        .then(|| pixmap.data().to_vec());
+    let stride = w as usize * 4;
+    for (s, p) in &prepared {
+        let surface = s
+            .material
+            .as_deref()
+            .and_then(ndcart_paint::find)
+            .map(Surface::Mat)
+            .unwrap_or_else(|| Surface::Flat(parse_hex(&s.color)));
+        let px0 = ((p.bounds[0] * scale).floor() as i64 - x0).clamp(0, w);
+        let px1 = ((p.bounds[2] * scale).ceil() as i64 - x0 + 1).clamp(0, w);
+        let py0 = ((p.bounds[1] * scale).floor() as i64 - y0).clamp(0, h);
+        let py1 = ((p.bounds[3] * scale).ceil() as i64 - y0 + 1).clamp(0, h);
+        let data = pixmap.data_mut();
+        for py in py0..py1 {
+            for px in px0..px1 {
+                let u = ((x0 + px) as f32 + 0.5) / scale;
+                let v = ((y0 + py) as f32 + 0.5) / scale;
+                let cov = p.coverage(u, v);
+                if cov <= 0.0 {
+                    continue;
+                }
+                let a = cov * s.opacity;
+                let i = py as usize * stride + px as usize * 4;
+                let cur = [data[i], data[i + 1], data[i + 2]];
+                let target = match s.kind {
+                    StrokeKind::Paint => surface.sample(u, v),
+                    StrokeKind::Erase => {
+                        let b = base.as_ref().expect("base kept for erasers");
+                        [b[i], b[i + 1], b[i + 2]]
+                    }
+                };
+                let c = ndcart_paint::mix(cur, target, a);
+                data[i] = c[0];
+                data[i + 1] = c[1];
+                data[i + 2] = c[2];
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_pixmap(
     floor: &FloorDoc,
@@ -327,6 +408,8 @@ fn render_pixmap(
             }
         }
     }
+
+    apply_strokes(&mut pixmap, floor, ppc, x0, y0);
 
     // Walls on top: stroke width grows with zoom, min 1px, so z0 reads.
     let mut wall_paint = tiny_skia::Paint {
@@ -594,6 +677,327 @@ mod tests {
             })
             .collect();
         assert!(wood.len() > 6, "wood planks should have texture");
+    }
+
+    fn mk_stroke(
+        id: &str,
+        kind: ndcart_core::StrokeKind,
+        brush: ndcart_core::BrushKind,
+        color: &str,
+        size: f32,
+        pts: &[(f32, f32)],
+    ) -> ndcart_core::Stroke {
+        ndcart_core::Stroke {
+            id: id.into(),
+            kind,
+            brush,
+            material: None,
+            color: color.into(),
+            size,
+            opacity: 1.0,
+            hardness: 1.0,
+            roughness: 0.0,
+            density: 0.8,
+            seed: 5,
+            points: pts
+                .iter()
+                .map(|&(x, y)| ndcart_core::StrokePoint {
+                    x,
+                    y,
+                    pressure: 1.0,
+                    tilt: 0.0,
+                })
+                .collect(),
+        }
+    }
+
+    fn decode(png: &[u8]) -> tiny_skia::Pixmap {
+        tiny_skia::Pixmap::decode_png(png).unwrap()
+    }
+
+    fn rgb(pm: &tiny_skia::Pixmap, x: u32, y: u32) -> [u8; 3] {
+        let p = pm.pixel(x, y).unwrap();
+        [p.red(), p.green(), p.blue()]
+    }
+
+    #[test]
+    fn a_paint_stroke_lays_colour_along_its_path_even_over_the_void() {
+        use ndcart_core::{BrushKind, StrokeKind};
+        let mut f = material_floor(); // 8x8 cells
+        let st = mk_stroke(
+            "s",
+            StrokeKind::Paint,
+            BrushKind::Round,
+            "#ff0000",
+            2.0,
+            &[(1.0, 9.5), (6.0, 9.5)],
+        );
+        f.add_stroke(st, None).unwrap();
+        let (png, w, h) = bake_full_stroked(&f, 32);
+        // y = 9.5 cells is below the painted rooms (rows 0..8): over the void.
+        assert!(h >= 10 * 32 && w >= 8 * 32);
+        let pm = decode(&png);
+        assert_eq!(
+            rgb(&pm, 3 * 32, (9.5 * 32.0) as u32),
+            [255, 0, 0],
+            "on the path"
+        );
+        assert_eq!(
+            // 8.25 cells: below the rooms (rows 0..8) and 1.25 from the path.
+            rgb(&pm, 3 * 32, (9.5 * 32.0) as u32 - 40),
+            VOID[..3],
+            "off the path stays void"
+        );
+        assert_eq!(
+            rgb(&pm, 3 * 32, 3 * 32 + 16),
+            rgb(
+                &decode(&bake_full_stroked(&material_floor(), 32).0),
+                3 * 32,
+                3 * 32 + 16
+            ),
+            "cells elsewhere untouched"
+        );
+    }
+
+    #[test]
+    fn opacity_and_material_strokes_behave() {
+        use ndcart_core::{BrushKind, StrokeKind};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        let mut half = mk_stroke(
+            "h",
+            StrokeKind::Paint,
+            BrushKind::Round,
+            "#ff0000",
+            2.0,
+            &[(1.0, 1.0), (5.0, 1.0)],
+        );
+        half.opacity = 0.5;
+        f.add_stroke(half, None).unwrap();
+        let mut grass = mk_stroke(
+            "g",
+            StrokeKind::Paint,
+            BrushKind::Round,
+            "#00ff00",
+            2.0,
+            &[(1.0, 4.0), (5.0, 4.0)],
+        );
+        grass.material = Some("grass".into());
+        f.add_stroke(grass, None).unwrap();
+        // Make the floor large enough to bake (needs at least a cell painted).
+        let (png, ..) = bake_full_stroked(&f, 32);
+        let pm = decode(&png);
+        let mid = rgb(&pm, 96, 32);
+        // 50% red over the void (0x14,0x16,0x1a) is about (137, 11, 13).
+        assert!(
+            (i32::from(mid[0]) - 137).abs() <= 2 && mid[1] < 20,
+            "{mid:?}"
+        );
+        // A material stroke is textured, not the flat fallback colour.
+        let seen: std::collections::BTreeSet<_> =
+            (0..40u32).map(|i| rgb(&pm, 70 + i * 2, 4 * 32)).collect();
+        assert!(
+            seen.len() > 5,
+            "grass should vary along the stroke: {}",
+            seen.len()
+        );
+        assert!(
+            !seen.contains(&[0, 255, 0]),
+            "material wins over the fallback colour"
+        );
+    }
+
+    #[test]
+    fn an_eraser_reveals_the_room_layer_and_later_strokes_draw_on_top() {
+        use ndcart_core::{BrushKind, StrokeKind};
+        let mut f = material_floor();
+        let before = decode(&bake_full_stroked(&f, 32).0);
+        f.add_stroke(
+            mk_stroke(
+                "red",
+                StrokeKind::Paint,
+                BrushKind::Round,
+                "#ff0000",
+                3.0,
+                &[(1.0, 1.0), (3.0, 1.0)],
+            ),
+            None,
+        )
+        .unwrap();
+        // Erase the right half of the red stroke only.
+        f.add_stroke(
+            mk_stroke(
+                "erase",
+                StrokeKind::Erase,
+                BrushKind::Round,
+                "#000000",
+                1.0,
+                &[(3.2, 1.0), (3.5, 1.0)],
+            ),
+            None,
+        )
+        .unwrap();
+        let after = decode(&bake_full_stroked(&f, 32).0);
+        let (left, right) = (rgb(&after, 48, 32), rgb(&after, 3 * 32 + 16, 32));
+        assert_eq!(left, [255, 0, 0], "unerased part keeps the paint");
+        assert_eq!(
+            right,
+            rgb(&before, 3 * 32 + 16, 32),
+            "erased part is exactly the room layer again"
+        );
+        // z-order: a later stroke over the same spot wins.
+        let mut g = material_floor();
+        g.add_stroke(
+            mk_stroke(
+                "a",
+                StrokeKind::Paint,
+                BrushKind::Round,
+                "#ff0000",
+                3.0,
+                &[(1.0, 1.0), (3.0, 1.0)],
+            ),
+            None,
+        )
+        .unwrap();
+        g.add_stroke(
+            mk_stroke(
+                "b",
+                StrokeKind::Paint,
+                BrushKind::Round,
+                "#0000ff",
+                3.0,
+                &[(1.0, 1.0), (3.0, 1.0)],
+            ),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            rgb(&decode(&bake_full_stroked(&g, 32).0), 64, 32),
+            [0, 0, 255]
+        );
+        // Undo-by-removal restores the exact picture.
+        g.remove_stroke("b").unwrap();
+        g.remove_stroke("a").unwrap();
+        assert_eq!(decode(&bake_full_stroked(&g, 32).0).data(), before.data());
+    }
+
+    #[test]
+    fn strokes_bake_identically_in_tiles_and_in_the_full_render() {
+        use ndcart_core::{BrushKind, StrokeKind};
+        let mut f = material_floor();
+        // A long diagonal that crosses the tile boundary at 64 px/cell (x = 4 cells).
+        let mut s = mk_stroke(
+            "d",
+            StrokeKind::Paint,
+            BrushKind::Round,
+            "#ff8800",
+            1.5,
+            &[(0.5, 0.5), (7.5, 7.0)],
+        );
+        s.roughness = 0.6;
+        s.hardness = 0.5;
+        f.add_stroke(s, None).unwrap();
+        f.add_stroke(
+            mk_stroke(
+                "sc",
+                StrokeKind::Paint,
+                BrushKind::Scatter,
+                "#112233",
+                3.0,
+                &[(0.5, 6.0), (7.5, 2.0)],
+            ),
+            None,
+        )
+        .unwrap();
+        let (png, w, _) = bake_full_stroked(&f, 64);
+        assert_eq!(w, 512);
+        let full = decode(&png);
+        for (tx, ty) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let tile = decode(&bake_tile(&f, &[], 32.0, 2, tx, ty));
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    assert_eq!(
+                        tile.pixel(x, y),
+                        full.pixel(tx as u32 * 256 + x, ty as u32 * 256 + y),
+                        "tile ({tx},{ty}) pixel ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_busy_floor_bakes_in_reasonable_time() {
+        use ndcart_core::{BrushKind, StrokeKind};
+        let mut f = material_floor();
+        for i in 0..300 {
+            let (cx, cy) = ((i % 20) as f32 * 2.0, (i / 20) as f32 * 2.5);
+            let pts: Vec<(f32, f32)> = (0..100)
+                .map(|k| {
+                    (
+                        cx + (k as f32 * 0.13).min(1.6),
+                        cy + ((k * 7 % 11) as f32) * 0.05,
+                    )
+                })
+                .collect();
+            let brush = if i % 5 == 0 {
+                BrushKind::Scatter
+            } else {
+                BrushKind::Round
+            };
+            f.add_stroke(
+                mk_stroke(
+                    &format!("s{i}"),
+                    StrokeKind::Paint,
+                    brush,
+                    "#aa3344",
+                    1.0,
+                    &pts,
+                ),
+                None,
+            )
+            .unwrap();
+        }
+        // Plus the heavy case: long, wide, rough scribbles with many samples.
+        for i in 0..40 {
+            let pts: Vec<(f32, f32)> = (0..500)
+                .map(|k| {
+                    let t = k as f32 / 499.0;
+                    (
+                        1.0 + t * 38.0,
+                        2.0 + i as f32 * 0.9 + ((k * 13 % 17) as f32) * 0.08,
+                    )
+                })
+                .collect();
+            let mut st = mk_stroke(
+                &format!("long{i}"),
+                StrokeKind::Paint,
+                BrushKind::Round,
+                "#3355aa",
+                4.0,
+                &pts,
+            );
+            st.roughness = 0.5;
+            st.hardness = 0.6;
+            f.add_stroke(st, None).unwrap();
+        }
+        let t = std::time::Instant::now();
+        let (png, ..) = bake_full_stroked(&f, 16);
+        let ms = t.elapsed().as_millis();
+        assert!(png.len() > 100);
+        assert!(ms < 20_000, "300 strokes x 100 points took {ms} ms");
+        println!("300 small + 40 long rough strokes (500 points), 40x40 cells at 16 px: {ms} ms");
+    }
+
+    /// Bake the whole floor, tall enough to hold strokes below the rooms.
+    fn bake_full_stroked(f: &FloorDoc, ppc: i64) -> (Vec<u8>, u32, u32) {
+        // No walls: these tests are about strokes. grid_extent only sees painted
+        // cells, so bake through render_region to keep room for strokes below them.
+        let walls: Vec<Wall> = vec![];
+        let (cols, rows) = grid_extent(f);
+        let (cols, rows) = (cols.max(8), rows.max(10));
+        let (w, h) = (i64::from(cols) * ppc, i64::from(rows) * ppc);
+        let png = render_region(f, &walls, 32.0, ppc, 0, 0, w as u32, h as u32);
+        (png, w as u32, h as u32)
     }
 
     #[test]

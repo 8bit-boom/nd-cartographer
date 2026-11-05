@@ -43,6 +43,16 @@ pub enum Op {
     RemoveLabel {
         id: String,
     },
+    /// Add a paint stroke on top of the z-order (or at `index`, which is how
+    /// an undone removal puts it back where it was).
+    AddStroke {
+        stroke: crate::stroke::Stroke,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<usize>,
+    },
+    RemoveStroke {
+        id: String,
+    },
     /// Several ops as one undoable step.
     Batch {
         ops: Vec<Op>,
@@ -154,6 +164,20 @@ impl Op {
                     label: label.clone(),
                 })
             }
+            Op::AddStroke { stroke, .. } => Ok(Op::RemoveStroke {
+                id: stroke.id.clone(),
+            }),
+            Op::RemoveStroke { id } => {
+                let index = floor
+                    .strokes
+                    .iter()
+                    .position(|s| s.id == *id)
+                    .ok_or_else(|| CoreError::NotFound(format!("stroke {id}")))?;
+                Ok(Op::AddStroke {
+                    stroke: floor.strokes[index].clone(),
+                    index: Some(index),
+                })
+            }
             Op::Batch { ops } => {
                 // Compute the batch inverse by walking a scratch copy of the
                 // floor forward through the batch.
@@ -182,6 +206,8 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::RemoveLight { id } => floor.remove_light(id)?,
         Op::UpsertLabel { label } => floor.upsert_label(label.clone())?,
         Op::RemoveLabel { id } => floor.remove_label(id)?,
+        Op::AddStroke { stroke, index } => floor.add_stroke(stroke.clone(), *index)?,
+        Op::RemoveStroke { id } => floor.remove_stroke(id)?,
         Op::Batch { ops } => {
             for op in ops {
                 apply_op(floor, op)?;
@@ -511,5 +537,144 @@ mod tests {
             label: None,
         };
         assert!(floor.add_light(nan).is_err());
+    }
+
+    fn stroke(id: &str) -> crate::stroke::Stroke {
+        use crate::stroke::{BrushKind, Stroke, StrokeKind, StrokePoint};
+        Stroke {
+            id: id.into(),
+            kind: StrokeKind::Paint,
+            brush: BrushKind::Round,
+            material: None,
+            color: "#336699".into(),
+            size: 1.5,
+            opacity: 1.0,
+            hardness: 1.0,
+            roughness: 0.0,
+            density: 0.5,
+            seed: 3,
+            points: vec![
+                StrokePoint {
+                    x: 0.0,
+                    y: 0.0,
+                    pressure: 1.0,
+                    tilt: 0.0,
+                },
+                StrokePoint {
+                    x: 3.0,
+                    y: 1.0,
+                    pressure: 1.0,
+                    tilt: 0.0,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn strokes_undo_exactly_and_keep_their_z_order() {
+        let mut floor = FloorDoc::new("f".into(), "G".into());
+        let mut j = Journal::default();
+        for id in ["a", "b", "c"] {
+            j.push(
+                &mut floor,
+                &Op::AddStroke {
+                    stroke: stroke(id),
+                    index: None,
+                },
+            )
+            .unwrap();
+        }
+        let ids = |f: &FloorDoc| f.strokes.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&floor), ["a", "b", "c"]);
+
+        // Remove the middle one, then undo: it returns to the middle, not the top.
+        j.push(&mut floor, &Op::RemoveStroke { id: "b".into() })
+            .unwrap();
+        assert_eq!(ids(&floor), ["a", "c"]);
+        j.undo_last(&mut floor).unwrap();
+        assert_eq!(ids(&floor), ["a", "b", "c"]);
+
+        // Undo an add: gone.
+        j.push(
+            &mut floor,
+            &Op::AddStroke {
+                stroke: stroke("d"),
+                index: None,
+            },
+        )
+        .unwrap();
+        j.undo_last(&mut floor).unwrap();
+        assert_eq!(ids(&floor), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn refused_strokes_are_never_journaled() {
+        let mut floor = FloorDoc::new("f".into(), "G".into());
+        let mut j = Journal::default();
+        j.push(
+            &mut floor,
+            &Op::AddStroke {
+                stroke: stroke("a"),
+                index: None,
+            },
+        )
+        .unwrap();
+        // duplicate id, bad number, unknown removal: all refused, journal unchanged
+        let mut bad = stroke("z");
+        bad.size = f32::NAN;
+        for op in [
+            Op::AddStroke {
+                stroke: stroke("a"),
+                index: None,
+            },
+            Op::AddStroke {
+                stroke: bad,
+                index: None,
+            },
+            Op::RemoveStroke { id: "nope".into() },
+        ] {
+            assert!(j.push(&mut floor, &op).is_err());
+        }
+        assert_eq!((j.len(), floor.strokes.len()), (1, 1));
+    }
+
+    #[test]
+    fn strokes_survive_ndjson_replay_into_a_fresh_floor() {
+        let mut floor = FloorDoc::new("f".into(), "G".into());
+        let mut j = Journal::default();
+        for id in ["a", "b"] {
+            j.push(
+                &mut floor,
+                &Op::AddStroke {
+                    stroke: stroke(id),
+                    index: None,
+                },
+            )
+            .unwrap();
+        }
+        j.push(&mut floor, &Op::RemoveStroke { id: "a".into() })
+            .unwrap();
+        let back = Journal::from_ndjson(&j.to_ndjson()).unwrap();
+        let mut fresh = FloorDoc::new("f".into(), "G".into());
+        back.replay_into(&mut fresh).unwrap();
+        assert_eq!(fresh.strokes, floor.strokes);
+        // A batch of strokes is one undo step.
+        let mut j2 = Journal::default();
+        let mut f2 = FloorDoc::new("f".into(), "G".into());
+        let batch = Op::Batch {
+            ops: vec![
+                Op::AddStroke {
+                    stroke: stroke("x"),
+                    index: None,
+                },
+                Op::AddStroke {
+                    stroke: stroke("y"),
+                    index: None,
+                },
+            ],
+        };
+        j2.push(&mut f2, &batch).unwrap();
+        j2.undo_last(&mut f2).unwrap();
+        assert!(f2.strokes.is_empty());
     }
 }

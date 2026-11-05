@@ -1045,8 +1045,14 @@ nd-world change (port those two GETs to the gateway) — noted, not done.
 **Order change (owner go-ahead):** split exports → outliner → materials/starter pack →
 brush engine. The starter pack moved *behind* the material system it is made of, so
 M1b opened with `ndcart-paint` (materials, procedural patterns, edge blending) and the
-first-party procedural pack; the brush engine (pressure/tilt, pattern/scatter brushes,
-stamps) is next.
+first-party procedural pack; the brush engine followed: strokes as journal ops with pressure/tilt, round and
+scatter brushes, an eraser that reveals the room layer, all deterministic and
+tile-identical (see ARCHITECTURE). Stamps with drop shadows remain.
+
+**Known wrinkle (open):** wall ids are generated fresh on every derivation, so each
+re-publish replaces nd-world's walls with new ids and any door the table had opened
+snaps back to its authored state. Stable ids (derived from the edge) would let a
+re-publish keep runtime door state; not done yet.
 
 **Image formats** — exports support PNG, WebP and AVIF (owner request). UVTT pictures
 stay PNG/WebP (the consumers can't read AVIF). Lossy WebP for cap-fitting is a
