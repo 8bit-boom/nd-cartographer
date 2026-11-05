@@ -962,6 +962,64 @@ async fn lint_doc(
     })))
 }
 
+#[derive(Deserialize)]
+struct PreviewQuery {
+    floor: Option<String>,
+    /// The viewer, in cells.
+    x: Option<f64>,
+    y: Option<f64>,
+    /// How far the viewer sees, in cells (default 12).
+    radius: Option<f64>,
+    /// Darkness on (default): only lit areas show clearly.
+    darkness: Option<bool>,
+    ppc: Option<i64>,
+}
+
+/// `GET /api/docs/{id}/preview?x=&y=&radius=&darkness=&ppc=` — what the table
+/// sees from one point: the player's copy of the floor (secrets stripped)
+/// under fog, with sight blocked by walls and closed doors and lamps lighting
+/// what they reach. A PNG.
+async fn preview(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<PreviewQuery>,
+) -> Result<Response, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(f) => floors_by_id(&doc.floors, f)?,
+        None => 0,
+    };
+    let floor = ndcart_core::for_audience(&doc.floors[idx], ndcart_core::Audience::Player);
+    let cell_size = doc.manifest.cell_size;
+    drop(store);
+    let (x, y) = (q.x.unwrap_or(0.5), q.y.unwrap_or(0.5));
+    let radius = q.radius.unwrap_or(12.0);
+    if !(x.is_finite() && y.is_finite() && radius.is_finite()) || !(0.5..=200.0).contains(&radius) {
+        return Err(ApiError(CoreError::Invalid(
+            "x and y must be numbers and radius 0.5-200".into(),
+        )));
+    }
+    let (ppc, dark) = (q.ppc.unwrap_or(16), q.darkness.unwrap_or(true));
+    let (png, ..) = tokio::task::spawn_blocking(move || {
+        tiles::bake_preview(&floor, cell_size, ppc, [x, y], radius, dark)
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("preview failed: {e}"))))?
+    .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        png,
+    )
+        .into_response())
+}
+
 /// `GET /api/docs/{id}/export/png[?floor=ID&ppc=N]` — the whole floor as one PNG.
 async fn export_png(
     State(app): State<App>,
@@ -1274,6 +1332,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
         .route("/api/docs/{id}/generate-map", post(generate_map))
         .route("/api/docs/{id}/scatter", post(scatter_props))
+        .route("/api/docs/{id}/preview", get(preview))
         .route("/api/prefabs", get(list_prefabs))
         .route("/api/prefabs/{pid}", axum::routing::delete(delete_prefab))
         .route("/api/docs/{id}/prefabs", post(capture_prefab))
@@ -2438,6 +2497,55 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::NOT_FOUND);
         let _ = fb;
+    }
+
+    #[tokio::test]
+    async fn the_player_preview_never_shows_a_gm_secret_and_checks_its_input() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"P"}"#.to_vec()).await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let floor = json(d)["floors"][0]["id"].as_str().unwrap().to_string();
+        let ops = serde_json::json!({"floor": floor, "ops": [
+            {"t":"upsert_space","space":{"id":"a","name":"A","color":"#d0d0d0","kind":"room"}},
+            {"t":"upsert_space","space":{"id":"b","name":"B","color":"#d0d0d0","kind":"room"}},
+            {"t":"paint_cells","space":"a","cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0}]},
+            {"t":"paint_cells","space":"b","cells":[{"x":3,"y":0},{"x":4,"y":0},{"x":5,"y":0}]},
+            {"t":"set_mark","edge":{"cell":{"x":2,"y":0},"edge":"east"},"mark":{"kind":"secret","state":"open"}}]});
+        call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            ops.to_string().into_bytes(),
+        )
+        .await;
+        let get = |q: &str| {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}/preview?{q}"));
+            async move { call(&router, "GET", &uri, vec![]).await }
+        };
+        let (st, png) = get("x=0.5&y=0.5&radius=20&darkness=false&ppc=16").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(&png[1..4], b"PNG");
+        // An open SECRET door is a plain wall to players: room B stays black.
+        let img = decode_png_for_test(&png);
+        let px = |x: u32, y: u32| {
+            let i = ((y * img.0 + x) * 4) as usize;
+            u32::from(img.1[i]) + u32::from(img.1[i + 1]) + u32::from(img.1[i + 2])
+        };
+        assert!(px(24, 8) > 200, "room A visible");
+        assert!(
+            px(4 * 16 + 8, 8) < 60,
+            "room B hidden behind the secret door"
+        );
+        for bad in ["radius=0", "radius=9999", "ppc=500"] {
+            assert_eq!(get(bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    fn decode_png_for_test(png: &[u8]) -> (u32, Vec<u8>) {
+        let pm = tiny_skia::Pixmap::decode_png(png).unwrap();
+        (pm.width(), pm.data().to_vec())
     }
 
     #[tokio::test]

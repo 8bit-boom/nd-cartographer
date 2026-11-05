@@ -261,6 +261,7 @@ async function refresh() {
   loadMiniImage();
   buildViews();
   syncMapGrid();
+  loadPreview();
 }
 
 // ---------- screen <-> world ----------
@@ -310,7 +311,8 @@ function render() {
   drawLiveStroke();
   drawTerrainOverlay();
   drawOverlayDraft();
-  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); drawTerrainOverlay(); drawOverlayDraft(); });  drawMinimap();
+  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); drawTerrainOverlay(); drawOverlayDraft(); drawPreview(); drawMinimap(); });  drawPreview();
+  drawMinimap();
 }
 
 const tileCache = new Map(); // url -> Image
@@ -957,6 +959,18 @@ let dragging = null; // {sx, sy, px, py, moved}
 canvas.addEventListener('pointerdown', (e) => {
   try { canvas.setPointerCapture(e.pointerId); } catch { /* an inactive pointer id: keep going */ }
   const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
+  if (state.pv.on && e.button === 0 && isDoubleClick(e)) {
+    state.pv.x = wx / ppc(); state.pv.y = wy / ppc();
+    loadPreview(); render();
+    dragging = null;
+    return;
+  }
+  // The player view is read-only: no tool edits the map while it is on.
+  if (state.pv.on && e.button === 0 && state.tool !== 'pan') {
+    statusEl.textContent = 'Switch off the player view to edit (👁 Player view).';
+    dragging = null;
+    return;
+  }
   const wantPaint = state.tool === 'paint' && e.button === 0;
   if ((state.tool === 'brush' || state.tool === 'erase') && e.button === 0) {
     startStroke(wx, wy, e);
@@ -1354,6 +1368,50 @@ function buildOutline() {
     if (hadFocus) keep.focus();
   }
 }
+
+// ---------- player view ----------
+// The fog preview: the server renders what the table sees from one spot
+// (the players' copy of the floor, walls and closed doors blocking sight).
+const PV_PPC = 16;
+state.pv = { on: false, x: 0.5, y: 0.5, img: null, key: '' };
+let pvTimer = null;
+
+function pvParams() {
+  return `floor=${state.floorId}&x=${state.pv.x.toFixed(2)}&y=${state.pv.y.toFixed(2)}&radius=${document.getElementById('pv-radius').value}` +
+    `&darkness=${document.getElementById('pv-dark').checked}&ppc=${PV_PPC}&rev=${state.rev}`;
+}
+function loadPreview() {
+  if (!state.pv.on) return;
+  clearTimeout(pvTimer);
+  pvTimer = setTimeout(() => {
+    const key = `${state.docId}|${pvParams()}`;
+    if (key === state.pv.key) return;
+    const img = new Image();
+    img.onload = () => { state.pv.img = img; state.pv.key = key; render(); };
+    img.onerror = () => { state.pv.img = null; state.pv.key = key; statusEl.textContent = 'Nothing to preview on this floor yet.'; render(); };
+    img.src = `/api/docs/${state.docId}/preview?${pvParams()}`;
+  }, 150);
+}
+function drawPreview() {
+  if (!state.pv.on || !state.pv.img) return;
+  const k = ppc() / PV_PPC;
+  const [sx, sy] = worldToScreen(0, 0);
+  ctx.drawImage(state.pv.img, sx, sy, state.pv.img.width * k, state.pv.img.height * k);
+  const [vx, vy] = worldToScreen(state.pv.x * ppc(), state.pv.y * ppc());
+  ctx.save();
+  ctx.fillStyle = '#4cc2ff'; ctx.strokeStyle = '#06131a'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(vx, vy, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.restore();
+}
+function setPreview(on) {
+  state.pv.on = on;
+  document.getElementById('btn-preview').setAttribute('aria-pressed', String(on));
+  document.getElementById('previewbar').hidden = !on;
+  if (on) { state.pv.key = ''; loadPreview(); } else render();
+}
+document.getElementById('btn-preview').onclick = () => setPreview(!state.pv.on);
+document.getElementById('pv-radius').oninput = (e) => { document.getElementById('pv-radius-o').textContent = e.target.value; loadPreview(); };
+document.getElementById('pv-dark').onchange = loadPreview;
 
 // ---------- map grid (square / hex) ----------
 function syncMapGrid() {

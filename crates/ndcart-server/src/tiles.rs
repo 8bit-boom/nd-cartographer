@@ -1277,6 +1277,96 @@ fn apply_strokes(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0:
     }
 }
 
+/// What the table sees from one viewpoint: the floor as the players get it
+/// (secrets already stripped by the caller), under fog. Everything outside the
+/// viewer's line of sight is black; with `darkness` on, what the viewer can
+/// see but no lamp reaches is only dimly shown. Lamps are blocked by walls too.
+pub fn bake_preview(
+    floor: &FloorDoc,
+    cell_size: f64,
+    ppc: i64,
+    viewer: [f64; 2],
+    radius: f64,
+    darkness: bool,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    use tiny_skia::{BlendMode, FillRule, Mask, Paint, PathBuilder, Transform};
+    let walls = derive_walls(floor, cell_size);
+    let (cols, rows) = grid_extent(floor);
+    let (w, h) = (i64::from(cols) * ppc, i64::from(rows) * ppc);
+    if !(1..=64).contains(&ppc) || w > MAX_SIDE_PX || h > MAX_SIDE_PX || w * h > MAX_FULL_PX {
+        return Err(format!(
+            "preview {w}x{h}px is outside the limits (ppc 1-64)"
+        ));
+    }
+    let mut base = render_pixmap(floor, &walls, cell_size, ppc, 0, 0, w as u32, h as u32);
+    let segs = ndcart_core::visibility::blockers(&walls, cell_size);
+    let s = ppc as f32;
+    let poly = |pts: &[[f64; 2]]| {
+        let mut pb = PathBuilder::new();
+        for (i, p) in pts.iter().enumerate() {
+            let (x, y) = (p[0] as f32 * s, p[1] as f32 * s);
+            if i == 0 {
+                pb.move_to(x, y);
+            } else {
+                pb.line_to(x, y);
+            }
+        }
+        pb.close();
+        pb.finish()
+    };
+    let (fw, fh) = (base.width(), base.height());
+    let mut fog = tiny_skia::Pixmap::new(fw, fh).ok_or("preview too large")?;
+    let mut black = Paint::default();
+    black.set_color_rgba8(0, 0, 0, 240);
+    let rect = tiny_skia::Rect::from_xywh(0.0, 0.0, fw as f32, fh as f32).ok_or("empty preview")?;
+    fog.fill_rect(rect, &black, Transform::identity(), None);
+    let mut cut = |alpha: u8, path: &tiny_skia::Path, mask: Option<&Mask>| {
+        let mut p = Paint::default();
+        p.set_color_rgba8(0, 0, 0, alpha);
+        p.blend_mode = BlendMode::DestinationOut;
+        p.anti_alias = true;
+        fog.fill_path(path, &p, FillRule::Winding, Transform::identity(), mask);
+    };
+    let sight = visible_or_empty(&poly, viewer, &segs, radius);
+    if let Some(sight_path) = sight {
+        if darkness {
+            cut(150, &sight_path, None);
+            let mut mask = Mask::new(fw, fh).ok_or("preview too large")?;
+            mask.fill_path(&sight_path, FillRule::Winding, true, Transform::identity());
+            for l in floor.lights.iter().filter(|l| l.on) {
+                let o = [l.x / cell_size, l.y / cell_size];
+                let lp = ndcart_core::visibility::visible_polygon(o, &segs, l.range.max(0.5));
+                if let Some(path) = poly(&lp) {
+                    cut(255, &path, Some(&mask));
+                }
+            }
+        } else {
+            cut(255, &sight_path, None);
+        }
+    }
+    base.draw_pixmap(
+        0,
+        0,
+        fog.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
+    let png = encode(&base, ImageFormat::Png, 90)?;
+    Ok((png, fw, fh))
+}
+
+fn visible_or_empty(
+    poly: &dyn Fn(&[[f64; 2]]) -> Option<tiny_skia::Path>,
+    viewer: [f64; 2],
+    segs: &[ndcart_core::visibility::Seg],
+    radius: f64,
+) -> Option<tiny_skia::Path> {
+    poly(&ndcart_core::visibility::visible_polygon(
+        viewer, segs, radius,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_pixmap(
     floor: &FloorDoc,
@@ -1471,6 +1561,127 @@ pub fn derive_walls(floor: &FloorDoc, cell_size: f64) -> Vec<Wall> {
 mod tests {
     use super::*;
     use ndcart_core::grid::{Space, SpaceKind};
+
+    fn two_rooms() -> FloorDoc {
+        use ndcart_core::grid::{default_space, Edge, EdgeKey, Mark, MarkKind};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        for (id, name) in [("a", "West"), ("b", "East")] {
+            let mut sp = default_space(id, name, SpaceKind::Room);
+            sp.color = "#d0d0d0".into();
+            f.grid.upsert_space(sp).unwrap();
+        }
+        let west: Vec<CellKey> = (0..6)
+            .flat_map(|x| (0..6).map(move |y| CellKey::new(x, y)))
+            .collect();
+        let east: Vec<CellKey> = (6..12)
+            .flat_map(|x| (0..6).map(move |y| CellKey::new(x, y)))
+            .collect();
+        f.grid.paint(&west, Some("a")).unwrap();
+        f.grid.paint(&east, Some("b")).unwrap();
+        // A closed door between them, high up (y = 0); everything else is wall.
+        f.grid
+            .set_mark(
+                EdgeKey {
+                    cell: CellKey::new(5, 0),
+                    edge: Edge::East,
+                },
+                Some(Mark::new(MarkKind::Door)),
+            )
+            .unwrap();
+        f
+    }
+
+    #[test]
+    fn the_preview_hides_what_a_closed_door_and_walls_hide() {
+        let f = two_rooms();
+        let lum = |pm: &tiny_skia::Pixmap, cx: f32, cy: f32| {
+            let c = rgb(pm, (cx * 16.0) as u32, (cy * 16.0) as u32);
+            u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2])
+        };
+        let png = |darkness| {
+            decode(
+                &bake_preview(&f, 32.0, 16, [2.5, 3.5], 30.0, darkness)
+                    .unwrap()
+                    .0,
+            )
+        };
+        let lit = png(false);
+        assert!(lum(&lit, 3.0, 3.0) > 300, "own room visible");
+        assert!(
+            lum(&lit, 9.0, 3.0) < 60,
+            "the room behind the closed door is black"
+        );
+        // With the lamp-less darkness rule, the same room is only dimly shown.
+        let dark = png(true);
+        let (a, b) = (lum(&dark, 3.0, 3.0), lum(&lit, 3.0, 3.0));
+        assert!(a < b && a > 40, "dim, not black or full: {a} vs {b}");
+        // Open the door: the east room comes into view through the doorway line.
+        let mut open = f.clone();
+        open.grid
+            .set_mark(
+                ndcart_core::grid::EdgeKey {
+                    cell: CellKey::new(5, 0),
+                    edge: ndcart_core::grid::Edge::East,
+                },
+                Some(ndcart_core::grid::Mark {
+                    kind: ndcart_core::grid::MarkKind::Door,
+                    state: ndcart_core::grid::MarkState::Open,
+                }),
+            )
+            .unwrap();
+        let seen = decode(
+            &bake_preview(&open, 32.0, 16, [5.0, 0.6], 30.0, false)
+                .unwrap()
+                .0,
+        );
+        assert!(lum(&seen, 8.0, 0.5) > 300, "visible through the open door");
+    }
+
+    #[test]
+    fn a_lamp_lights_its_own_room_only() {
+        let mut f = two_rooms();
+        // Open the door so both rooms are in sight, with a lamp only in the east room.
+        f.grid
+            .set_mark(
+                ndcart_core::grid::EdgeKey {
+                    cell: CellKey::new(5, 0),
+                    edge: ndcart_core::grid::Edge::East,
+                },
+                Some(ndcart_core::grid::Mark {
+                    kind: ndcart_core::grid::MarkKind::Door,
+                    state: ndcart_core::grid::MarkState::Open,
+                }),
+            )
+            .unwrap();
+        f.lights.push(ndcart_core::Light {
+            id: "l".into(),
+            x: 9.5 * 32.0,
+            y: 3.0 * 32.0,
+            range: 2.5,
+            color: "#ffaa00".into(),
+            intensity: 0.9,
+            on: true,
+            label: None,
+        });
+        let pm = decode(
+            &bake_preview(&f, 32.0, 16, [5.0, 0.6], 30.0, true)
+                .unwrap()
+                .0,
+        );
+        let lum = |cx: f32, cy: f32| {
+            let c = rgb(&pm, (cx * 16.0) as u32, (cy * 16.0) as u32);
+            u32::from(c[0]) + u32::from(c[1]) + u32::from(c[2])
+        };
+        // The lamp's pool: east room near the lamp is bright where the viewer can see it.
+        assert!(
+            lum(8.5, 0.8) > lum(11.0, 5.0),
+            "{} vs {}",
+            lum(8.5, 0.8),
+            lum(11.0, 5.0)
+        );
+        assert!(bake_preview(&f, 32.0, 100, [1.0, 1.0], 5.0, true).is_err());
+    }
+
     use ndcart_core::journal::Op;
     use ndcart_core::{CellKey, Journal};
 

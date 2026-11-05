@@ -36,6 +36,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
 
 | POST | `/api/docs/{id}/generate-map` | `{floor?, kind: dungeon\|cave\|building\|deck\|district, seed, width, height}` | 16–120 squares a side. Adds to the floor as one undoable step; same seed, same map. |
+| GET | `/api/docs/{id}/preview?floor&x&y&radius&darkness&ppc` | – | PNG of what the table sees from a point (players' copy, fog, sight blocked by walls and closed doors, lamps light what they reach). |
 | POST | `/api/docs/{id}/scatter` | `{floor?, points:[[x,y]…], biome? \| assets[], spacing?, density?, seed}` | Fill an area with props (and, for a biome, a tinted region) as one undoable step. Biomes: forest, meadow, rocky, swamp, desert. |
 | GET | `/api/prefabs` | – | The prefab library shared by every project. |
 | POST | `/api/docs/{id}/prefabs` | `{floor?, name, spaces:[room ids]}` | Copy rooms (with doors, lights, notes on them) into the library. |
@@ -134,7 +135,7 @@ first run, printed once). 401 without it.
 ndcart serve [--listen 127.0.0.1:8300] [--data-dir DIR]   # env: ND_CARTO_LISTEN, ND_CARTO_DATA_DIR
 ndcart bench [--ppc N]                                    # journal/walls/replay + full-map bake timings (asserts the 30 s budget)
 ndcart convert IN OUT [--format webp|avif|png] [--quality N]
-ndcart publish DOC --server URL --email E [--world W] [--floor ID | --all-floors] [--all-docs] [--report FILE] [--keep-going] [--ppc 32] [--format webp] [--max-mb 20] [--audience gm|player] [--keep-overlay] --data-dir DIR
+ndcart publish DOC --server URL --email E [--world W] [--floor ID | --all-floors] [--all-docs] [--report FILE] [--keep-going] [--publish-anyway] [--ppc 32] [--format webp] [--max-mb 20] [--audience gm|player] [--keep-overlay] --data-dir DIR
                                                           # password: ND_CARTO_PASSWORD / ND_CARTO_PASSWORD_FILE only
 ```
 

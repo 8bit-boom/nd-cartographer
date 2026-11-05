@@ -19,6 +19,8 @@ const MIN_PPC: i64 = 8; // nd-world's room grid needs cells of at least 8 px
 
 pub struct Args {
     pub all_floors: bool,
+    /// Publish even when the linter has warnings (errors always stop).
+    pub publish_anyway: bool,
     /// Publish every document in the data dir (`ndcart publish --all-docs`).
     pub all_docs: bool,
     /// Write what happened, per map, as JSON to this file.
@@ -49,6 +51,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
     let mut audience = Audience::Gm;
     let mut keep_overlay = false;
     let mut all_floors = false;
+    let mut publish_anyway = false;
     let (mut all_docs, mut report, mut keep_going) = (false, None, false);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
@@ -67,6 +70,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
             "--data-dir" => data_dir = Some(PathBuf::from(val("--data-dir")?)),
             "--keep-overlay" => keep_overlay = true,
             "--all-floors" => all_floors = true,
+            "--publish-anyway" => publish_anyway = true,
             "--all-docs" => all_docs = true,
             "--keep-going" => keep_going = true,
             "--report" => report = Some(PathBuf::from(val("--report")?)),
@@ -98,6 +102,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
     }
     Ok(Args {
         all_floors,
+        publish_anyway,
         all_docs,
         report,
         keep_going,
@@ -375,6 +380,16 @@ fn prepare(st: &store::Store, id: &str, a: &Args) -> Result<Vec<Job>, String> {
             return Err(format!(
                 "floor '{}' of '{}' is empty; nothing to publish",
                 floor.name, doc.manifest.name
+            ));
+        }
+        let warnings = problems
+            .iter()
+            .filter(|p| p.severity == ndcart_core::Severity::Warning)
+            .count();
+        if warnings > 0 && !a.publish_anyway && !ndcart_core::blocks_publish(&problems) {
+            return Err(format!(
+                "'{}' floor '{}' has {warnings} warning(s) (listed above). Fix them, or publish anyway with --publish-anyway",
+                doc.manifest.name, floor.name
             ));
         }
         if ndcart_core::blocks_publish(&problems) {
@@ -675,6 +690,45 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.contains("is empty"), "{err}");
+    }
+
+    #[test]
+    fn warnings_stop_a_publish_until_it_is_explicitly_allowed() {
+        let mut st = store::Store::default();
+        let mut d = doc();
+        // A light in empty space is a warning the linter reports.
+        let fid = d.floors[0].id.clone();
+        let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+            {"t":"add_light","light":{"id":"far","x":9000.0,"y":9000.0,"range":3.0,"color":"#ffaa00","intensity":0.8,"on":true}}
+        ]))
+        .unwrap();
+        d.apply_ops(&fid, &ops).unwrap();
+        let id = d.manifest.id.clone();
+        st.docs.insert(id.clone(), d);
+        let args = |extra: &[&str]| {
+            let mut v: Vec<String> = [
+                "Vault",
+                "--server",
+                "http://x",
+                "--email",
+                "e",
+                "--data-dir",
+                ".",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            v.extend(extra.iter().map(|s| s.to_string()));
+            parse(v).unwrap()
+        };
+        let err = prepare(&st, &id, &args(&[])).err().unwrap();
+        assert!(err.contains("--publish-anyway"), "{err}");
+        assert_eq!(
+            prepare(&st, &id, &args(&["--publish-anyway"]))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

@@ -24,6 +24,7 @@ pub mod stroke;
 pub mod structure;
 pub mod terrain;
 pub mod view;
+pub mod visibility;
 pub mod walls;
 pub mod zone;
 
