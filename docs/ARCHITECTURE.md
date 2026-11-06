@@ -265,6 +265,24 @@ All floors share one journal; each entry carries `floor: Option<String>` and und
 composite another floor underneath (`onion`, 30%). The UI floor bar offers add, duplicate, rename, reorder, remove, undo and onion skin.
 `ndcart publish --all-floors` publishes each floor as its own nd-world map ("Doc – Floor"); slugs are kept per floor in `NdWorldLink.floor_slugs` so re-publishing updates in place, and the legacy `slug` is the first floor's. Stairs, ladders and lifts are markers with `links_to {floor, x?, y?}`; the Stairs tool places one (and optionally the way back on the other floor), double-clicking one with the pan tool follows it, and `lint_links` warns about links to a removed floor, to the same floor, or with nothing leading back.
 
+## Measured performance (release build, one 8-core-class machine, 2026-11)
+
+A 400 x 280-cell floor (112,000 squares of picture material) with 14,800 props:
+
+| What | Budget (plan §6) | Measured |
+|---|---|---|
+| Export 12,800 x 8,960 WebP (115 MP) | < 60 s | 7.5 s (83 MB file) |
+| Reopen the saved project (12 MB of floor data) | < 1.5 s | 0.19 s |
+| One 256 px tile, cold | (interactive) | 0.04 s |
+| One small edit (save included) | (interactive) | 80-130 ms |
+| Server memory after the export | < 1.5 GB | 124 MB |
+
+Not measured: 60 fps pan/zoom with 100,000 objects (the browser viewport is
+Canvas2D over baked tiles; a floor holds at most 20,000 props), tiles on a
+slow machine, and big terrain. Saving rewrites the whole project each edit,
+which is fine at these sizes and is the first thing to change if edits slow
+down (append-only journal segments are planned).
+
 ## Still open in M0
 
 WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the

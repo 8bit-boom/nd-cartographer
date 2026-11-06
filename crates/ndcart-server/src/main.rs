@@ -2296,32 +2296,43 @@ async fn export_png(
     Path(id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
-    let store = app.store.read().await;
-    let doc = store
-        .docs
-        .get(&id)
-        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
-    let idx = match &q.floor {
-        Some(fid) => floors_by_id(&doc.floors, fid)?,
-        None => 0,
-    };
-    let floor = doc
-        .floors
-        .get(idx)
-        .ok_or_else(|| CoreError::NotFound("floor".into()))?;
-    let filtered = ndcart_core::for_audience(floor, pick_audience(&q)?);
-    let floor = &filtered;
-    let cell_size = doc.manifest.cell_size;
-    let walls = tiles::derive_walls(floor, cell_size);
     let fmt = pick_format(&q)?;
-    let (bytes, ..) = tiles::bake_full_as(
-        floor,
-        &walls,
-        cell_size,
-        q.ppc.unwrap_or(32),
-        fmt,
-        q.quality.unwrap_or(80),
-    )
+    let audience = pick_audience(&q)?;
+    let (filtered, cell_size) = {
+        let store = app.store.read().await;
+        let doc = store
+            .docs
+            .get(&id)
+            .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+        let idx = match &q.floor {
+            Some(fid) => floors_by_id(&doc.floors, fid)?,
+            None => 0,
+        };
+        let floor = doc
+            .floors
+            .get(idx)
+            .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+        (
+            ndcart_core::for_audience(floor, audience),
+            doc.manifest.cell_size,
+        )
+    };
+    // A big export takes a while: bake off the async threads, without holding the project lock.
+    let (ppc, quality) = (q.ppc.unwrap_or(32), q.quality.unwrap_or(80));
+    let (bytes, ..) = tokio::task::spawn_blocking(move || {
+        let walls = tiles::derive_walls(&filtered, cell_size);
+        tiles::bake_full_limit(
+            &filtered,
+            &walls,
+            cell_size,
+            ppc,
+            fmt,
+            quality,
+            tiles::MAX_EXPORT_PX,
+        )
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("export failed: {e}"))))?
     .map_err(|m| ApiError(CoreError::Invalid(m)))?;
     Ok((
         [

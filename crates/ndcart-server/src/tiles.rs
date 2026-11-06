@@ -106,11 +106,25 @@ pub fn bake_full_as(
     format: ImageFormat,
     quality: u8,
 ) -> Result<(Vec<u8>, u32, u32), String> {
+    bake_full_limit(floor, walls, cell_size, ppc, format, quality, MAX_FULL_PX)
+}
+
+/// Like [`bake_full_as`] with a chosen pixel budget (the file export allows far
+/// more than nd-world's import does; memory is about four bytes a pixel).
+pub fn bake_full_limit(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    format: ImageFormat,
+    quality: u8,
+    max_px: i64,
+) -> Result<(Vec<u8>, u32, u32), String> {
     let (cols, rows) = grid_extent(floor);
     let (w, h) = (i64::from(cols) * ppc, i64::from(rows) * ppc);
-    if !(1..=256).contains(&ppc) || w > MAX_SIDE_PX || h > MAX_SIDE_PX || w * h > MAX_FULL_PX {
+    if !(1..=256).contains(&ppc) || w > MAX_SIDE_PX || h > MAX_SIDE_PX || w * h > max_px {
         return Err(format!(
-            "image {w}x{h}px is outside the limits (side <= {MAX_SIDE_PX}, area <= {MAX_FULL_PX})"
+            "image {w}x{h}px is outside the limits (side <= {MAX_SIDE_PX}, area <= {max_px})"
         ));
     }
     let pm = render_pixmap(floor, walls, cell_size, ppc, 0, 0, w as u32, h as u32);
@@ -190,6 +204,8 @@ fn encode(pm: &tiny_skia::Pixmap, format: ImageFormat, quality: u8) -> Result<Ve
 
 pub const MAX_SIDE_PX: i64 = 20_000; // nd-world's schematic canvas limit
 pub const MAX_FULL_PX: i64 = 40_000_000; // nd-world's import-uvtt pixel budget
+/// The most pixels a file export may take (plan §6: 12,800 x 8,960 = 115 MP).
+pub const MAX_EXPORT_PX: i64 = 120_000_000;
 
 /// Everything on the floor in cells (rooms, underlay, strokes, stamps), min 1x1.
 /// Encode `pm` and report the size, for `ndcart doctor`.
@@ -3149,6 +3165,25 @@ mod tests {
             .unwrap();
         let flat = bake_stamped(&g2, 32);
         assert_eq!(rgb(&flat, 112, 112), [0xd0, 0xd0, 0xd0]);
+    }
+
+    #[test]
+    fn a_file_export_may_be_bigger_than_what_nd_world_accepts() {
+        let f = light_floor(); // 8 x 8 cells
+        let (cols, ppc) = (8i64, 8i64);
+        let area = cols * ppc * cols * ppc; // 4096 px
+                                            // A budget below the image's area refuses it, with the budget named...
+        let e = bake_full_limit(&f, &[], 32.0, ppc, ImageFormat::Png, 80, area - 1).unwrap_err();
+        assert!(e.contains(&format!("area <= {}", area - 1)), "{e}");
+        // ...and one at or above it bakes the same picture the default budget would.
+        let big = bake_full_limit(&f, &[], 32.0, ppc, ImageFormat::Png, 80, area).unwrap();
+        assert_eq!(
+            big.0,
+            bake_full_as(&f, &[], 32.0, ppc, ImageFormat::Png, 80)
+                .unwrap()
+                .0
+        );
+        assert!(MAX_EXPORT_PX > MAX_FULL_PX && MAX_EXPORT_PX >= 12_800 * 8_960);
     }
 
     /// Count pixels close to `want` inside a pixel rectangle `[x0, y0, x1, y1)`.
