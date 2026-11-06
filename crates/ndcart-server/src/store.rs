@@ -1,9 +1,12 @@
 //! In-memory document store with optional persistence.
 //!
 //! Layout under `data_dir` (when set): one folder per document —
-//! `manifest.json`, `floors.json` (snapshot), `journal.ndjson` (every floor's edits, tagged by floor) and `structure.ndjson` (floor add/rename/move/remove). The journal
-//! is rewritten whole on save for M0 (documents are small); append-only
-//! segments arrive with the real `.ndmap` work (plan §5).
+//! `manifest.json`, `snapshot.json` (every floor, plus how many journal entries it
+//! already contains), `journal.ndjson` (every floor's edits, tagged by floor,
+//! append-only) and `structure.ndjson` (floor add/rename/move/remove). An edit
+//! appends to the journal; the snapshot is rewritten every few hundred edits (or a
+//! minute), and loading replays the journal's tail over it. Older projects with a
+//! plain `floors.json` still open and are upgraded by their next full save.
 
 use ndcart_core::doc::{floors_by_id, DocKind, FloorDoc, Manifest};
 use ndcart_core::ids::new_id;
@@ -54,6 +57,29 @@ pub struct Proposal {
     pub floors: Vec<ndcart_core::mapspec::CompiledFloor>,
 }
 
+/// How much of the journal is on disk, and how much of it the snapshot already
+/// contains. Atomics so saving can take `&StoredDoc`.
+#[derive(Default)]
+pub struct Persisted {
+    /// Journal entries written to `journal.ndjson`.
+    pub appended: std::sync::atomic::AtomicUsize,
+    /// Journal length the snapshot (`snapshot.json`) reflects.
+    pub snapshot_len: std::sync::atomic::AtomicUsize,
+    /// When the snapshot was last written (seconds since the Unix epoch).
+    pub snapshot_at: std::sync::atomic::AtomicU64,
+}
+
+/// Write a fresh snapshot after this many journal entries, or this many seconds.
+const SNAPSHOT_EVERY_OPS: usize = 200;
+const SNAPSHOT_EVERY_SECS: u64 = 60;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub struct StoredDoc {
     pub manifest: Manifest,
     pub floors: Vec<FloorDoc>,
@@ -67,6 +93,7 @@ pub struct StoredDoc {
     /// The shared table view, if the GM turned it on.
     pub table: Option<TableState>,
     pub rev: u64,
+    pub persisted: Persisted,
 }
 
 impl StoredDoc {
@@ -94,6 +121,7 @@ impl StoredDoc {
             world_proposals: Vec::new(),
             table: None,
             rev: 0,
+            persisted: Persisted::default(),
         }
     }
 
@@ -422,39 +450,60 @@ impl Store {
                 continue;
             }
             let manifest_path = doc_dir.join("manifest.json");
-            let floors_path = doc_dir.join("floors.json");
+            let snapshot_path = doc_dir.join("snapshot.json");
+            let floors_path = doc_dir.join("floors.json"); // before snapshots existed
             let journal_path = doc_dir.join("journal.ndjson");
-            if !(manifest_path.is_file() && floors_path.is_file()) {
+            if !(manifest_path.is_file() && (snapshot_path.is_file() || floors_path.is_file())) {
                 continue;
             }
+            let read = |p: &Path| {
+                std::fs::read_to_string(p).map_err(|e| {
+                    ndcart_core::CoreError::Invalid(format!("reading {}: {e}", p.display()))
+                })
+            };
+            let bad = |p: &Path, e: serde_json::Error| {
+                ndcart_core::CoreError::Invalid(format!("parsing {}: {e}", p.display()))
+            };
             let manifest: Manifest =
-                serde_json::from_str(&std::fs::read_to_string(&manifest_path).map_err(|e| {
-                    ndcart_core::CoreError::Invalid(format!(
-                        "reading {}: {e}",
-                        manifest_path.display()
-                    ))
-                })?)
-                .map_err(|e| {
-                    ndcart_core::CoreError::Invalid(format!(
-                        "parsing {}: {e}",
-                        manifest_path.display()
-                    ))
-                })?;
-            let mut floors: Vec<FloorDoc> =
-                serde_json::from_str(&std::fs::read_to_string(&floors_path).map_err(|e| {
-                    ndcart_core::CoreError::Invalid(format!(
-                        "reading {}: {e}",
-                        floors_path.display()
-                    ))
-                })?)
-                .map_err(|e| {
-                    ndcart_core::CoreError::Invalid(format!(
-                        "parsing {}: {e}",
-                        floors_path.display()
-                    ))
-                })?;
+                serde_json::from_str(&read(&manifest_path)?).map_err(|e| bad(&manifest_path, e))?;
+            // The snapshot says how much of the journal it already contains; older
+            // projects had a plain `floors.json` that always held everything.
+            let (mut floors, snapshot_len): (Vec<FloorDoc>, Option<usize>) = if snapshot_path
+                .is_file()
+            {
+                #[derive(serde::Deserialize)]
+                struct Snap {
+                    journal_len: usize,
+                    floors: Vec<FloorDoc>,
+                }
+                let snap: Snap = serde_json::from_str(&read(&snapshot_path)?)
+                    .map_err(|e| bad(&snapshot_path, e))?;
+                (snap.floors, Some(snap.journal_len))
+            } else {
+                (
+                    serde_json::from_str(&read(&floors_path)?).map_err(|e| bad(&floors_path, e))?,
+                    None,
+                )
+            };
             let journal_text = std::fs::read_to_string(&journal_path).unwrap_or_default();
             let journal = Journal::from_ndjson(&journal_text)?;
+            let snapshot_len = snapshot_len.unwrap_or(journal.len()).min(journal.len());
+            // Edits made after the snapshot are in the journal's tail: apply them.
+            for e in &journal.entries()[snapshot_len..] {
+                let target = match &e.floor {
+                    Some(fid) => floors.iter_mut().find(|f| &f.id == fid),
+                    None => floors.first_mut(),
+                };
+                // A floor removed since is simply gone; its old edits have nowhere to go.
+                if let Some(f) = target {
+                    apply_op(f, &e.op).map_err(|err| {
+                        ndcart_core::CoreError::Invalid(format!(
+                            "replaying the journal of {}: {err}",
+                            doc_dir.display()
+                        ))
+                    })?;
+                }
+            }
             let structure = StructJournal::from_ndjson(
                 &std::fs::read_to_string(doc_dir.join("structure.ndjson")).unwrap_or_default(),
             )?;
@@ -462,6 +511,7 @@ impl Store {
                 f.grid.fixup();
             }
             let rev = journal.len() as u64;
+            let jlen = journal.len();
             let id = manifest.id.clone();
             self.docs.insert(
                 id,
@@ -478,6 +528,16 @@ impl Store {
                     world_proposals: Vec::new(),
                     table: None,
                     rev,
+                    persisted: {
+                        let p = Persisted::default();
+                        p.appended.store(jlen, std::sync::atomic::Ordering::Relaxed);
+                        // The snapshot is older than the journal when a tail was replayed.
+                        p.snapshot_len
+                            .store(snapshot_len, std::sync::atomic::Ordering::Relaxed);
+                        p.snapshot_at
+                            .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+                        p
+                    },
                 },
             );
             count += 1;
@@ -501,6 +561,7 @@ impl Store {
 
 /// Persist one document (snapshot + journal). No-op without a data dir.
 pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
+    use std::sync::atomic::Ordering::Relaxed;
     let Some(root) = data_dir else { return };
     let dir = root.join(&doc.manifest.id);
     if std::fs::create_dir_all(&dir).is_err() {
@@ -509,9 +570,12 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
     }
     // A failed serialize must never take the server down mid-edit: report it
     // and keep the previous files (the journal is the source of truth anyway).
-    let (manifest, floors) = match (
+    let journal_len = doc.journal.len();
+    let (manifest, snapshot) = match (
         serde_json::to_string_pretty(&doc.manifest),
-        serde_json::to_string_pretty(&doc.floors),
+        serde_json::to_string(
+            &serde_json::json!({ "journal_len": journal_len, "floors": &doc.floors }),
+        ),
     ) {
         (Ok(m), Ok(f)) => (m, f),
         (m, f) => {
@@ -529,15 +593,80 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
     let journal = doc.journal.to_ndjson();
     // Crash-safe: write to a temp file, fsync, then rename over the target, so
     // a kill -9 mid-save leaves either the old or the new file, never a torn one.
+    // The snapshot goes before the journal is replaced: if the journal is the one
+    // that is old, replaying its tail over a newer snapshot is skipped by length.
+    let mut all_ok = true;
     for (name, body) in [
         ("manifest.json", manifest),
-        ("floors.json", floors),
+        ("snapshot.json", snapshot),
         ("journal.ndjson", journal),
         ("structure.ndjson", doc.structure.to_ndjson()),
     ] {
         if let Err(e) = write_atomic(&dir.join(name), body.as_bytes()) {
             eprintln!("ndcart: cannot save {name}: {e}");
+            all_ok = false;
         }
+    }
+    if all_ok {
+        // The older layout's file would only confuse a reader now.
+        let _ = std::fs::remove_file(dir.join("floors.json"));
+        doc.persisted.appended.store(journal_len, Relaxed);
+        doc.persisted.snapshot_len.store(journal_len, Relaxed);
+        doc.persisted.snapshot_at.store(now_secs(), Relaxed);
+    }
+}
+
+/// Save after an edit without rewriting the whole project: the new journal
+/// entries are appended (and synced), and the big snapshot is rewritten only
+/// every few hundred edits or minute. Anything that is not a plain edit (floors
+/// added, a checkpoint restored…) uses [`save_doc`], which rewrites everything.
+pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
+    use std::io::Write;
+    use std::sync::atomic::Ordering::Relaxed;
+    let Some(root) = data_dir else { return };
+    let dir = root.join(&doc.manifest.id);
+    let (appended, snap) = (
+        doc.persisted.appended.load(Relaxed),
+        doc.persisted.snapshot_len.load(Relaxed),
+    );
+    let len = doc.journal.len();
+    // Never saved here yet, or the journal got shorter (rolled back): write it all.
+    if len < appended
+        || !dir.join("journal.ndjson").is_file()
+        || !dir.join("snapshot.json").is_file()
+    {
+        return save_doc(data_dir, doc);
+    }
+    if len > appended {
+        let mut text = String::new();
+        for e in &doc.journal.entries()[appended..] {
+            match serde_json::to_string(e) {
+                Ok(l) => {
+                    text.push_str(&l);
+                    text.push('\n');
+                }
+                Err(e) => {
+                    eprintln!("ndcart: cannot serialize a journal entry: {e}");
+                    return save_doc(data_dir, doc);
+                }
+            }
+        }
+        let wrote = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("journal.ndjson"))
+            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_data()));
+        match wrote {
+            Ok(()) => doc.persisted.appended.store(len, Relaxed),
+            Err(e) => {
+                eprintln!("ndcart: cannot append to the journal: {e}");
+                return save_doc(data_dir, doc);
+            }
+        }
+    }
+    let age = now_secs().saturating_sub(doc.persisted.snapshot_at.load(Relaxed));
+    if len.saturating_sub(snap) >= SNAPSHOT_EVERY_OPS || (len > snap && age >= SNAPSHOT_EVERY_SECS)
+    {
+        save_doc(data_dir, doc);
     }
 }
 
@@ -604,6 +733,141 @@ mod persistence_tests {
     use super::*;
     use ndcart_core::journal::Op;
     use ndcart_core::DocKind;
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ndcart-fast-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    /// One edit = one journal entry (a batch), like a stroke in the UI.
+    fn paint(x: i32) -> Vec<Op> {
+        serde_json::from_value(serde_json::json!([{"t":"batch","ops":[
+            {"t":"upsert_space","space":{"id":"s","name":"Hall","color":"#7f5539","kind":"room"}},
+            {"t":"paint_cells","space":"s","cells":[{"x":x,"y":0}]}
+        ]}]))
+        .unwrap()
+    }
+
+    fn reload(dir: &std::path::Path) -> Store {
+        let mut st = Store::default();
+        st.load_dir(dir).unwrap();
+        st
+    }
+
+    #[test]
+    fn edits_are_appended_and_a_reload_replays_them_over_the_older_snapshot() {
+        let dir = tmpdir("append");
+        let mut d = StoredDoc::new("Fast", DocKind::Battle);
+        let (id, fid) = (d.manifest.id.clone(), d.floors[0].id.clone());
+        save_doc(Some(&dir), &d); // the first, full save
+        let snap = std::fs::metadata(dir.join(&id).join("snapshot.json"))
+            .unwrap()
+            .len();
+        for x in 0..5 {
+            d.apply_ops(&fid, &paint(x)).unwrap();
+            save_doc_fast(Some(&dir), &d);
+        }
+        // Undo is an entry too; it must survive the same way.
+        d.undo_last(&fid).unwrap();
+        save_doc_fast(Some(&dir), &d);
+        // The snapshot was not rewritten (no 200 edits, no minute passed), only the journal grew.
+        assert_eq!(
+            std::fs::metadata(dir.join(&id).join("snapshot.json"))
+                .unwrap()
+                .len(),
+            snap
+        );
+        assert_eq!(
+            d.persisted
+                .snapshot_len
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(
+            !dir.join(&id).join("floors.json").exists(),
+            "the old layout's file is gone"
+        );
+        // A fresh load (as after a crash) reproduces the live state exactly...
+        let back = reload(&dir);
+        let b = &back.docs[&id];
+        assert_eq!(b.floors, d.floors);
+        assert_eq!(b.journal.len(), d.journal.len());
+        assert_eq!(b.floors[0].grid.cell_count(), 4, "five painted, one undone");
+        // ...including the ability to keep undoing.
+        let mut b = reload(&dir).docs.remove(&id).unwrap();
+        b.undo_last(&fid).unwrap();
+        assert_eq!(b.floors[0].grid.cell_count(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_snapshot_is_refreshed_every_so_many_edits_and_after_a_rollback_everything_is_rewritten()
+    {
+        let dir = tmpdir("cadence");
+        let mut d = StoredDoc::new("Cadence", DocKind::Battle);
+        let (id, fid) = (d.manifest.id.clone(), d.floors[0].id.clone());
+        save_doc(Some(&dir), &d);
+        let snap_len = |d: &StoredDoc| {
+            d.persisted
+                .snapshot_len
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        for x in 0..SNAPSHOT_EVERY_OPS as i32 {
+            d.apply_ops(&fid, &paint(x)).unwrap();
+            save_doc_fast(Some(&dir), &d);
+        }
+        assert_eq!(
+            snap_len(&d),
+            d.journal.len(),
+            "the snapshot caught up once 200 entries piled up"
+        );
+        let on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join(&id).join("snapshot.json")).unwrap())
+                .unwrap();
+        assert_eq!(on_disk["journal_len"], d.journal.len());
+        // A restore resets the journal (shorter than what was appended): the fast path writes it all.
+        let cp = d.create_checkpoint("here").unwrap();
+        d.apply_ops(&fid, &paint(500)).unwrap();
+        save_doc_fast(Some(&dir), &d);
+        d.restore_checkpoint(&cp).unwrap();
+        save_doc_fast(Some(&dir), &d);
+        let back = reload(&dir);
+        assert_eq!(back.docs[&id].floors, d.floors);
+        assert_eq!(back.docs[&id].journal.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_saved_in_the_older_layout_still_opens() {
+        let dir = tmpdir("legacy");
+        let mut d = StoredDoc::new("Old", DocKind::Battle);
+        let (id, fid) = (d.manifest.id.clone(), d.floors[0].id.clone());
+        d.apply_ops(&fid, &paint(1)).unwrap();
+        d.apply_ops(&fid, &paint(2)).unwrap();
+        // Write what the previous version wrote: floors.json (a bare array), the whole journal, no snapshot.json.
+        let p = dir.join(&id);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(
+            p.join("manifest.json"),
+            serde_json::to_string_pretty(&d.manifest).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            p.join("floors.json"),
+            serde_json::to_string_pretty(&d.floors).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(p.join("journal.ndjson"), d.journal.to_ndjson()).unwrap();
+        let back = reload(&dir);
+        assert_eq!(back.docs[&id].floors, d.floors);
+        assert_eq!(back.docs[&id].journal.len(), d.journal.len());
+        // The next full save upgrades it in place.
+        save_doc(Some(&dir), &back.docs[&id]);
+        assert!(p.join("snapshot.json").exists() && !p.join("floors.json").exists());
+        assert_eq!(reload(&dir).docs[&id].floors, d.floors);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_document_with_doors_saves_and_reloads() {

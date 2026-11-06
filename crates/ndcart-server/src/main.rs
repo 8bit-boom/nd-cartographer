@@ -2492,7 +2492,7 @@ async fn post_ops(
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
     doc.apply_ops(&b.floor, &b.ops)?;
     let rev = doc.rev;
-    store::save_doc(app.data_dir.as_deref(), doc);
+    store::save_doc_fast(app.data_dir.as_deref(), doc);
     drop(store);
     // Invalidate stale tiles/walls for this document.
     let prefix = format!("{id}/");
@@ -2521,7 +2521,7 @@ async fn post_undo(
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
     doc.undo_last(&b.floor)?;
     let rev = doc.rev;
-    store::save_doc(app.data_dir.as_deref(), doc);
+    store::save_doc_fast(app.data_dir.as_deref(), doc);
     drop(store);
     let prefix = format!("{id}/");
     app.tile_cache
