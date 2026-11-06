@@ -1099,6 +1099,112 @@ mip-maps. The Docker image has not been built since the AVIF/TLS/terrain crates 
 
 ---
 
+## 21. Future directions (post-1.0)
+
+A third pass, written after v0.1.0 shipped. These are *directions*, not
+commitments: each names what it is, why it fits this tool specifically, and
+what it needs. Nothing here is scheduled; the strong candidates carry a
+[+].
+
+### A. The living atlas — maps that know each other
+
+1. **Hierarchical multi-scale maps** [+] — a city on the region map that
+   *opens into* its district map, which opens into the tavern's floor map.
+   The data model is the atlas graph: each marker/room carries a child-map
+   reference; the viewport zooms through the hierarchy like a mapping app.
+   nd-world's marker `link_schematic` already points this way (verified);
+   publish writes the whole chain. This is the Canvas-of-Kings ↔
+   Dungeondraft continuum made one product.
+2. **Two-way lore sync** [+] — the reverse of entity-grounded publishing:
+   the studio shows the nd-world lore of a room beside it (read-only panel,
+   refresh on open), and "edit here" deep-links into nd-world. A map
+   becomes the *index* into the world's text.
+3. **Encounter-aware rooms** [+] — mark a room as an encounter (pick a
+   creature group from the world's bestiary, a difficulty budget); publish
+   creates nd-world **encounter templates** pre-filled with the map's grid,
+   walls and creatures. "From map to combat in one click" — the single
+   deepest integration no other map tool can offer, and every nd-world
+   piece it needs (templates, combat rulesets, character digests) exists.
+4. **World random tables as furnishing input** — Tier-1 `GET /api/tables`
+   (§10.2) feeding generators and furnishing recipes, so a world's own
+   tables keep working inside the studio.
+
+### B. Scale and time
+
+5. **Era/variant layers** [+] — day/night/pre-fire/ruined as *named layer
+   sets* over one document, each publishable as its own map (the P2
+   variant-publishing idea, generalized): same walls, different world.
+   Publishing a night variant is the tabletop's favourite trick.
+6. **Atlas statistics** — rooms per kind, encounter density, light
+   coverage, treasure per floor: a pacing dashboard from data the document
+   already holds. Cheap, and GMs feel the difference at the table.
+7. **Area and path measurement** — area fill of a selection, waypoint path
+   distance in world units, AoE radius templates burned into print exports.
+
+### C. Craft and rendering
+
+8. **Height/normal maps for materials** (already noted as not done) — 2.5D
+   shading and baked ambient occlusion: depth without going isometric.
+9. **Sunlight bake** — a directional light with shadows cast from walls and
+   props at a chosen time of day; night is era layer 5 with this on.
+10. **Animated water and lava on the table screen** — short WebM/animated-
+    WebP loops for material zones in `/table/<project>`; the studio's own
+    screen first, nd-world later (it would need an animated-image viewer).
+11. **Vector (SVG) export of the studio's geometry** — walls, rooms,
+    labels as editable vectors for Inkscape/Illustrator and print shops.
+
+### D. Publishing, end to end
+
+12. **Publish C without a second editor** [+] — the schematic/diagram mode
+    was skipped because it needs a whole vector editor. The shortcut:
+    "publish as *editable* schematic" — the studio exports its own
+    geometry as nd-world schematic **elements** (rooms → rects, walls →
+    lines, labels → text; the importer's element set is verified) plus the
+    baked picture as the background. nd-world's in-app editor then owns
+    the editing; the studio stays the *creator*.
+13. **More VTT targets** — Roll20 market-format export and an Owlbear
+    Rodeo scene (UVTT covers some; native exports remove friction).
+    Foundry import/export is built but still unverified live (§20).
+14. **Map + packs bundle** — a shareable `.ndmapz` that carries the
+    project and the (license-declared) packs it references, so a shared
+    map renders on another machine without a scavenger hunt.
+
+### E. Running the table
+
+15. **Tablet companion** — read-and-reveal on a tablet: the player view,
+    tap-to-reveal fog, quick pins. Not editing; the GM's second device.
+16. **Watch mode** (needs the WebSocket change feed, §20's known gap) —
+    two browser windows on one studio server stay in sync; the honest,
+    small-scale alternative to real-time collaboration.
+17. **MCP surface for agents** [+] — `ndcart mcp` (create-from-spec, bake,
+    export, publish), the plan's open question 4: an AI agent could then
+    prepare next week's maps overnight, with the same propose/accept
+    discipline as everything else.
+
+### F. Smarts
+
+18. **Natural-language Q&A over maps** — embeddings over rooms, zones and
+    notes ("where was the flooded cistern?") with zoom-to-result; local
+    through nd-world's model or a small standalone model. Search today is
+    keyword-only (§20).
+19. **Spec round-trip** [+] — extract a MapSpec *from* a painted map
+    (painted rooms become pinned constraints), so a map stays
+    re-layoutable: move a wing, re-plan the corridors, keep the rest.
+    This turns the AI workflow from "draft once" into a continuous tool.
+20. **Prompt-to-theme-pack** — describe a theme ("swamped orc warcamp"),
+    get a complete mini-pack: materials, props, a style profile and named
+    recipes, all provenance-stamped and GM-approved per item (§8.5 scaled
+    up).
+
+### What I would do next, in order
+
+1 → 3 → 12 (the atlas chain, encounter publishing, publish C) — they
+complete the product's own logic: every map belongs somewhere, every room
+can become a fight, every publish target exists. Then 5, 19, 17. Items 15,
+16 and 18 wait on the WebSocket feed; 10 and 14 are safe between anything.
+
+---
+
 *Plan written 2026-11-05. Sources: `AGENTS.md`, `CLAUDE.md`, `docs/MAP_CREATOR_RESEARCH.md`
 (+ its appendices), `docs/AI_SCHEMATIC_GUIDE.md`, `app/main.py`, `app/routers/map_walls.py`,
 `app/routers/map_props.py`, `app/routers/importer.py`, `app/routers/ai.py`,
