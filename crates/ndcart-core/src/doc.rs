@@ -169,6 +169,65 @@ pub struct EntityLink {
     pub kind: String,
 }
 
+/// Who waits in a room: the studio's own encounter note (plan §21.3's first
+/// half). Stays studio-side — it is GM information, so it never rides the
+/// player-visible publish; the nd-world encounter-template publish is the
+/// planned second half.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Encounter {
+    pub id: String,
+    /// The room this sits in.
+    pub space: String,
+    /// Creature lines, each "name" or "name xN" (free text on purpose: it may
+    /// name things the world has no entity for yet).
+    pub creatures: Vec<String>,
+    /// Tactics, treasure, the reason they are here.
+    #[serde(default)]
+    pub note: String,
+}
+
+pub const MAX_CREATURE_LINES: usize = 20;
+
+impl Encounter {
+    pub fn validate(&self) -> CoreResult<()> {
+        if self.id.is_empty() || self.id.len() > 64 {
+            return Err(CoreError::Invalid(
+                "encounter id must be 1..=64 chars".into(),
+            ));
+        }
+        if self.space.is_empty() || self.space.len() > 64 {
+            return Err(CoreError::Invalid(
+                "encounter space must be a room id".into(),
+            ));
+        }
+        if self.creatures.is_empty() {
+            return Err(CoreError::Invalid(
+                "an encounter needs at least one creature line".into(),
+            ));
+        }
+        if self.creatures.len() > MAX_CREATURE_LINES {
+            return Err(CoreError::CapExceeded(format!(
+                "at most {MAX_CREATURE_LINES} creature lines"
+            )));
+        }
+        if self
+            .creatures
+            .iter()
+            .any(|c| c.trim().is_empty() || c.len() > 80)
+        {
+            return Err(CoreError::Invalid(
+                "each creature line is 1..=80 chars".into(),
+            ));
+        }
+        if self.note.chars().count() > 500 {
+            return Err(CoreError::Invalid(
+                "encounter note is capped at 500 chars".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl EntityLink {
     pub fn validate(&self) -> CoreResult<()> {
         let n = self.name.chars().count();
@@ -332,6 +391,9 @@ pub struct FloorDoc {
     /// Rooms tied to things in the world (an nd-world location, an NPC's lair…).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entity_links: Vec<EntityLink>,
+    /// Who waits in each room (see [`Encounter`]); at most one per room.
+    #[serde(default)]
+    pub encounters: Vec<Encounter>,
     /// Paint strokes in z-order (later draws over earlier). Cosmetic: they
     /// shape the baked picture, never walls or rooms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -398,6 +460,7 @@ impl FloorDoc {
             labels: Vec::new(),
             zones: Vec::new(),
             entity_links: Vec::new(),
+            encounters: Vec::new(),
             map_grid: None,
             strokes: Vec::new(),
             stamps: Vec::new(),
@@ -903,6 +966,32 @@ impl FloorDoc {
         self.entity_links.retain(|l| l.space != space);
         if self.entity_links.len() == before {
             return Err(CoreError::NotFound(format!("link on room {space}")));
+        }
+        Ok(())
+    }
+
+    /// Set (or replace) the encounter waiting in a room.
+    pub fn put_encounter(&mut self, e: Encounter) -> CoreResult<()> {
+        e.validate()?;
+        if !self.grid.spaces.contains_key(&e.space) {
+            return Err(CoreError::NotFound(format!("room {}", e.space)));
+        }
+        if let Some(x) = self.encounters.iter_mut().find(|x| x.space == e.space) {
+            *x = e;
+        } else {
+            if self.encounters.len() >= 1_000 {
+                return Err(CoreError::CapExceeded("at most 1000 encounters".into()));
+            }
+            self.encounters.push(e);
+        }
+        Ok(())
+    }
+
+    pub fn remove_encounter(&mut self, space: &str) -> CoreResult<()> {
+        let before = self.encounters.len();
+        self.encounters.retain(|e| e.space != space);
+        if self.encounters.len() == before {
+            return Err(CoreError::NotFound(format!("encounter in room {space}")));
         }
         Ok(())
     }

@@ -48,6 +48,13 @@ pub enum Op {
     UnlinkEntity {
         space: String,
     },
+    /// Who waits in a room, or a change to them.
+    PutEncounter {
+        encounter: crate::doc::Encounter,
+    },
+    RemoveEncounter {
+        space: String,
+    },
     UpsertZone {
         zone: crate::zone::Zone,
     },
@@ -243,6 +250,26 @@ impl Op {
                     .find(|l| l.space == *space)
                     .ok_or_else(|| CoreError::NotFound(format!("link on room {space}")))?;
                 Ok(Op::LinkEntity { link: link.clone() })
+            }
+            Op::PutEncounter { encounter } => {
+                match floor.encounters.iter().find(|e| e.space == encounter.space) {
+                    Some(prev) => Ok(Op::PutEncounter {
+                        encounter: prev.clone(),
+                    }),
+                    None => Ok(Op::RemoveEncounter {
+                        space: encounter.space.clone(),
+                    }),
+                }
+            }
+            Op::RemoveEncounter { space } => {
+                let e = floor
+                    .encounters
+                    .iter()
+                    .find(|e| e.space == *space)
+                    .ok_or_else(|| CoreError::NotFound(format!("encounter in room {space}")))?;
+                Ok(Op::PutEncounter {
+                    encounter: e.clone(),
+                })
             }
             Op::UpsertZone { zone } => match floor.zones.iter().find(|z| z.id == zone.id) {
                 Some(prev) => Ok(Op::UpsertZone { zone: prev.clone() }),
@@ -441,6 +468,8 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::RemoveLight { id } => floor.remove_light(id)?,
         Op::LinkEntity { link } => floor.link_entity(link.clone())?,
         Op::UnlinkEntity { space } => floor.unlink_entity(space)?,
+        Op::PutEncounter { encounter } => floor.put_encounter(encounter.clone())?,
+        Op::RemoveEncounter { space } => floor.remove_encounter(space)?,
         Op::UpsertZone { zone } => floor.upsert_zone(zone.clone())?,
         Op::RemoveZone { id } => floor.remove_zone(id)?,
         Op::UpsertLabel { label } => floor.upsert_label(label.clone())?,
@@ -1560,6 +1589,57 @@ mod tests {
         });
         f.put_overlay(again, None).unwrap();
         assert_eq!(f.markers[3].label, "moved");
+    }
+
+    #[test]
+    fn an_encounter_is_journaled_and_undoes_exactly() {
+        use crate::grid::{default_space, SpaceKind};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.grid
+            .upsert_space(default_space("a", "Guard post", SpaceKind::Room))
+            .unwrap();
+        let enc = |names: &[&str]| crate::doc::Encounter {
+            id: "e1".into(),
+            space: "a".into(),
+            creatures: names.iter().map(|s| s.to_string()).collect(),
+            note: "they sound the alarm".into(),
+        };
+        let mut j = Journal::default();
+        j.push(
+            &mut f,
+            &Op::PutEncounter {
+                encounter: enc(&["guard x2"]),
+            },
+        )
+        .unwrap();
+        assert_eq!(f.encounters.len(), 1);
+        j.push(
+            &mut f,
+            &Op::PutEncounter {
+                encounter: enc(&["guard x2", "sergeant"]),
+            },
+        )
+        .unwrap();
+        assert_eq!(f.encounters[0].creatures.len(), 2, "replaced in place");
+        // Undo once: back to the first version; undo again: gone.
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(f.encounters[0].creatures.len(), 1);
+        j.undo_last(&mut f).unwrap();
+        assert!(f.encounters.is_empty());
+        // An encounter for a removed room is refused at the boundary.
+        assert!(j
+            .push(
+                &mut f,
+                &Op::PutEncounter {
+                    encounter: crate::doc::Encounter {
+                        id: "e2".into(),
+                        space: "ghost".into(),
+                        creatures: vec!["rat".into()],
+                        note: String::new(),
+                    }
+                }
+            )
+            .is_err());
     }
 
     #[test]

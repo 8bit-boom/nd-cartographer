@@ -1108,7 +1108,7 @@ what it needs. Nothing here is scheduled; the strong candidates carry a
 
 ### A. The living atlas — maps that know each other
 
-1. **Hierarchical multi-scale maps** [+] — a city on the region map that
+1. **Hierarchical multi-scale maps** [+] **(started 2026-11-06: markers carry `link_schematic`, the 🗺 Atlas-links dialog sets and clears them, a click follows a link into a sibling document with a ← back trail, and the linter flags links whose target is not published)** — a city on the region map that
    *opens into* its district map, which opens into the tavern's floor map.
    The data model is the atlas graph: each marker/room carries a child-map
    reference; the viewport zooms through the hierarchy like a mapping app.
@@ -1119,7 +1119,7 @@ what it needs. Nothing here is scheduled; the strong candidates carry a
    the studio shows the nd-world lore of a room beside it (read-only panel,
    refresh on open), and "edit here" deep-links into nd-world. A map
    becomes the *index* into the world's text.
-3. **Encounter-aware rooms** [+] — mark a room as an encounter (pick a
+3. **Encounter-aware rooms** [+] **(studio side built 2026-11-06: rooms carry creatures + note with journal ops and undo, the outliner shows ⚔ lines, a dangling room is linted; GM information by design, so it never rides the player-visible publish. The nd-world encounter-template publish still needs a small template-creation route there)** — mark a room as an encounter (pick a
    creature group from the world's bestiary, a difficulty budget); publish
    creates nd-world **encounter templates** pre-filled with the map's grid,
    walls and creatures. "From map to combat in one click" — the single
@@ -1155,7 +1155,7 @@ what it needs. Nothing here is scheduled; the strong candidates carry a
 
 ### D. Publishing, end to end
 
-12. **Publish C without a second editor** [+] — the schematic/diagram mode
+12. **Publish C without a second editor** [+] **(built 2026-11-06: every battle-map publish now also sends the geometry as editable nd-world schematic elements — rooms as rects, walls/doors as coloured lines, lights as discs, labels as text, stable ids so re-publishes replace idempotently; `--no-elements` opts out)** — the schematic/diagram mode
     was skipped because it needs a whole vector editor. The shortcut:
     "publish as *editable* schematic" — the studio exports its own
     geometry as nd-world schematic **elements** (rooms → rects, walls →
