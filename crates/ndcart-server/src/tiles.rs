@@ -3183,7 +3183,7 @@ mod tests {
                 .unwrap()
                 .0
         );
-        assert!(MAX_EXPORT_PX > MAX_FULL_PX && MAX_EXPORT_PX >= 12_800 * 8_960);
+        const { assert!(MAX_EXPORT_PX > MAX_FULL_PX && MAX_EXPORT_PX >= 12_800 * 8_960) };
     }
 
     /// Count pixels close to `want` inside a pixel rectangle `[x0, y0, x1, y1)`.
