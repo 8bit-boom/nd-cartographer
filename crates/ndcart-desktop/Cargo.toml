@@ -6,14 +6,15 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[build-dependencies]
+# The shell never builds for musl (the Docker image serves the browser
+# studio), and gating the dependencies keeps tauri out of the Docker
+# dependency layer entirely. Not a default workspace member either: plain
+# `cargo test`/clippy in CI stays on the server crates, which need no
+# platform webview dev packages.
+[target.'cfg(not(target_env = "musl"))'.build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-[dependencies]
+[target.'cfg(not(target_env = "musl"))'.dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 serde_json = "1"
-
-# Not a default workspace member (see the root Cargo.toml): building the
-# shell needs the platform webview dev packages on Linux, so plain
-# `cargo test`/clippy in CI stays on the server crates.
