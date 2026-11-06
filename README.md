@@ -32,8 +32,8 @@ you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
 - **Player view**: see exactly what the table sees from a spot (line of sight,
   closed doors, lamps), and show it on a TV or tablet at `/table/<project>`.
 - **Print**: a PDF at one inch per square, cut into pages with corner ticks.
-- **Export**: PNG, WebP, AVIF, Universal VTT (works with Foundry through the
-  usual UVTT importer), players' copy without secrets.
+- **Export**: PNG, WebP, AVIF, Universal VTT, Foundry VTT scene data, players'
+  copy without secrets; import Universal VTT and Foundry scenes.
 - **Bring your own art**: import a Dungeondraft pack or a folder of pictures;
   turn any picture into a seamless material or a cut-out prop. See
   [docs/PACK.md](docs/PACK.md).
@@ -51,6 +51,7 @@ you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
 | `ndcart serve [--listen ADDR] [--data-dir DIR]` | the studio (default `127.0.0.1:8300`; on a non-local address it asks for a token) |
 | `ndcart doctor` | check the setup |
 | `ndcart import-pack FILE_OR_FOLDER --data-dir DIR` | add a Dungeondraft pack or a folder of art |
+| `ndcart open-published SLUG --server URL --email E --data-dir DIR` | bring a published map back as a project (picture, walls, lights) |
 | `ndcart publish DOC --server URL --email E [--all-floors] [--all-docs] [--report FILE]` | publish to nd-world |
 | `ndcart draft "a flooded crypt" ...` | ask an AI for a map spec |
 | `ndcart convert IN OUT` | convert pictures between PNG, WebP and AVIF |
@@ -64,8 +65,7 @@ how it is built is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## What is not here yet
 
 Honest list, so nothing surprises you: no desktop installer (run the binary or the
-Docker image), no Foundry scene export of its own (use UVTT), no Foundry or
-Wonderdraft import, no Windows/macOS builds checked by CI by me, and the AI
+Docker image), no Wonderdraft-specific import (its folders import like any folder), Foundry scenes exported but not tried in a running Foundry, no Windows/macOS builds checked by CI by me, and the AI
 features have been exercised against stand-ins for nd-world and a model but not
 against a real model's output. The plan and what is done are tracked in
 [docs/ND_CARTOGRAPHER_PLAN.md](docs/ND_CARTOGRAPHER_PLAN.md) §20.

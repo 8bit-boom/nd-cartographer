@@ -730,3 +730,62 @@ async fn imagegen_init_image_and_failures() {
         ("error", Some("no GPU"))
     );
 }
+
+#[tokio::test]
+async fn a_published_map_is_read_back_from_its_three_routes() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/maps/schematic/vault/walls.json")).and(query_param("w", "neon"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "walls": [{"id": "w1", "pts": [[0.0, 0.0], [64.0, 0.0]], "kind": "wall"}, {"id": "w2", "pts": [[64.0, 0.0], [64.0, 32.0]], "kind": "door", "state": "closed"}],
+            "fog": {}, "lights": [{"id": "l1", "x": 32.0, "y": 32.0, "range": 4.0, "color": "#ffaa00", "intensity": 0.8, "on": true}],
+        }))).expect(1).mount(&s).await;
+    Mock::given(method("GET"))
+        .and(path("/maps/schematic/vault/rooms.json"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"cell": 32, "cols": 2, "rows": 1})),
+        )
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/uploads/schematics/vault.webp"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/uploads/schematics/vault.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![9u8, 9, 9]))
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    let p = b.fetch_published("vault").await.unwrap();
+    assert_eq!(
+        (
+            p.walls.len(),
+            p.lights.len(),
+            p.cell_px,
+            p.image_ext.as_str(),
+            p.image.len()
+        ),
+        (2, 1, Some(32.0), "png", 3)
+    );
+    assert!(b
+        .fetch_published("../etc")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("lowercase"));
+    // The Rust-only image has no walls.json: it says what it needs.
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/maps/schematic/vault/walls.json"))
+        .respond_with(ResponseTemplate::new(501))
+        .mount(&s)
+        .await;
+    assert!(Bridge::new(&s.uri(), None)
+        .unwrap()
+        .fetch_published("vault")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("cannot do that"));
+}

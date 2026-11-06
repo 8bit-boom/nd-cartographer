@@ -121,6 +121,119 @@ pub fn read_dir(dir: &Path) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
+/// Write a Godot 3 (version 1) `.pck` archive holding `files`, the layout
+/// Dungeondraft reads: a header, an index (path, offset, size, md5), the data.
+/// The md5 field is left zero; readers that do not verify it (this one) accept it.
+pub fn write_pck(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut head = Vec::new();
+    head.extend_from_slice(b"GDPC");
+    head.extend_from_slice(&1u32.to_le_bytes());
+    for v in [3u32, 5, 0] {
+        head.extend_from_slice(&v.to_le_bytes());
+    }
+    head.extend_from_slice(&[0u8; 64]);
+    head.extend_from_slice(&(files.len() as u32).to_le_bytes());
+    let paths: Vec<Vec<u8>> = files
+        .iter()
+        .map(|(p, _)| {
+            let mut b = format!("res://{p}").into_bytes();
+            b.push(0);
+            while b.len() % 4 != 0 {
+                b.push(0);
+            }
+            b
+        })
+        .collect();
+    let index_len: usize = paths.iter().map(|p| 4 + p.len() + 8 + 8 + 16).sum();
+    let mut off = head.len() + index_len;
+    let mut index = Vec::new();
+    for (i, (_, data)) in files.iter().enumerate() {
+        index.extend_from_slice(&(paths[i].len() as u32).to_le_bytes());
+        index.extend_from_slice(&paths[i]);
+        index.extend_from_slice(&(off as u64).to_le_bytes());
+        index.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        index.extend_from_slice(&[0u8; 16]);
+        off += data.len();
+    }
+    let mut out = head;
+    out.extend(index);
+    for (_, d) in files {
+        out.extend_from_slice(d);
+    }
+    out
+}
+
+/// A pack of the GM's own art: custom props and materials, as a Dungeondraft-style
+/// archive. Items that came from someone else's pack are left out unless
+/// `include_imported`, so exporting never redistributes art by accident.
+pub fn export_own(
+    assets: &Assets,
+    name: &str,
+    include_imported: bool,
+) -> Result<(Vec<u8>, usize, usize), String> {
+    let mine = |c: &Custom| include_imported || !c.origin.prompt.starts_with("from pack ");
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let (mut stamps, mut mats) = (0, 0);
+    let safe = |n: &str| -> String {
+        let t: String = n
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        t.trim_matches('_').chars().take(40).collect()
+    };
+    let mut used = std::collections::BTreeSet::new();
+    for (kind, dir) in [("stamp", "objects"), ("material", "terrain")] {
+        for c in assets.customs(kind).into_iter().filter(|c| mine(c)) {
+            let Some(bytes) = assets.get_bytes(&c.asset) else {
+                continue;
+            };
+            // The file's own format is kept; only PNG and WebP packs are written.
+            let png = bytes.starts_with(&[0x89, b'P', b'N', b'G']);
+            let ext = if png { "png" } else { "webp" };
+            let mut base = safe(&c.name);
+            if base.is_empty() {
+                base = c.id.clone();
+            }
+            let mut path = format!("textures/{dir}/{base}.{ext}");
+            let mut n = 2;
+            while !used.insert(path.clone()) {
+                path = format!("textures/{dir}/{base}_{n}.{ext}");
+                n += 1;
+            }
+            files.push((path, bytes.to_vec()));
+            if kind == "stamp" {
+                stamps += 1;
+            } else {
+                mats += 1;
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err(
+            "there is nothing of your own to export yet (make a prop or a material first)".into(),
+        );
+    }
+    let pack_name: String = name.trim().chars().take(60).collect();
+    let pack_name = if pack_name.is_empty() {
+        "ndcart pack".to_string()
+    } else {
+        pack_name
+    };
+    let info = serde_json::json!({
+        "name": pack_name, "id": safe(&pack_name), "version": "1", "author": "",
+        "custom_color_overrides": {"enabled": false},
+    });
+    files.insert(0, ("pack.json".into(), info.to_string().into_bytes()));
+    let refs: Vec<(&str, Vec<u8>)> = files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
+    Ok((write_pck(&refs), stamps, mats))
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct Report {
     pub pack: String,
@@ -263,44 +376,8 @@ pub fn import(entries: &[Entry], fallback_name: &str, assets: &Assets) -> Result
 pub(crate) mod tests {
     use super::*;
 
-    /// A Godot 3 `.pck` holding `files`, laid out the way Dungeondraft writes them.
     pub(crate) fn build_pck(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
-        let mut head = Vec::new();
-        head.extend_from_slice(b"GDPC");
-        head.extend_from_slice(&1u32.to_le_bytes());
-        for v in [3u32, 5, 0] {
-            head.extend_from_slice(&v.to_le_bytes());
-        }
-        head.extend_from_slice(&[0u8; 64]);
-        head.extend_from_slice(&(files.len() as u32).to_le_bytes());
-        let paths: Vec<Vec<u8>> = files
-            .iter()
-            .map(|(p, _)| {
-                let mut b = format!("res://{p}").into_bytes();
-                b.push(0);
-                while b.len() % 4 != 0 {
-                    b.push(0);
-                }
-                b
-            })
-            .collect();
-        let index_len: usize = paths.iter().map(|p| 4 + p.len() + 8 + 8 + 16).sum();
-        let mut off = head.len() + index_len;
-        let mut index = Vec::new();
-        for (i, (_, data)) in files.iter().enumerate() {
-            index.extend_from_slice(&(paths[i].len() as u32).to_le_bytes());
-            index.extend_from_slice(&paths[i]);
-            index.extend_from_slice(&(off as u64).to_le_bytes());
-            index.extend_from_slice(&(data.len() as u64).to_le_bytes());
-            index.extend_from_slice(&[0u8; 16]);
-            off += data.len();
-        }
-        let mut out = head;
-        out.extend(index);
-        for (_, d) in files {
-            out.extend_from_slice(d);
-        }
-        out
+        super::write_pck(files)
     }
 
     pub(crate) fn png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
@@ -412,6 +489,70 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(empty.notes[0].contains("no props or textures"));
+    }
+
+    #[test]
+    fn your_own_art_exports_as_a_pack_that_reads_back_and_borrowed_art_stays_out() {
+        let a = store();
+        let mk = |kind: &str, name: &str, prompt: &str, rgba: [u8; 4]| {
+            let asset = a.put(&png(16, 16, rgba)).unwrap();
+            a.register(Custom {
+                id: format!(
+                    "{}_{}",
+                    if kind == "stamp" { "stp" } else { "mat" },
+                    &asset[..12]
+                ),
+                name: name.into(),
+                kind: kind.into(),
+                asset,
+                size: 2.0,
+                tags: vec![],
+                origin: Provenance {
+                    source: "imported".into(),
+                    prompt: prompt.into(),
+                    seed: -1,
+                    date: "now".into(),
+                },
+            })
+            .unwrap();
+        };
+        mk("stamp", "My Lantern!", "", [200, 180, 40, 255]);
+        mk("stamp", "My Lantern!", "", [200, 181, 40, 255]); // same name: gets a distinct file
+        mk("material", "Red Tiles", "red tiles", [180, 30, 30, 255]);
+        mk(
+            "stamp",
+            "Borrowed",
+            "from pack Someone Else by X",
+            [1, 2, 3, 255],
+        );
+        let (pck, stamps, mats) = export_own(&a, "Harbour Set", false).unwrap();
+        assert_eq!((stamps, mats), (2, 1), "the borrowed prop is not included");
+        let back = read_pck(&pck).unwrap();
+        let paths: Vec<&str> = back.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths[0], "pack.json");
+        assert!(
+            paths.contains(&"textures/objects/my_lantern.png")
+                && paths.contains(&"textures/objects/my_lantern_2.png"),
+            "{paths:?}"
+        );
+        assert!(paths.contains(&"textures/terrain/red_tiles.png"));
+        let info: serde_json::Value = serde_json::from_slice(&back[0].bytes).unwrap();
+        assert_eq!(
+            (info["name"].as_str(), info["id"].as_str()),
+            (Some("Harbour Set"), Some("harbour_set"))
+        );
+        // Importing it into a fresh store gives the same art back.
+        let b = store();
+        let rep = import(&back, "x", &b).unwrap();
+        assert_eq!(
+            (rep.pack.as_str(), rep.stamps, rep.materials),
+            ("Harbour Set", 2, 1)
+        );
+        // Opting in includes borrowed art; an empty library says what to do.
+        assert_eq!(export_own(&a, "All", true).unwrap().1, 3);
+        assert!(export_own(&store(), "Empty", false)
+            .unwrap_err()
+            .contains("nothing of your own"));
     }
 
     #[test]

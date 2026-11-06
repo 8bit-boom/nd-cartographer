@@ -3,6 +3,7 @@
 //! Desktop is the Tauri shell wrapping this same server (M0 ships serve).
 
 mod aijobs;
+mod ask;
 mod assets;
 mod auth;
 mod convert;
@@ -357,6 +358,167 @@ async fn get_asset(Path(id): Path<String>) -> Result<Response, ApiError> {
 #[derive(Deserialize)]
 struct ImportQuery {
     name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct FoundryQuery {
+    floor: Option<String>,
+    /// Pixels per square of the picture you will upload (default 100, Foundry's own).
+    ppc: Option<f64>,
+    /// Where the picture will be in Foundry's data folder.
+    image: Option<String>,
+    distance: Option<f64>,
+    units: Option<String>,
+    audience: Option<String>,
+}
+
+/// `GET /api/docs/{id}/export/foundry[?floor&ppc&image&distance&units&audience]` —
+/// the floor as Foundry VTT scene data (walls, doors, windows, lights, grid), for
+/// Foundry v11/v12. Export the picture separately (WebP at the same `ppc`),
+/// upload it to Foundry and give its path as `image`. Not checked against a
+/// running Foundry; it follows the documented data model.
+async fn export_foundry(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<FoundryQuery>,
+) -> Result<Response, ApiError> {
+    let ppc = q.ppc.unwrap_or(100.0);
+    let distance = q.distance.unwrap_or(5.0);
+    if !(8.0..=1000.0).contains(&ppc) || !(0.01..=1000.0).contains(&distance) {
+        return Err(ApiError(CoreError::Invalid(
+            "ppc must be 8-1000 and distance 0.01-1000".into(),
+        )));
+    }
+    let audience = match q.audience.as_deref() {
+        None => ndcart_core::Audience::Gm,
+        Some(a) => ndcart_core::Audience::parse(a)
+            .ok_or_else(|| ApiError(CoreError::Invalid("audience must be gm or player".into())))?,
+    };
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(f) => floors_by_id(&doc.floors, f)?,
+        None => 0,
+    };
+    let floor = ndcart_core::for_audience(&doc.floors[idx], audience);
+    let cell_size = doc.manifest.cell_size;
+    let name = format!("{} - {}", doc.manifest.name, doc.floors[idx].name);
+    drop(store);
+    let k = ppc / cell_size.max(1.0);
+    let scale = |p: &[f64; 2]| [p[0] * k, p[1] * k];
+    let walls: Vec<ndcart_core::Wall> = tiles::derive_walls(&floor, cell_size)
+        .into_iter()
+        .map(|mut w| {
+            w.pts = w.pts.iter().map(scale).collect();
+            w
+        })
+        .collect();
+    let lights: Vec<ndcart_core::Light> = floor
+        .lights
+        .iter()
+        .cloned()
+        .map(|mut l| {
+            l.x *= k;
+            l.y *= k;
+            l
+        })
+        .collect();
+    let (cols, rows) = tiles::grid_extent(&floor);
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let default_image = format!("maps/{}.webp", slug.trim_matches('-'));
+    let scene = ndcart_formats::foundry::to_scene(&ndcart_formats::foundry::SceneOut {
+        name: &name,
+        grid_px: ppc,
+        cols,
+        rows,
+        walls: &walls,
+        lights: &lights,
+        image_path: q.image.as_deref().unwrap_or(&default_image),
+        distance,
+        units: q.units.as_deref().unwrap_or("ft"),
+    });
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        scene.to_string(),
+    )
+        .into_response())
+}
+
+/// `POST /api/import/foundry[?name=…]` — Foundry scene JSON in the body becomes a
+/// new project with its walls, doors, windows and lights (no picture: Foundry's
+/// data refers to one by path; add it afterwards as an underlay). One undoable step.
+async fn import_foundry(
+    State(app): State<App>,
+    axum::extract::Query(q): axum::extract::Query<ImportQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use ndcart_core::doc::ImportedWall;
+    let text = std::str::from_utf8(&body)
+        .map_err(|_| ApiError(CoreError::Invalid("a Foundry scene is UTF-8 JSON".into())))?;
+    let scene =
+        ndcart_formats::foundry::from_scene(text).map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    let g = scene.grid_px;
+    let walls: Vec<ImportedWall> = scene
+        .walls
+        .iter()
+        .map(|w| ImportedWall {
+            pts: w
+                .pts
+                .iter()
+                .map(|p| [(p[0] / g) as f32, (p[1] / g) as f32])
+                .collect(),
+            kind: w.kind,
+            state: w.state,
+        })
+        .collect();
+    let name = q
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| scene.name.clone());
+    let mut ops = vec![
+        Op::SetCanvas {
+            canvas: Some([scene.cols.clamp(1, 20_000), scene.rows.clamp(1, 20_000)]),
+        },
+        Op::SetImportedWalls { walls },
+    ];
+    ops.extend(
+        scene
+            .lights
+            .iter()
+            .cloned()
+            .map(|light| Op::AddLight { light }),
+    );
+    let mut store = app.store.write().await;
+    let id = store.create(&name, DocKind::Battle).id.clone();
+    let doc = store.docs.get_mut(&id).expect("just created");
+    doc.manifest.cell_size = g;
+    let floor_id = doc.floors[0].id.clone();
+    if let Err(e) = doc.apply_ops(&floor_id, &[Op::Batch { ops }]) {
+        store.docs.remove(&id);
+        return Err(e.into());
+    }
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    let manifest = store.docs[&id].manifest.clone();
+    drop(store);
+    app.wall_cache.lock().expect("wall cache").clear();
+    Ok(Json(serde_json::json!({
+        "manifest": manifest, "floor": floor_id,
+        "stats": { "cols": scene.cols, "rows": scene.rows, "walls": scene.walls.len(), "lights": scene.lights.len() },
+        "image": scene.image_path,
+    })))
 }
 
 /// `POST /api/import/uvtt[?name=…]` — a Universal VTT file (`.dd2vtt` / `.uvtt`)
@@ -1437,6 +1599,40 @@ async fn import_pack(
     Ok(Json(report_json(&report)))
 }
 
+#[derive(Deserialize)]
+struct PackExportQuery {
+    name: Option<String>,
+    /// `all` also writes items imported from other people's packs (default: only your own).
+    include: Option<String>,
+}
+
+/// `GET /api/packs/export?name=My%20set[&include=all]` — your own props and
+/// materials as a Dungeondraft-style pack. Art that came from someone else's pack
+/// is left out unless you ask for `include=all` (check its license first).
+async fn export_pack(
+    axum::extract::Query(q): axum::extract::Query<PackExportQuery>,
+) -> Result<Response, ApiError> {
+    let name = q.name.unwrap_or_default();
+    let all = q.include.as_deref() == Some("all");
+    let (bytes, ..) =
+        tokio::task::spawn_blocking(move || packs::export_own(assets::global(), &name, all))
+            .await
+            .map_err(|e| ApiError(CoreError::Invalid(format!("export failed: {e}"))))?
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"ndcart.dungeondraft_pack\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 /// `POST /api/assets/{id}/make-material` `{name, size?, seamless?, prompt?, seed?, ai?}` —
 /// turn a picture into a paintable material: made seamless (unless told not
 /// to), stored, and added to the palette. Provenance is kept.
@@ -1884,6 +2080,53 @@ async fn doctor_checks(State(app): State<App>) -> Json<serde_json::Value> {
     #[cfg(feature = "bridge")]
     checks.extend(doctor::ai_checks().await);
     Json(serde_json::json!({ "checks": checks }))
+}
+
+#[derive(Deserialize)]
+struct AskBody {
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    question: String,
+}
+
+/// `POST /api/ask` `{question}` — ask your maps a question in plain words. The
+/// answer comes from a text digest of every project (room names, notes, markers,
+/// zones…), and the model is told to say so when the maps do not hold it.
+async fn ask_maps(
+    State(app): State<App>,
+    body: Result<Json<AskBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|_| {
+        ApiError(CoreError::Invalid(
+            "body must be {\"question\": ...}".into(),
+        ))
+    })?;
+    #[cfg(feature = "bridge")]
+    {
+        let q = b.question.trim();
+        if q.is_empty() || q.chars().count() > 1_000 {
+            return Err(ApiError(CoreError::Invalid(
+                "ask in 1-1000 characters".into(),
+            )));
+        }
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let turn = {
+            let store = app.store.read().await;
+            ask::user_turn(&ask::digest(&store), q)
+        };
+        let backend = draft::Backend::connect(&cfg)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        let answer = backend
+            .chat(ask::SYSTEM_PROMPT, &turn)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        Ok(Json(serde_json::json!({ "answer": answer.trim() })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = (app, b);
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
 }
 
 /// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
@@ -2630,6 +2873,7 @@ fn build_router(app: App) -> Router {
         .route("/api/materials", get(list_materials))
         .route("/api/assets", post(put_asset))
         .route("/api/assets/{id}", get(get_asset))
+        .route("/api/packs/export", get(export_pack))
         .route("/api/assets/{id}/make-material", post(make_material))
         .route(
             "/api/packs/import",
@@ -2665,8 +2909,11 @@ fn build_router(app: App) -> Router {
         )
         .route("/table/{id}", get(table_page))
         .route("/api/docs/{id}/export/pdf", get(export_pdf))
+        .route("/api/docs/{id}/export/foundry", get(export_foundry))
+        .route("/api/import/foundry", post(import_foundry))
         .route("/api/draft", post(draft_spec))
         .route("/api/ai/status", get(ai_status))
+        .route("/api/ask", post(ask_maps))
         .route("/api/doctor", get(doctor_checks))
         .route("/api/docs/{id}/refine", post(refine_floor))
         .route("/api/docs/{id}/style", post(set_style))
@@ -2945,6 +3192,13 @@ async fn main() {
             }
         }
         #[cfg(feature = "bridge")]
+        "open-published" => {
+            if let Err(m) = publish::run_open(args.collect()).await {
+                eprintln!("ndcart: {m}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(feature = "bridge")]
         "publish" => {
             if let Err(m) = publish::run(args.collect()).await {
                 eprintln!("ndcart: {m}");
@@ -3014,7 +3268,7 @@ async fn main() {
         }
         other => {
             eprintln!(
-                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | import-pack FILE | doctor | publish DOC ... | draft PROMPT ...]"
+                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | import-pack FILE | open-published SLUG | doctor | publish DOC ... | draft PROMPT ...]"
             );
             eprintln!("  unknown command: {other}");
             std::process::exit(2);
@@ -4011,6 +4265,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn asking_your_maps_checks_the_question_and_says_when_no_ai_is_set_up() {
+        let router = build_router(test_app());
+        let (st, _) = call(&router, "POST", "/api/ask", b"{}".to_vec()).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        if std::env::var("ND_CARTO_SERVER").is_err() && std::env::var("ND_CARTO_LLM_URL").is_err() {
+            let (st, _) = call(
+                &router,
+                "POST",
+                "/api/ask",
+                br#"{"question":"where is the ledger?"}"#.to_vec(),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+        }
+    }
+
+    #[tokio::test]
     async fn the_settings_panel_gets_the_doctors_checks_and_no_secrets() {
         let router = build_router(test_app());
         let (st, b) = call(&router, "GET", "/api/doctor", vec![]).await;
@@ -4519,6 +4790,83 @@ mod tests {
                 StatusCode::NOT_FOUND
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_foundry_scene_exports_with_walls_and_lights_and_imports_back_as_a_project() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(
+            &router,
+            "POST",
+            "/api/docs",
+            br#"{"name":"Vault"}"#.to_vec(),
+        )
+        .await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/generate-map"),
+            br#"{"kind":"dungeon","seed":4,"width":40,"height":30}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, body) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/export/foundry?ppc=100&image=maps/vault.webp"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let scene = json(body.clone());
+        assert_eq!(scene["grid"]["size"], 100.0);
+        assert_eq!(scene["background"]["src"], "maps/vault.webp");
+        let walls = scene["walls"].as_array().unwrap().len();
+        assert!(
+            walls > 50 && scene["lights"].as_array().unwrap().len() > 3,
+            "{walls}"
+        );
+        assert!(
+            scene["walls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["door"] == 1),
+            "doors survive"
+        );
+        // Import it as a new project: same walls and lights, canvas from the scene.
+        let (st, b) = call(&router, "POST", "/api/import/foundry?name=Back", body).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        let r = json(b);
+        assert_eq!(r["stats"]["walls"].as_u64(), Some(walls as u64));
+        assert_eq!(r["manifest"]["name"], "Back");
+        let (_, list) = call(&router, "GET", "/api/docs", vec![]).await;
+        assert_eq!(json(list)["docs"].as_array().unwrap().len(), 2);
+        for bad in ["ppc=1", "distance=0"] {
+            assert_eq!(
+                call(
+                    &router,
+                    "GET",
+                    &format!("/api/docs/{id}/export/foundry?{bad}"),
+                    vec![]
+                )
+                .await
+                .0,
+                StatusCode::BAD_REQUEST,
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            call(&router, "POST", "/api/import/foundry", b"not json".to_vec())
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        // Nothing half-made was left behind by the failed import.
+        let (_, list) = call(&router, "GET", "/api/docs", vec![]).await;
+        assert_eq!(json(list)["docs"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]

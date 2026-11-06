@@ -18,6 +18,8 @@
   <button id="btn-pack" title="Add a Dungeondraft pack (.dungeondraft_pack): its objects become props, its terrain textures become materials">📦 Import pack…</button>
   <input id="pack-file" type="file" accept=".dungeondraft_pack,.pck" hidden>
   <button id="btn-settings" title="Is everything set up? Folder, picture formats, fonts, AI and nd-world">⚙ Settings</button>
+  <button id="btn-ask" title="Ask a question about everything written in your maps (needs an AI)">❓ Ask</button>
+  <a id="btn-pack-out" href="/api/packs/export?name=My%20art" download title="Download your own props and materials as a pack">⬇ My art pack</a>
   <button id="btn-gallery" title="All projects as thumbnails">🗂 Projects</button>
   <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
   <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
@@ -59,6 +61,7 @@
       <a id="exp-webp" download>WebP</a>
       <a id="exp-avif" download>AVIF</a>
       <a id="exp-uvtt" download>UVTT</a>
+    <a id="exp-foundry" title="Foundry VTT scene data (v11/v12): walls, doors, lights. Export the picture as WebP at 100 px a square and upload it to Foundry" target="_blank" rel="noopener">Foundry</a>
     <a id="exp-pdf" title="Print at true scale: one inch per square, cut into pages" target="_blank" rel="noopener">PDF</a>
     </span>
     <button id="btn-help" title="Keyboard help (F1)">?</button>
@@ -187,6 +190,14 @@
     <ul id="settings-list" class="checks" aria-live="polite"></ul>
     <p class="dim">AI and nd-world are set in the environment the studio starts in (never typed here); see the README. The same checks run with <code>ndcart doctor</code>.</p>
     <menu><button id="settings-close" type="button">Close</button></menu>
+  </dialog>
+  <dialog id="ask-dialog">
+    <h3>Ask your maps</h3>
+    <p class="dim">Answers come only from what is written in your projects: room names, notes, markers, zones, regions.</p>
+    <input id="ask-q" type="text" maxlength="1000" placeholder="Which map has the smugglers' ledger?" aria-label="Your question" style="width:100%;box-sizing:border-box">
+    <div class="row"><button id="ask-go" type="button" class="primary">Ask</button><span id="ask-msg" class="dim" role="status"></span></div>
+    <p id="ask-answer" style="white-space:pre-wrap"></p>
+    <menu><button id="ask-close" type="button">Close</button></menu>
   </dialog>
   <dialog id="gallery-dialog">
     <h3>Projects</h3>

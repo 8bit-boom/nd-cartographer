@@ -624,6 +624,119 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
+/// Turn a published map into a project: the picture is the underlay, nd-world's
+/// walls and lights come across, and the project is linked to the map so a later
+/// `ndcart publish` updates that same map. Rooms cannot be rebuilt from wall
+/// segments, so there are none (as with an imported Universal VTT file).
+pub fn project_from_published(
+    p: &ndcart_bridge::Published,
+    name: &str,
+    cell_override: Option<f64>,
+    link: NdWorldLink,
+) -> Result<store::StoredDoc, String> {
+    use ndcart_core::doc::{ImportedWall, Underlay};
+    use ndcart_core::journal::Op;
+    let cell = cell_override.or(p.cell_px).unwrap_or(32.0);
+    if !(8.0..=512.0).contains(&cell) {
+        return Err("the cell size must be 8-512 pixels (use --cell)".into());
+    }
+    let (_, w, h) = crate::convert::decode_rgba(&p.image)?;
+    let asset = crate::assets::global().put(&p.image)?;
+    let walls: Vec<ImportedWall> = p
+        .walls
+        .iter()
+        .map(|w| ImportedWall {
+            pts: w
+                .pts
+                .iter()
+                .map(|q| [(q[0] / cell) as f32, (q[1] / cell) as f32])
+                .collect(),
+            kind: w.kind,
+            state: w.state,
+        })
+        .collect();
+    let mut ops = vec![
+        Op::SetUnderlay {
+            underlay: Some(Underlay {
+                asset,
+                x: 0.0,
+                y: 0.0,
+                w: (f64::from(w) / cell) as f32,
+                h: (f64::from(h) / cell) as f32,
+                opacity: 1.0,
+            }),
+        },
+        Op::SetImportedWalls { walls },
+    ];
+    ops.extend(p.lights.iter().cloned().map(|light| Op::AddLight { light }));
+    let mut doc = store::StoredDoc::new(name, ndcart_core::DocKind::Battle);
+    doc.manifest.cell_size = cell;
+    let fid = doc.floors[0].id.clone();
+    doc.apply_ops(&fid, &[Op::Batch { ops }])
+        .map_err(|e| e.to_string())?;
+    doc.manifest.nd_world = Some(link);
+    Ok(doc)
+}
+
+/// `ndcart open-published SLUG --server URL --email E [--world W] [--name N] [--cell PX] --data-dir DIR`
+pub async fn run_open(args: Vec<String>) -> Result<(), String> {
+    let (mut slug, mut server, mut world, mut email, mut name, mut cell, mut data) =
+        (None, None, None, None, None, None, None);
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        let mut val = |n: &str| it.next().ok_or(format!("{n} needs a value"));
+        match a.as_str() {
+            "--server" => server = Some(val("--server")?),
+            "--world" => world = Some(val("--world")?),
+            "--email" => email = Some(val("--email")?),
+            "--name" => name = Some(val("--name")?),
+            "--cell" => {
+                cell = Some(
+                    val("--cell")?
+                        .parse::<f64>()
+                        .map_err(|_| "--cell must be a number")?,
+                )
+            }
+            "--data-dir" => data = Some(PathBuf::from(val("--data-dir")?)),
+            o if !o.starts_with("--") && slug.is_none() => slug = Some(o.to_string()),
+            o => return Err(format!("unknown argument: {o}")),
+        }
+    }
+    let slug = slug.ok_or("name the map's slug")?;
+    let server = server.ok_or("--server is required")?;
+    let email = email.ok_or("--email is required")?;
+    let data = data
+        .or_else(|| std::env::var("ND_CARTO_DATA_DIR").ok().map(PathBuf::from))
+        .ok_or("--data-dir (or ND_CARTO_DATA_DIR) is required")?;
+    let pw = password()?;
+    let bridge = Bridge::new(&server, world.as_deref()).map_err(|e| e.to_string())?;
+    bridge
+        .login(&email, &pw, std::env::var("ND_CARTO_TOTP").ok().as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
+    let published = bridge
+        .fetch_published(&slug)
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::assets::init(Some(data.join("assets")));
+    let link = NdWorldLink {
+        server,
+        world,
+        slug: slug.clone(),
+        floor_slugs: Default::default(),
+    };
+    let doc = project_from_published(&published, name.as_deref().unwrap_or(&slug), cell, link)?;
+    store::save_doc(Some(&data), &doc);
+    println!(
+        "opened '{}' as project {} ({} walls, {} lights); publishing it again updates the same map",
+        doc.manifest.name,
+        doc.manifest.id,
+        published.walls.len(),
+        published.lights.len()
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

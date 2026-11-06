@@ -12,6 +12,17 @@ use reqwest::{multipart, redirect, Client, Method, RequestBuilder, Response, Sta
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// A published battle map read back from nd-world.
+#[derive(Debug)]
+pub struct Published {
+    pub walls: Vec<Wall>,
+    pub lights: Vec<Light>,
+    /// The room grid's cell size in picture pixels, when the map has rooms.
+    pub cell_px: Option<f64>,
+    pub image: Vec<u8>,
+    pub image_ext: String,
+}
+
 /// One image to make through nd-world's imagegen queue.
 #[derive(Clone, Debug)]
 pub struct ImageRequest {
@@ -449,6 +460,79 @@ impl Bridge {
             return Err(BridgeError::Protocol("the image is too large".into()));
         }
         Ok(bytes.to_vec())
+    }
+
+    /// A published battle map as nd-world holds it: walls and lights from
+    /// `walls.json`, the room grid's cell size from `rooms.json` (both Python-image
+    /// routes; the Rust-only image answers 501 and this says so), and the picture
+    /// from `/uploads/schematics/<slug>.<ext>`.
+    pub async fn fetch_published(&self, slug: &str) -> Result<Published, BridgeError> {
+        if slug.is_empty()
+            || !slug
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err(BridgeError::Precheck(
+                "a map slug is lowercase letters, digits and hyphens".into(),
+            ));
+        }
+        let get_json = |path: String| async move {
+            let resp = self.send(self.req(Method::GET, &path)).await?;
+            let status = resp.status();
+            if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                return Err(BridgeError::AuthRequired);
+            }
+            if status == StatusCode::NOT_IMPLEMENTED {
+                return Err(BridgeError::NeedsPython(path));
+            }
+            let v: Value = check(resp)
+                .await?
+                .json()
+                .await
+                .map_err(|e| BridgeError::Protocol(format!("{path}: {e}")))?;
+            Ok::<Value, BridgeError>(v)
+        };
+        let state = get_json(format!("/maps/schematic/{slug}/walls.json")).await?;
+        let walls: Vec<Wall> =
+            serde_json::from_value(state.get("walls").cloned().unwrap_or(json!([])))
+                .map_err(|e| BridgeError::Protocol(format!("walls.json walls: {e}")))?;
+        let lights: Vec<Light> =
+            serde_json::from_value(state.get("lights").cloned().unwrap_or(json!([])))
+                .map_err(|e| BridgeError::Protocol(format!("walls.json lights: {e}")))?;
+        let cell_px = get_json(format!("/maps/schematic/{slug}/rooms.json"))
+            .await
+            .ok()
+            .and_then(|v| v.get("cell").and_then(Value::as_f64))
+            .filter(|c| *c >= 8.0);
+        let mut image = None;
+        for ext in ["webp", "png", "jpg", "avif"] {
+            let resp = self
+                .send(
+                    self.http
+                        .get(format!("{}/uploads/schematics/{slug}.{ext}", self.base)),
+                )
+                .await?;
+            if resp.status().is_success() {
+                let bytes = resp
+                    .bytes()
+                    .await
+                    .map_err(|e| BridgeError::Protocol(e.to_string()))?;
+                if bytes.len() > 64 * 1024 * 1024 {
+                    return Err(BridgeError::Protocol("the picture is too large".into()));
+                }
+                image = Some((bytes.to_vec(), ext.to_string()));
+                break;
+            }
+        }
+        let (image, image_ext) =
+            image.ok_or_else(|| BridgeError::NotFound(format!("the picture of map {slug}")))?;
+        Ok(Published {
+            walls,
+            lights,
+            cell_px,
+            image,
+            image_ext,
+        })
     }
 
     fn precheck(map: &PublishMap) -> Result<(), BridgeError> {

@@ -627,7 +627,13 @@ async function finishStroke() {
     points: st.points.map(p => ({ x: +p.x.toFixed(3), y: +p.y.toFixed(3), pressure: +p.pressure.toFixed(3), tilt: +p.tilt.toFixed(3) })),
   };
   if (item.id && !st.erase) stroke.material = item.id;
-  await postOps([{ t: 'add_stroke', stroke }]);
+  // With symmetry on, reflected copies of the stroke go down in the same step.
+  const { ax, ay } = state.sym;
+  const strokes = symVariants().map(([fx, fy], i) => i === 0 ? stroke : {
+    ...stroke, id: `${stroke.id}_${i}`, seed: (stroke.seed + i * 7919) >>> 0,
+    points: stroke.points.map(p => ({ ...p, x: fx ? +(2 * ax - p.x).toFixed(3) : p.x, y: fy ? +(2 * ay - p.y).toFixed(3) : p.y })),
+  });
+  await postOps(strokes.length === 1 ? [{ t: 'add_stroke', stroke }] : [{ t: 'batch', ops: strokes.map(st => ({ t: 'add_stroke', stroke: st })) }]);
 }
 
 for (const id of ['br-size']) {
@@ -1662,6 +1668,22 @@ document.getElementById('art-cancel').onclick = async () => {
 };
 document.getElementById('art-close').onclick = () => artDialog.close();
 
+// ---------- ask your maps ----------
+const askDialog = document.getElementById('ask-dialog');
+document.getElementById('btn-ask').onclick = () => { document.getElementById('ask-answer').textContent = ''; document.getElementById('ask-msg').textContent = ''; askDialog.showModal(); };
+async function askMaps() {
+  const q = document.getElementById('ask-q').value.trim();
+  if (!q) return;
+  const go = document.getElementById('ask-go'), msg = document.getElementById('ask-msg'), out = document.getElementById('ask-answer');
+  go.disabled = true; msg.textContent = 'Reading your maps…'; out.textContent = '';
+  try { out.textContent = (await api('POST', '/api/ask', { question: q })).answer; msg.textContent = ''; }
+  catch (e) { msg.textContent = e.message; }
+  finally { go.disabled = false; }
+}
+document.getElementById('ask-go').onclick = askMaps;
+document.getElementById('ask-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') askMaps(); });
+document.getElementById('ask-close').onclick = () => askDialog.close();
+
 // ---------- settings and health ----------
 const settingsDialog = document.getElementById('settings-dialog');
 document.getElementById('btn-settings').onclick = async () => {
@@ -2241,6 +2263,7 @@ function setExportLinks() {
   document.getElementById('exp-avif').href = `${base}/png?${q}&format=avif`;
   document.getElementById('exp-uvtt').href = `${base}/uvtt?${q}`;
   document.getElementById('exp-pdf').href = `${base}/pdf?${q}`;
+  document.getElementById('exp-foundry').href = `${base}/foundry?${q}`;
   document.getElementById('exp-png').download = `${state.doc.manifest.name}${suffix}.png`;
   document.getElementById('exp-webp').download = `${state.doc.manifest.name}${suffix}.webp`;
   document.getElementById('exp-avif').download = `${state.doc.manifest.name}${suffix}.avif`;
