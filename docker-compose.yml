@@ -1,0 +1,26 @@
+# nd-cartographer on a home server (TrueNAS SCALE, Unraid, plain Docker).
+# Full steps: docs/DOCKER.md
+services:
+  ndcart:
+    image: ghcr.io/8bit-boom/nd-cartographer:latest
+    # build: .            # or build it yourself from this repository
+    container_name: nd-cartographer
+    restart: unless-stopped
+    ports:
+      - "8300:8300"
+    # 568 is the "apps" user on TrueNAS SCALE; use the owner of your dataset.
+    user: "568:568"
+    environment:
+      # The server is not on loopback, so it asks for an access token. Set a
+      # long random string, or remove this line to have one generated, stored
+      # in /data/token and printed once in the logs.
+      ND_CARTO_TOKEN: "change-me-to-a-long-random-string"
+      # Optional: link to nd-world for publish / entities / AI.
+      # ND_CARTO_SERVER: "http://nd-world:8000"
+      # ND_CARTO_EMAIL: "gm@example.com"
+      # ND_CARTO_PASSWORD_FILE: "/run/secrets/nd_password"
+      # Optional: a standalone OpenAI-compatible model instead of nd-world.
+      # ND_CARTO_LLM_URL: "http://ollama:11434/v1"
+      # ND_CARTO_LLM_MODEL: "llama3.1"
+    volumes:
+      - ./data:/data

@@ -3280,12 +3280,38 @@ fn run_convert(args: Vec<String>) {
 
 // ---------- main ----------
 
+/// `ndcart healthcheck`: for the container HEALTHCHECK (the image has no curl).
+/// Asks the local server for `/health` over plain TCP and checks for a 200.
+fn run_healthcheck() -> bool {
+    use std::io::{Read, Write};
+    let listen = std::env::var("ND_CARTO_LISTEN").unwrap_or_else(|_| "127.0.0.1:8300".into());
+    let port = listen.rsplit(':').next().unwrap_or("8300");
+    let addr = format!("127.0.0.1:{port}");
+    let Ok(mut s) = std::net::TcpStream::connect(&addr) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+    if s.write_all(b"GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    out.starts_with("HTTP/1.1 200") || out.starts_with("HTTP/1.0 200")
+}
+
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| "serve".into());
     match cmd.as_str() {
         "bench" => run_bench(args.collect()),
+        "healthcheck" => {
+            if !run_healthcheck() {
+                std::process::exit(1);
+            }
+        }
         "convert" => run_convert(args.collect()),
         "import-pack" => {
             if let Err(m) = run_import_pack(args.collect()) {

@@ -67,11 +67,26 @@ pub struct Persisted {
     pub snapshot_len: std::sync::atomic::AtomicUsize,
     /// When the snapshot was last written (seconds since the Unix epoch).
     pub snapshot_at: std::sync::atomic::AtomicU64,
+    /// When the journal was last flushed to the disk (milliseconds since the epoch).
+    pub synced_at: std::sync::atomic::AtomicU64,
 }
 
 /// Write a fresh snapshot after this many journal entries, or this many seconds.
 const SNAPSHOT_EVERY_OPS: usize = 200;
 const SNAPSHOT_EVERY_SECS: u64 = 60;
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A journal append is always handed to the operating system (so a crashed or
+/// killed studio loses nothing), but it is forced to the physical disk at most
+/// this often: flushing after every stroke made each edit cost whole seconds on
+/// some Windows machines. A power cut can lose the last second of edits.
+const SYNC_EVERY_MS: u64 = 1_000;
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -654,7 +669,15 @@ pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
         let wrote = std::fs::OpenOptions::new()
             .append(true)
             .open(dir.join("journal.ndjson"))
-            .and_then(|mut f| f.write_all(text.as_bytes()).and_then(|_| f.sync_data()));
+            .and_then(|mut f| {
+                f.write_all(text.as_bytes())?;
+                let now = now_millis();
+                if now.saturating_sub(doc.persisted.synced_at.load(Relaxed)) >= SYNC_EVERY_MS {
+                    f.sync_data()?;
+                    doc.persisted.synced_at.store(now, Relaxed);
+                }
+                Ok(())
+            });
         match wrote {
             Ok(()) => doc.persisted.appended.store(len, Relaxed),
             Err(e) => {
@@ -808,6 +831,10 @@ mod persistence_tests {
         let mut d = StoredDoc::new("Cadence", DocKind::Battle);
         let (id, fid) = (d.manifest.id.clone(), d.floors[0].id.clone());
         save_doc(Some(&dir), &d);
+        // The count rule is under test, not the clock: pretend the snapshot was just taken.
+        d.persisted
+            .snapshot_at
+            .store(u64::MAX / 2, std::sync::atomic::Ordering::Relaxed);
         let snap_len = |d: &StoredDoc| {
             d.persisted
                 .snapshot_len
