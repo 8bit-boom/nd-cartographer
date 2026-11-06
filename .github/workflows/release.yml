@@ -111,24 +111,24 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          dir="ndcart-desktop-${TAG}-${{ matrix.name }}"
-          mkdir "$dir"
+          # Flat files in the workspace root (never a directory): the release
+          # job uploads dist/* and `gh release create` refuses directories.
+          prefix="ndcart-desktop-${TAG}-${{ matrix.name }}"
           if [ "${{ runner.os }}" = Windows ]; then
-            cp target/release/bundle/nsis/*.exe "$dir/" 2>/dev/null || true
-            cp target/release/bundle/msi/*.msi "$dir/" 2>/dev/null || true
+            cp target/release/bundle/nsis/*.exe "${prefix}-setup.exe" 2>/dev/null || true
+            cp target/release/bundle/msi/*.msi "${prefix}.msi" 2>/dev/null || true
           else
-            cp target/release/bundle/appimage/*.AppImage "$dir/" 2>/dev/null || true
-            cp target/release/bundle/deb/*.deb "$dir/" 2>/dev/null || true
+            cp target/release/bundle/appimage/*.AppImage "${prefix}.AppImage" 2>/dev/null || true
+            cp target/release/bundle/deb/*.deb "${prefix}.deb" 2>/dev/null || true
           fi
-          ls "$dir"
-          [ -z "$(ls -A "$dir")" ] && { echo "no bundles produced"; exit 1; }
-          if command -v sha256sum >/dev/null; then sha256sum "$dir"/* > "$dir.sha256"; else shasum -a 256 "$dir"/* > "$dir.sha256"; fi
+          ls "${prefix}"*
+          [ -n "$(ls -A "${prefix}"* 2>/dev/null)" ] || { echo "no bundles produced"; exit 1; }
+          if command -v sha256sum >/dev/null; then sha256sum "${prefix}"* > "${prefix}.sha256"; else shasum -a 256 "${prefix}"* > "${prefix}.sha256"; fi
       - uses: actions/upload-artifact@v4
         with:
           name: ndcart-desktop-${{ matrix.name }}
           path: |
-            ndcart-desktop-*/
-            ndcart-desktop-*.sha256
+            ndcart-desktop-${{ github.event.inputs.tag || github.ref_name }}-${{ matrix.name }}*
 
   release:
     needs: [build, desktop]
