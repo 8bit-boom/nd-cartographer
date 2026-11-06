@@ -26,6 +26,8 @@ jobs:
         run: cargo test --locked
       - name: bench smoke
         run: cargo run -q -p ndcart-server --bin ndcart bench
+      - name: standalone parity (bridge feature off)
+        run: cargo test --locked -p ndcart-server --no-default-features
 
   docker:
     needs: rust

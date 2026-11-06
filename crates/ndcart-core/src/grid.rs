@@ -111,6 +111,10 @@ pub struct Space {
     /// `#rrggbb`.
     pub color: String,
     pub kind: SpaceKind,
+    /// A material id from the active pack (plan §7.1). `None` paints the flat
+    /// `color`; an id the pack does not know falls back to `color` too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
 }
 
 /// One painted cell. (Serde shape: a list of triples rather than a map keyed
@@ -135,17 +139,35 @@ pub struct RoomGrid {
 struct RoomGridSerde {
     #[serde(default)]
     spaces: BTreeMap<String, Space>,
+    /// A list, not a map: JSON object keys must be strings, and an edge is a
+    /// struct (a map here made every save and `GET /api/docs/{id}` of a
+    /// document with a door fail).
     #[serde(default)]
-    marks: BTreeMap<EdgeKey, Mark>,
+    marks: Vec<MarkEntry>,
     #[serde(default)]
     cells: Vec<CellPaint>,
+}
+
+/// One edge mark in the serde shape — the same `{edge:{cell,edge}, mark}` the
+/// `set_mark` op uses.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+struct MarkEntry {
+    edge: EdgeKey,
+    mark: Mark,
 }
 
 impl From<&RoomGrid> for RoomGridSerde {
     fn from(g: &RoomGrid) -> Self {
         RoomGridSerde {
             spaces: g.spaces.clone(),
-            marks: g.marks.clone(),
+            marks: g
+                .marks
+                .iter()
+                .map(|(edge, mark)| MarkEntry {
+                    edge: *edge,
+                    mark: *mark,
+                })
+                .collect(),
             cells: g
                 .cells
                 .iter()
@@ -163,7 +185,7 @@ impl From<RoomGridSerde> for RoomGrid {
     fn from(s: RoomGridSerde) -> Self {
         let mut g = RoomGrid {
             spaces: s.spaces,
-            marks: s.marks,
+            marks: s.marks.into_iter().map(|m| (m.edge, m.mark)).collect(),
             cells: BTreeMap::new(),
         };
         for p in s.cells {
@@ -220,6 +242,17 @@ impl RoomGrid {
                 "color must be #rrggbb, got {}",
                 space.color
             )));
+        }
+        if let Some(m) = &space.material {
+            let ok = !m.is_empty()
+                && m.len() <= 40
+                && m.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+            if !ok {
+                return Err(CoreError::Invalid(
+                    "material must be 1-40 chars of a-z, 0-9 and _".into(),
+                ));
+            }
         }
         self.spaces.insert(space.id.clone(), space);
         Ok(())
@@ -338,6 +371,7 @@ pub fn default_space(id: &str, name: &str, kind: SpaceKind) -> Space {
         name: name.to_string(),
         color: "#334455".to_string(),
         kind,
+        material: None,
     }
 }
 
@@ -351,6 +385,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn material_ids_are_validated_and_optional_in_old_documents() {
+        let mut g = RoomGrid::default();
+        let mut sp = default_space("a", "A", SpaceKind::Room);
+        sp.material = Some("stone_floor".into());
+        g.upsert_space(sp.clone()).unwrap();
+        for bad in ["", "Stone", "a b", "../x", &"x".repeat(41)] {
+            sp.material = Some(bad.into());
+            assert!(g.upsert_space(sp.clone()).is_err(), "{bad:?}");
+        }
+        // A space saved before materials existed still loads (and stays flat).
+        let old = r##"{"id":"o","name":"Old","color":"#112233","kind":"room"}"##;
+        let s: Space = serde_json::from_str(old).unwrap();
+        assert_eq!(s.material, None);
+        assert!(!serde_json::to_string(&s).unwrap().contains("material"));
+    }
+
+    #[test]
     fn paint_requires_existing_space() {
         let mut g = RoomGrid::default();
         g.upsert_space(Space {
@@ -358,6 +409,7 @@ mod tests {
             name: "A".into(),
             color: "#112233".into(),
             kind: SpaceKind::Room,
+            material: None,
         })
         .unwrap();
         assert!(g.paint(&[CellKey::new(0, 0)], Some("nope")).is_err());
@@ -415,5 +467,38 @@ mod tests {
         let back: RoomGrid = serde_json::from_str(&s).unwrap();
         assert_eq!(back, g);
         assert_eq!(back.cell_count(), 2);
+    }
+
+    #[test]
+    fn serde_roundtrip_keeps_marks() {
+        // Regression: marks used to be a map keyed by a struct, which JSON
+        // cannot express ("key must be a string") — saving any document with
+        // a door failed.
+        let mut g = RoomGrid::default();
+        g.upsert_space(default_space("a", "A", SpaceKind::Room))
+            .unwrap();
+        g.paint(&[CellKey::new(0, 0), CellKey::new(1, 0)], Some("a"))
+            .unwrap();
+        let e = EdgeKey {
+            cell: CellKey::new(0, 0),
+            edge: Edge::East,
+        };
+        g.set_mark(e, Some(Mark::new(MarkKind::Door))).unwrap();
+        g.set_mark(
+            EdgeKey {
+                cell: CellKey::new(0, 0),
+                edge: Edge::North,
+            },
+            Some(Mark::new(MarkKind::Window)),
+        )
+        .unwrap();
+        let s = serde_json::to_string(&g).unwrap();
+        assert!(s.contains(r#""marks":[{"#), "{s}");
+        let back: RoomGrid = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, g);
+        assert_eq!(
+            back.mark_between(CellKey::new(1, 0), Edge::West),
+            Some(Mark::new(MarkKind::Door))
+        );
     }
 }

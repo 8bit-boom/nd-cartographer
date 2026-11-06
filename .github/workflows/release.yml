@@ -1,0 +1,85 @@
+name: release
+
+# Push a tag like v0.1.0 to build the studio for Linux, Windows and macOS and
+# attach the archives (with SHA-256 sums) to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (for example v0.1.0-rc1; a hyphen makes it a pre-release)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            name: linux-x86_64
+            ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+            ext: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+            ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        run: cargo test --locked --release
+      - name: build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ndcart-server --bin ndcart
+      - name: package
+        shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          dir="ndcart-${TAG}-${{ matrix.name }}"
+          mkdir "$dir"
+          bin=ndcart; [ "${{ matrix.ext }}" = zip ] && bin=ndcart.exe
+          cp "target/${{ matrix.target }}/release/$bin" "$dir/"
+          cp README.md LICENSE "$dir/"
+          cp -r docs "$dir/docs"
+          if [ "${{ matrix.ext }}" = zip ]; then 7z a "$dir.zip" "$dir" >/dev/null; else tar czf "$dir.tar.gz" "$dir"; fi
+          if command -v sha256sum >/dev/null; then sha256sum "$dir.${{ matrix.ext }}" > "$dir.${{ matrix.ext }}.sha256"; else shasum -a 256 "$dir.${{ matrix.ext }}" > "$dir.${{ matrix.ext }}.sha256"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ndcart-${{ matrix.name }}
+          path: |
+            ndcart-*.tar.gz
+            ndcart-*.zip
+            ndcart-*.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          pre=""; case "$TAG" in *-*) pre="--prerelease" ;; esac
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --target "$GITHUB_SHA" --generate-notes $pre

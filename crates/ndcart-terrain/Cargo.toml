@@ -1,0 +1,11 @@
+[package]
+name = "ndcart-terrain"
+description = "Terrain shading and generation for nd-cartographer (pure, deterministic)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ndcart-core = { path = "../ndcart-core" }
+ndcart-paint = { path = "../ndcart-paint" }

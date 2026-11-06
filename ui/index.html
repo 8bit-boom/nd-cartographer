@@ -9,17 +9,329 @@
 <body>
 <header id="topbar">
   <strong id="doc-name">nd-cartographer</strong>
+  <select id="doc-select" title="Switch project" aria-label="Project"></select>
+  <button id="btn-preview" title="Player view: what the table sees from one spot (double-click the map to move the viewer)" aria-pressed="false">👁 Player view</button>
+  <button id="btn-spec" title="Describe a map as rooms and how they connect, preview the layout, accept or reject it">✨ From a spec…</button>
+  <span id="searchwrap"><input id="search-box" type="search" placeholder="Search all maps…" aria-label="Search all maps" autocomplete="off"><ul id="search-results" role="listbox" hidden></ul></span>
+  <button id="btn-style" title="The look of this project: a few words and a room palette, used by AI drafts and generators">🎨 Style…</button>
+  <button id="btn-art" title="Make pictures with nd-world's AI: a map underlay, a tiling material, or a set of props">🖼 Make art…</button>
+  <button id="btn-pack" title="Add a Dungeondraft pack (.dungeondraft_pack): its objects become props, its terrain textures become materials">📦 Import pack…</button>
+  <input id="pack-file" type="file" accept=".dungeondraft_pack,.pck" hidden>
+  <button id="btn-settings" title="Is everything set up? Folder, picture formats, fonts, AI and nd-world">⚙ Settings</button>
+  <button id="btn-ask" title="Ask a question about everything written in your maps (needs an AI)">❓ Ask</button>
+  <a id="btn-pack-out" href="/api/packs/export?name=My%20art" download title="Download your own props and materials as a pack">⬇ My art pack</a>
+  <button id="btn-gallery" title="All projects as thumbnails">🗂 Projects</button>
+  <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
+  <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
+  <input type="file" id="file-open" accept=".dd2vtt,.uvtt,.df2vtt,application/json" hidden>
   <span id="doc-meta" class="dim"></span>
   <span class="spacer"></span>
   <div class="tools">
     <button id="tool-pan" class="tool active" title="Pan (drag / middle mouse)">✋ Pan</button>
-    <button id="tool-paint" class="tool" title="Paint cells (drag)">🖌 Paint</button>
+    <span id="terrain-tools" hidden>
+      <button id="tool-raise" class="tool" title="Raise land (H)">⛰ Raise</button>
+      <button id="tool-lower" class="tool" title="Lower land / dig sea (L)">🌊 Lower</button>
+      <button id="tool-smooth" class="tool" title="Smooth (M)">〰 Smooth</button>
+      <button id="tool-flatten" class="tool" title="Flatten to the height under the first point (G)">▬ Flatten</button>
+      <button id="tool-roughen" class="tool" title="Roughen (X)">⛏ Roughen</button>
+      <button id="tool-river" class="tool" title="River: click points, Enter to finish, Esc to cancel (I)">〰 River</button>
+      <button id="tool-marker" class="tool" title="Marker: click to place a point of interest (K)">📍 Marker</button>
+      <button id="tool-region" class="tool" title="Region: click corners, Enter to finish (O is outline; use the button)">🟥 Region</button>
+      <button id="tool-route" class="tool" title="Route: click points, Enter to finish (U)">🛤 Route</button>
+    </span>
+    <button id="tool-paint" class="tool battle-only" title="Paint cells (drag)">🖌 Paint</button>
+    <button id="tool-brush" class="tool" title="Brush: freehand material (R). Pen pressure and tilt shape the line">🖍 Brush</button>
+    <button id="tool-erase" class="tool" title="Eraser: reveals the room layer beneath (E)">🧽 Erase</button>
+    <button id="tool-biome" class="tool" title="Biome: outline an area and fill it with trees, rocks or scrub">🌲 Biome</button>
+    <button id="tool-prefab" class="tool" title="Prefabs: pick one from the Outline panel, then click the map to place it">🧩 Prefab</button>
+    <button id="tool-stairs" class="tool" title="Stairs: place a way to another floor (double-click one with the pan tool to follow it)">🪜 Stairs</button>
+    <button id="tool-label" class="tool" title="Label: click to place text (T)">🔤 Label</button>
+    <button id="tool-pathlabel" class="tool" title="Text along a path: click points, Enter to finish (Y)">〰 Text on path</button>
+    <button id="tool-stamp" class="tool" title="Stamp: place a prop (S). , and . rotate, F flips">📦 Stamp</button>
+    <button id="tool-door" class="tool battle-only" title="Door on a cell edge (click an edge again to remove)">🚪 Door</button>
+    <button id="tool-window" class="tool battle-only" title="Window on a cell edge">🪟 Window</button>
     <span id="palette"></span>
     <button id="btn-undo" title="Undo (Ctrl+Z)">↩ Undo</button>
+    <button id="btn-outline" title="Outline (O)">☰ Outline</button>
+    <button id="btn-problems" title="Problems (P)">⚠ Problems</button>
+    <span id="exports" class="dim">
+      <label title="Secret doors become plain walls, GM-only notes are dropped"><input type="checkbox" id="exp-player"> players' copy</label>
+      Export:
+      <a id="exp-png" download>PNG</a>
+      <a id="exp-webp" download>WebP</a>
+      <a id="exp-avif" download>AVIF</a>
+      <a id="exp-uvtt" download>UVTT</a>
+    <a id="exp-foundry" title="Foundry VTT scene data (v11/v12): walls, doors, lights. Export the picture as WebP at 100 px a square and upload it to Foundry" target="_blank" rel="noopener">Foundry</a>
+    <a id="exp-pdf" title="Print at true scale: one inch per square, cut into pages" target="_blank" rel="noopener">PDF</a>
+    </span>
+    <button id="btn-help" title="Keyboard help (F1)">?</button>
   </div>
 </header>
-<main><canvas id="canvas"></canvas>
+<div id="floorbar" role="tablist" aria-label="Floors">
+  <span id="floor-tabs"></span>
+  <button id="fl-add" title="Add an empty floor">＋ Floor</button>
+  <button id="fl-gen" title="Generate a dungeon, cave, building, ship deck or city district onto this floor">🎲 Generate…</button>
+  <button id="fl-dup" title="Duplicate this floor (placed right after it)">⧉ Copy</button>
+  <button id="fl-rename" title="Rename this floor">✎ Rename</button>
+  <button id="fl-left" title="Move this floor earlier">◀</button>
+  <button id="fl-right" title="Move this floor later">▶</button>
+  <button id="fl-remove" title="Remove this floor (undoable)">🗑 Remove</button>
+  <button id="fl-undo" title="Undo the last floor change (add / rename / move / remove)">↩ Floors</button>
+  <label class="dim" title="Show the floor below faintly underneath, so stairs line up"><input type="checkbox" id="fl-onion"> onion skin</label>
+</div>
+<main>
+  <nav id="outliner" aria-label="Map outline">
+    <h3>Outline</h3>
+    <div id="bulkbar" aria-label="Bulk edit selected rooms">
+      <select id="sel-by" aria-label="Select rooms by"><option value="">Select by…</option></select>
+      <button id="sel-none" title="Clear the selection">Clear</button>
+      <span id="sel-count" class="dim" aria-live="polite">0 selected</span>
+      <button id="bk-zone" title="Group the selected rooms into a zone">Zone</button>
+      <button id="bk-color" title="Give the selected rooms one colour">Colour</button>
+      <button id="bk-kind" title="Change what the selected rooms are">Kind</button>
+      <button id="bk-prefix" title="Add text before every selected room's name">Prefix</button>
+      <button id="bk-refine" title="Ask the AI to revise the floor, keeping the selected rooms exactly (result is a new floor to preview)">Refine…</button>
+      <button id="bk-link" title="Tie the one selected room to a thing in your nd-world (a location, an NPC…)">Link…</button>
+      <button id="bk-furnish" title="Put props in the selected rooms, chosen from what each room is">Furnish</button>
+      <button id="bk-delete" title="Delete the selected rooms (undoable)">Delete</button>
+    </div>
+    <ul id="tree" role="tree" aria-label="Rooms, lights and notes"></ul>
+    <details id="ppanel">
+      <summary>Prefabs</summary>
+      <button id="pf-save" title="Copy the selected rooms into the library, shared by every project">Save selection…</button>
+      <ul id="pf-list" aria-label="Prefab library"></ul>
+      <p class="dim">Pick one, then click the map to place it. R turns it.</p>
+    </details>
+    <details id="cpanel">
+      <summary>Checkpoints</summary>
+      <button id="cp-save" title="Save the whole map as it is now, under a name">Save checkpoint…</button>
+      <ul id="cp-list" aria-label="Saved checkpoints"></ul>
+    </details>
+    <p class="dim hint">↑↓ move · ←→ fold · Enter go to · Ctrl/Shift+click selects rooms · F2 rename · Del remove</p>
+  </nav>
+  <div id="stage"><canvas id="canvas"></canvas>
+  <div id="terrainbar" hidden>
+    <div class="row">
+      <label>Radius <input type="range" id="tr-radius" min="0.5" max="24" step="0.5" value="4"><output id="tr-radius-o">4</output></label>
+      <label>Strength <input type="range" id="tr-strength" min="0.05" max="1" step="0.05" value="0.3"></label>
+      <label>River width <input type="range" id="tr-rwidth" min="0.4" max="4" step="0.1" value="1.2"></label>
+      <span class="dim" id="tr-hint"></span>
+    </div>
+    <details>
+      <summary>Look &amp; grading</summary>
+      <div class="row">
+        <label>Sea level <input type="range" id="ts-sea" min="2000" max="45000" step="500"></label>
+        <label>Relief <input type="range" id="ts-hill" min="0" max="2" step="0.1"></label>
+        <label>Contours <input type="range" id="ts-contour" min="0" max="6000" step="250"></label>
+        <label>Tint <input type="color" id="ts-tint" value="#ffffff"> <input type="range" id="ts-tint-amt" min="0" max="1" step="0.05"></label>
+        <label>Saturation <input type="range" id="ts-sat" min="0" max="2" step="0.05"></label>
+        <label>Contrast <input type="range" id="ts-con" min="0.4" max="1.8" step="0.05"></label>
+        <label>Brightness <input type="range" id="ts-bri" min="0.5" max="1.6" step="0.05"></label>
+        <button id="ts-regen" title="Generate a new world over this one (undoable)">🎲 Regenerate…</button>
+      </div>
+    </details>
+  </div>
+  <dialog id="art-dialog">
+    <h3>Make art</h3>
+    <p id="art-ai" class="dim" role="status"></p>
+    <div class="row">
+      <label>Make <select id="art-kind">
+        <option value="material">a material (tiling texture)</option>
+        <option value="prop">props (cut out, one per picture)</option>
+        <option value="underlay">a map underlay (one picture)</option>
+      </select></label>
+      <label>How many <input type="number" id="art-count" min="1" max="4" value="3" style="width:3.5em"></label>
+      <label>Size <select id="art-size"><option>512</option><option>768</option><option>1024</option></select> px</label>
+    </div>
+    <input id="art-prompt" type="text" maxlength="1000" placeholder="mossy flagstones, hand-painted" aria-label="Describe the picture" style="width:100%;box-sizing:border-box">
+    <div class="row">
+      <button id="art-go" type="button" class="primary">Generate</button>
+      <button id="art-cancel" type="button" hidden>Cancel</button>
+      <span id="art-msg" class="dim" role="status"></span>
+    </div>
+    <div id="art-results" class="art-grid"></div>
+    <p class="dim">Nothing is kept until you press a button under a picture. Kept pictures remember their prompt and seed.</p>
+    <menu><button id="art-close" type="button">Close</button></menu>
+  </dialog>
+  <dialog id="spec-dialog">
+    <h3>Map from a spec</h3>
+    <div class="row" role="radiogroup" aria-label="What to make">
+      <label><input type="radio" name="spec-mode" value="battle" checked> Battle map (rooms)</label>
+      <label><input type="radio" name="spec-mode" value="world"> World map (land, biomes, places)</label>
+    </div>
+    <p class="dim">Rooms and how they connect, as JSON (an AI can write this for you). Nothing changes until you accept.</p>
+    <div class="row">
+      <input id="spec-prompt" type="text" maxlength="2000" placeholder="Describe a map: abandoned metro station, 3 levels, flooded bottom" aria-label="Describe the map" style="flex:1;min-width:240px">
+      <button id="spec-draft" type="button" title="Ask nd-world's AI for a spec (needs the studio to be configured for nd-world)">✨ Draft with AI</button>
+    </div>
+    <p id="spec-ai" class="dim" role="status"></p>
+    <label class="dim"><input type="checkbox" id="spec-lore"> use the place names already in my world (nd-world only)</label>
+    <textarea id="spec-text" rows="12" spellcheck="false" aria-label="MapSpec JSON"></textarea>
+    <div class="row">
+      <button id="spec-example" type="button">Insert an example</button>
+      <button id="spec-go" type="button" class="primary">Preview layout</button>
+      <span id="spec-msg" class="dim" role="status"></span>
+    </div>
+    <div id="spec-result" hidden>
+      <div id="spec-floors"></div>
+      <div class="row" id="spec-talk">
+        <input id="spec-change" type="text" maxlength="1000" placeholder="Change this layout: make the hall bigger, add a kitchen…" aria-label="Ask for a change" style="flex:1;min-width:240px">
+        <button id="spec-change-go" type="button" title="Ask the AI to revise the first floor shown, keeping its other rooms">Revise</button>
+      </div>
+      <div class="row">
+        <button id="spec-accept" type="button" class="primary">Accept (adds the floors)</button>
+        <button id="spec-again" type="button">Another layout</button>
+        <button id="spec-reject" type="button">Reject</button>
+      </div>
+    </div>
+    <menu><button id="spec-close" type="button">Close</button></menu>
+  </dialog>
+  <dialog id="settings-dialog">
+    <h3>Settings and health</h3>
+    <ul id="settings-list" class="checks" aria-live="polite"></ul>
+    <p class="dim">AI and nd-world are set in the environment the studio starts in (never typed here); see the README. The same checks run with <code>ndcart doctor</code>.</p>
+    <menu><button id="settings-close" type="button">Close</button></menu>
+  </dialog>
+  <dialog id="ask-dialog">
+    <h3>Ask your maps</h3>
+    <p class="dim">Answers come only from what is written in your projects: room names, notes, markers, zones, regions.</p>
+    <input id="ask-q" type="text" maxlength="1000" placeholder="Which map has the smugglers' ledger?" aria-label="Your question" style="width:100%;box-sizing:border-box">
+    <div class="row"><button id="ask-go" type="button" class="primary">Ask</button><span id="ask-msg" class="dim" role="status"></span></div>
+    <p id="ask-answer" style="white-space:pre-wrap"></p>
+    <menu><button id="ask-close" type="button">Close</button></menu>
+  </dialog>
+  <dialog id="gallery-dialog">
+    <h3>Projects</h3>
+    <div id="gallery-grid" role="list"></div>
+    <menu><button id="gallery-close" type="button">Close</button></menu>
+  </dialog>
+  <dialog id="gen-dialog">
+    <form method="dialog" id="gen-form">
+      <h3>Generate onto this floor</h3>
+      <label>Kind <select id="gn-kind">
+        <option value="dungeon">Dungeon (rooms, corridors, doors)</option>
+        <option value="cave">Cave</option>
+        <option value="building">Building (hall with rooms)</option>
+        <option value="deck">Ship deck (tapered hull)</option>
+        <option value="district">City district (streets and shops)</option>
+      </select></label>
+      <label>Width <input type="number" id="gn-w" min="16" max="120" value="64"> squares</label>
+      <label>Height <input type="number" id="gn-h" min="16" max="120" value="48"> squares</label>
+      <label>Seed <input type="number" id="gn-seed" min="0" max="4294967295" value="1"> <button type="button" id="gn-dice" title="Random seed">🎲</button></label>
+      <p class="dim">Adds to what is already on the floor. The same seed always gives the same map. Ctrl+Z takes it back in one step.</p>
+      <menu>
+        <button value="cancel" type="button" id="gn-cancel">Cancel</button>
+        <button value="ok" id="gn-ok" class="primary">Generate</button>
+      </menu>
+    </form>
+  </dialog>
+  <dialog id="new-dialog">
+    <form method="dialog" id="new-form">
+      <h3>New project</h3>
+      <label>Name <input id="nd-name" value="Untitled map" maxlength="80"></label>
+      <fieldset>
+        <label><input type="radio" name="nd-kind" value="battle" checked> Battle map (rooms, doors, props)</label>
+        <label><input type="radio" name="nd-kind" value="region"> World map (generated terrain, rivers)</label>
+      </fieldset>
+      <div id="nd-battle">
+        <label>Start from <select id="nd-start">
+          <option value="">Blank</option>
+          <option value="dungeon">A generated dungeon</option>
+          <option value="cave">A generated cave</option>
+          <option value="building">A generated building</option>
+          <option value="deck">A generated ship deck</option>
+          <option value="district">A generated city district</option>
+        </select></label>
+      </div>
+      <div id="nd-world" hidden>
+        <label>Width <input type="number" id="nd-cols" min="16" max="512" value="160"> cells</label>
+        <label>Height <input type="number" id="nd-rows" min="16" max="512" value="110"> cells</label>
+        <label>Land <input type="range" id="nd-land" min="0.1" max="0.9" step="0.05" value="0.42"></label>
+        <label>Continent <input type="range" id="nd-cont" min="0" max="1" step="0.1" value="0.6"></label>
+        <label>Mountains <input type="range" id="nd-ridge" min="0" max="1" step="0.1" value="0.6"></label>
+        <label>Rivers <input type="number" id="nd-rivers" min="0" max="40" value="7"></label>
+        <label>Seed <input type="number" id="nd-seed" min="0" max="4294967295" value="1"> <button type="button" id="nd-dice" title="Random seed">🎲</button></label>
+      </div>
+      <menu>
+        <button value="cancel" type="button" id="nd-cancel">Cancel</button>
+        <button value="ok" id="nd-ok" class="primary">Create</button>
+      </menu>
+    </form>
+  </dialog>
+  <div id="viewtools">
+    <canvas id="minimap" width="180" height="120" title="Click or drag to move the view" aria-label="Minimap"></canvas>
+    <div class="row" title="A lattice over the map, for distances and hex crawls">
+      <select id="mg-kind" aria-label="Map grid"><option value="">No grid</option><option value="square">Square grid</option><option value="hex">Hex grid</option></select>
+      <label class="dim">size <input type="number" id="mg-size" min="0.5" max="200" step="0.5" value="6" style="width:4.5em"></label>
+    </div>
+    <div class="row">
+      <select id="bm-list" aria-label="Saved views"><option value="">Saved views…</option></select>
+      <button id="bm-save" title="Remember this view under a name">★ Save</button>
+      <button id="bm-del" title="Forget the selected saved view">✕</button>
+      <button id="view-copy" title="Copy what you see to the clipboard as a picture">📋 Copy view</button>
+    </div>
+  </div>
+  <div id="brushbar" hidden>
+    <label>Brush <select id="br-kind"><option value="round">Round</option><option value="scatter">Scatter</option></select></label>
+    <label>Size <input type="range" id="br-size" min="0.2" max="10" step="0.1" value="2"><output id="br-size-o">2</output></label>
+    <label>Opacity <input type="range" id="br-opacity" min="0.05" max="1" step="0.05" value="1"></label>
+    <label>Hardness <input type="range" id="br-hardness" min="0" max="1" step="0.05" value="0.8"></label>
+    <label>Rough edge <input type="range" id="br-rough" min="0" max="1" step="0.05" value="0.2"></label>
+    <label>Density <input type="range" id="br-density" min="0.05" max="1" step="0.05" value="0.6"></label>
+    <span class="dim">[ ] size</span>
+  </div>
+  <div id="symbar" class="battle-only" title="Mirror what you paint about axis lines">
+    <label><input type="checkbox" id="sym-v"> mirror left/right</label>
+    <label>at x <input type="number" id="sym-ax" value="20" step="1" style="width:4em"></label>
+    <label><input type="checkbox" id="sym-h"> mirror up/down</label>
+    <label>at y <input type="number" id="sym-ay" value="15" step="1" style="width:4em"></label>
+  </div>
+  <div id="biomebar" hidden>
+    <label>Biome <select id="bi-kind">
+      <option value="forest">Forest</option><option value="meadow">Meadow</option><option value="rocky">Rocky ground</option>
+      <option value="swamp">Swamp</option><option value="desert">Desert</option>
+    </select></label>
+    <label>Sparser <input type="range" id="bi-density" min="0.5" max="3" step="0.1" value="1"></label>
+    <span class="dim">click the corners · Enter finishes · Esc cancels</span>
+  </div>
+  <div id="previewbar" hidden>
+    <label>Sight <input type="range" id="pv-radius" min="2" max="40" step="1" value="12"><output id="pv-radius-o">12</output></label>
+    <label><input type="checkbox" id="pv-dark" checked> darkness (lamps needed)</label>
+    <button id="pv-share" type="button" aria-pressed="false" title="Show this view on the table screen (TV or tablet) and keep it in step">📺 Share to table</button>
+    <span id="pv-link" class="dim"></span>
+    <span class="dim">double-click the map to move the viewer · shows the players' copy only</span>
+  </div>
+  <div id="labelbar" hidden>
+    <label>Size <input type="range" id="lb-size" min="0.3" max="6" step="0.1" value="1"><output id="lb-size-o">1</output></label>
+    <label>Colour <input type="color" id="lb-color" value="#2a2018"></label>
+    <label><input type="checkbox" id="lb-bold"> bold</label>
+    <label><input type="checkbox" id="lb-halo" checked> halo</label>
+    <label>Spacing <input type="range" id="lb-track" min="0" max="0.6" step="0.05" value="0"></label>
+    <label>Turn <input type="range" id="lb-rot" min="-90" max="90" step="5" value="0"><output id="lb-rot-o">0°</output></label>
+    <label><input type="checkbox" id="lb-gm"> GM only</label>
+    <span class="dim" id="lb-hint"></span>
+  </div>
+  <div id="stampbar" hidden>
+    <input id="stamp-filter" type="search" placeholder="Find a prop (name or tag)" aria-label="Filter props" style="width:11em">
+    <span id="stamp-palette"></span>
+    <label>Scale <input type="range" id="st-scale" min="0.3" max="3" step="0.1" value="1"></label>
+    <label>Rotate <input type="range" id="st-rot" min="0" max="345" step="15" value="0"><output id="st-rot-o">0°</output></label>
+    <label><input type="checkbox" id="st-flip"> flip</label>
+    <label><input type="checkbox" id="st-shadow" checked> shadow</label>
+    <label><input type="checkbox" id="st-snap" checked> snap ½ cell</label>
+    <span class="dim">, . rotate · F flip</span>
+  </div>
+  <aside id="problems" hidden>
+    <h3>Problems <button id="problems-close" title="Close">×</button></h3>
+    <ul id="problem-list"></ul>
+  </aside>
+  <div id="help" hidden>
+    <h3>Keyboard</h3>
+    <table id="help-table"></table>
+    <p class="dim">Press F1 or Esc to close.</p>
+  </div>
   <div id="status" class="dim">loading…</div>
+  </div>
 </main>
 <script src="/app.js"></script>
 </body>

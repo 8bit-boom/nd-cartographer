@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Table view</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; color: #9aa4b2; font-family: system-ui, sans-serif; }
+  #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #map { max-width: 100vw; max-height: 100vh; object-fit: contain; image-rendering: auto; display: none; }
+  #msg { font-size: 1.4rem; text-align: center; padding: 2rem; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <img id="map" alt="The map as the players see it">
+  <div id="msg" role="status">Waiting for the GM…</div>
+</div>
+<script>
+'use strict';
+const DOC = '__DOC__';
+const img = document.getElementById('map');
+const msg = document.getElementById('msg');
+let shown = '';
+
+function urlFor(st) {
+  const q = new URLSearchParams({ floor: st.floor, x: st.x, y: st.y, radius: st.radius, darkness: st.darkness, ppc: 24 });
+  return `/api/docs/${DOC}/preview?${q}`;
+}
+
+async function tick() {
+  try {
+    const res = await fetch(`/api/docs/${DOC}/table`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(String(res.status));
+    const t = await res.json();
+    document.title = t.name ? `${t.name} - table view` : 'Table view';
+    if (!t.on) {
+      img.style.display = 'none'; msg.style.display = ''; msg.textContent = 'Waiting for the GM…'; shown = '';
+    } else {
+      // A new picture only when the GM moved, or the map changed (a door opened, a light lit).
+      const key = `${t.state.n}/${t.rev}`;
+      if (key !== shown) {
+        const next = new Image();
+        next.onload = () => { img.src = next.src; img.style.display = 'block'; msg.style.display = 'none'; shown = key; };
+        next.src = urlFor(t.state) + `&rev=${t.rev}`;
+      }
+    }
+  } catch {
+    msg.style.display = ''; msg.textContent = 'Lost touch with the studio; trying again…';
+  }
+}
+tick();
+setInterval(tick, 1500);
+</script>
+</body>
+</html>

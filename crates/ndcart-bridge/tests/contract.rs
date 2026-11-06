@@ -1,0 +1,838 @@
+//! Contract tests against a faked nd-world (plan §12: wiremock per route).
+//! They pin the request shapes read out of nd-world's own handlers.
+
+use ndcart_bridge::{Bridge, BridgeError, DirectChat, ImageRequest, PublishMap, PublishRegion};
+use ndcart_core::{Light, Wall, WallKind};
+use serde_json::json;
+use wiremock::matchers::{body_json, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+fn wall(i: usize) -> Wall {
+    Wall {
+        id: format!("w{i}"),
+        pts: vec![[0.0, i as f64], [10.0, i as f64]],
+        kind: WallKind::Wall,
+        state: None,
+    }
+}
+
+fn map() -> PublishMap {
+    PublishMap {
+        name: "Vault".into(),
+        canvas_w: 640,
+        canvas_h: 480,
+        cell_px: 32.0,
+        image: vec![1, 2, 3],
+        image_ext: "webp".into(),
+        walls: vec![wall(1)],
+        lights: vec![Light {
+            id: "l1".into(),
+            x: 64.0,
+            y: 64.0,
+            range: 6.0,
+            color: "#ffaa00".into(),
+            intensity: 0.8,
+            on: true,
+            label: None,
+        }],
+        rooms: Some(
+            json!({"cell": 32, "cols": 1, "rows": 1, "cells": [0, 1], "spaces": [], "marks": []}),
+        ),
+    }
+}
+
+async fn ok_json(server: &MockServer, p: &str, body: serde_json::Value) {
+    Mock::given(method("POST"))
+        .and(path(p))
+        .and(query_param("w", "neon"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn login_outcomes() {
+    let s = MockServer::start().await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/login"))
+        .and(body_json(json!({"email": "a@b.c", "password": "pw"})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"ok": true, "user": {"id": 1, "email": "a@b.c", "is_gm": true}}),
+            ),
+        )
+        .mount(&s)
+        .await;
+    b.login("a@b.c", "pw", None).await.unwrap();
+
+    let s = MockServer::start().await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/login"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(
+            json!({"ok": false, "requires_2fa": true, "detail": "Two-step code required."}),
+        ))
+        .mount(&s)
+        .await;
+    assert!(matches!(
+        b.login("a@b.c", "pw", None).await,
+        Err(BridgeError::TwoFactorRequired)
+    ));
+
+    let s = MockServer::start().await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/login"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_body_json(json!({"ok": false, "detail": "Incorrect email or password."})),
+        )
+        .mount(&s)
+        .await;
+    assert!(matches!(
+        b.login("a@b.c", "no", None).await,
+        Err(BridgeError::BadCredentials)
+    ));
+
+    let s = MockServer::start().await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    Mock::given(method("POST"))
+        .and(path("/api/login"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"ok": true, "user": {"id": 2, "is_gm": false}})),
+        )
+        .mount(&s)
+        .await;
+    assert!(matches!(
+        b.login("p@b.c", "pw", None).await,
+        Err(BridgeError::NotGm)
+    ));
+}
+
+#[tokio::test]
+async fn probe_tells_the_rust_only_image_from_hybrid() {
+    for (mode, free) in [("rust", true), ("hybrid", false), ("python", false)] {
+        let s = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"status": "ok", "build": "abc1234", "mode": mode})),
+            )
+            .mount(&s)
+            .await;
+        let p = Bridge::new(&s.uri(), None).unwrap().probe().await.unwrap();
+        assert_eq!(p.python_free, free, "{mode}");
+        assert_eq!(p.import_uvtt, !free, "{mode}: import-uvtt is Python-only");
+        assert!(p.per_part_publish);
+        assert_eq!(
+            p.read_back, !free,
+            "{mode}: walls.json/rooms.json are 501 on the Rust-only image"
+        );
+        assert_eq!(p.build, "abc1234");
+    }
+}
+
+#[tokio::test]
+async fn publish_runs_every_step_in_order_against_the_pinned_world() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/maps/schematic/new"))
+        .and(query_param("w", "neon"))
+        .respond_with(
+            ResponseTemplate::new(303).insert_header("location", "/maps/schematic/vault-2"),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
+    ok_json(&s, "/maps/schematic/vault-2/upload", json!({})).await;
+    Mock::given(method("POST")).and(path("/maps/schematic/vault-2/grid")).and(query_param("w", "neon"))
+        .and(body_json(json!({"grid_type": "square", "config": {"cell_size": 32.0, "offset_x": 0, "offset_y": 0, "unit_per_cell": 5, "unit_label": "ft"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1).mount(&s).await;
+    ok_json(
+        &s,
+        "/maps/schematic/vault-2/walls",
+        json!({"walls": [], "warnings": ["1 wall clipped"]}),
+    )
+    .await;
+    ok_json(
+        &s,
+        "/maps/schematic/vault-2/lights",
+        json!({"lights": [], "warnings": []}),
+    )
+    .await;
+    ok_json(
+        &s,
+        "/maps/schematic/vault-2/rooms",
+        json!({"rooms": {}, "warnings": []}),
+    )
+    .await;
+
+    let r = Bridge::new(&s.uri(), Some("neon"))
+        .unwrap()
+        .publish(&map(), None)
+        .await
+        .unwrap();
+    assert_eq!(r.slug, "vault-2");
+    assert!(r.created);
+    assert_eq!(
+        r.steps,
+        ["create", "picture", "grid", "walls", "lights", "rooms"]
+    );
+    assert_eq!(r.warnings, ["walls: 1 wall clipped"]);
+
+    // The walls body is nd-world's shape: {"walls":[{id, pts, kind}]}.
+    let reqs = s.received_requests().await.unwrap();
+    let walls_req = reqs
+        .iter()
+        .find(|q| q.url.path().ends_with("/walls"))
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&walls_req.body).unwrap();
+    assert_eq!(v["walls"][0]["kind"], "wall");
+    assert_eq!(v["walls"][0]["pts"], json!([[0.0, 1.0], [10.0, 1.0]]));
+    let up = reqs
+        .iter()
+        .find(|q| q.url.path().ends_with("/upload"))
+        .unwrap();
+    let ct = up.headers.get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.starts_with("multipart/form-data"), "{ct}");
+    let text = String::from_utf8_lossy(&up.body);
+    assert!(text.contains("filename=\"map.webp\"") && text.contains("image/webp"));
+}
+
+#[tokio::test]
+async fn republish_updates_in_place_without_creating() {
+    let s = MockServer::start().await;
+    for p in ["upload", "grid", "walls", "lights", "rooms"] {
+        Mock::given(method("POST"))
+            .and(path(format!("/maps/schematic/vault/{p}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&s)
+            .await;
+    }
+    let r = Bridge::new(&s.uri(), None)
+        .unwrap()
+        .publish(&map(), Some("vault"))
+        .await
+        .unwrap();
+    assert!(!r.created);
+    assert_eq!(r.steps, ["picture", "grid", "walls", "lights", "rooms"]);
+}
+
+#[tokio::test]
+async fn caps_are_refused_before_any_request() {
+    let s = MockServer::start().await; // no mocks: any request would 404 and be counted
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    let mut m = map();
+    m.walls = (0..5_001).map(wall).collect();
+    assert!(matches!(
+        b.publish(&m, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    let mut m = map();
+    m.lights = (0..61)
+        .map(|i| Light {
+            id: format!("l{i}"),
+            ..m.lights[0].clone()
+        })
+        .collect();
+    assert!(matches!(
+        b.publish(&m, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    let mut m = map();
+    m.canvas_w = 50;
+    assert!(matches!(
+        b.publish(&m, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    let mut m = map();
+    m.image_ext = "gif".into();
+    assert!(matches!(
+        b.publish(&m, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    assert!(s.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_failure_after_creation_reports_the_slug_to_retry() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/maps/schematic/new"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/maps/schematic/vault"))
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/maps/schematic/vault/upload"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/maps/schematic/vault/grid"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/maps/schematic/vault/walls"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({"detail": "walls must be a list"})),
+        )
+        .mount(&s)
+        .await;
+    match Bridge::new(&s.uri(), None)
+        .unwrap()
+        .publish(&map(), None)
+        .await
+    {
+        Err(BridgeError::Partial { slug, step, cause }) => {
+            assert_eq!((slug.as_str(), step), ("vault", "walls"));
+            assert!(
+                matches!(*cause, BridgeError::Rejected(m) if m.contains("walls must be a list"))
+            );
+        }
+        other => panic!("expected Partial, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn status_codes_map_to_plain_errors() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/maps/schematic/new"))
+        .respond_with(
+            ResponseTemplate::new(501)
+                .set_body_json(json!({"detail": "This request needs the Python app"})),
+        )
+        .mount(&s)
+        .await;
+    assert!(matches!(
+        Bridge::new(&s.uri(), None).unwrap().publish(&map(), None).await,
+        Err(BridgeError::NeedsPython(m)) if m.contains("Python")
+    ));
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/maps/schematic/new"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&s)
+        .await;
+    assert!(matches!(
+        Bridge::new(&s.uri(), None)
+            .unwrap()
+            .publish(&map(), None)
+            .await,
+        Err(BridgeError::AuthRequired)
+    ));
+    // Nothing listening at all.
+    let dead = Bridge::new("http://127.0.0.1:1", None).unwrap();
+    assert!(matches!(
+        dead.probe().await,
+        Err(BridgeError::Unreachable(_))
+    ));
+}
+
+fn region() -> PublishRegion {
+    PublishRegion {
+        name: "Archipelago".into(),
+        width_px: 1920,
+        height_px: 1280,
+        image: vec![9, 9, 9],
+        image_ext: "webp".into(),
+        markers: vec![
+            json!({"lat": 1000.0, "lng": 200.0, "label": "Port Neon", "note": "", "color": "#e8b030"}),
+        ],
+        regions: vec![
+            json!({"points": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]], "name": "Kingdom", "color": "#c0504d", "opacity": 0.3}),
+        ],
+        replace_overlay: true,
+    }
+}
+
+#[tokio::test]
+async fn publish_b_creates_an_image_map_then_sets_its_overlay() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/maps/new"))
+        .and(query_param("w", "neon"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/maps/archipelago"))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("POST")).and(path("/api/maps/archipelago/overlay")).and(query_param("w", "neon"))
+        .and(body_json(json!({
+            "custom_markers": [{"lat": 1000.0, "lng": 200.0, "label": "Port Neon", "note": "", "color": "#e8b030"}],
+            "custom_regions": [{"points": [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]], "name": "Kingdom", "color": "#c0504d", "opacity": 0.3}]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1).mount(&s).await;
+    let r = Bridge::new(&s.uri(), Some("neon"))
+        .unwrap()
+        .publish_region(&region(), None)
+        .await
+        .unwrap();
+    assert_eq!((r.slug.as_str(), r.created), ("archipelago", true));
+    assert_eq!(r.steps, ["create", "overlay"]);
+    // /maps/new is a multipart form with exactly the fields nd-world reads.
+    let reqs = s.received_requests().await.unwrap();
+    let new = reqs.iter().find(|q| q.url.path() == "/maps/new").unwrap();
+    let body = String::from_utf8_lossy(&new.body);
+    for needle in [
+        "name=\"name\"",
+        "Archipelago",
+        "name=\"width\"",
+        "1920",
+        "name=\"height\"",
+        "1280",
+        "name=\"image_file\"",
+        "filename=\"map.webp\"",
+        "image/webp",
+    ] {
+        assert!(
+            body.contains(needle),
+            "missing {needle:?} in the create form"
+        );
+    }
+}
+
+#[tokio::test]
+async fn publish_b_republish_swaps_the_picture_and_can_leave_the_overlay_alone() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/maps/atlas/upload"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/maps/atlas"))
+        .expect(2)
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/maps/atlas/overlay"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    let r = b.publish_region(&region(), Some("atlas")).await.unwrap();
+    assert_eq!(
+        (r.created, r.steps.clone()),
+        (false, vec!["picture", "overlay"])
+    );
+    // Keeping the overlay: hand-made markers in nd-world survive, nothing is sent for it.
+    let mut keep = region();
+    keep.replace_overlay = false;
+    let r = b.publish_region(&keep, Some("atlas")).await.unwrap();
+    assert_eq!(r.steps, ["picture"]);
+}
+
+#[tokio::test]
+async fn publish_b_refuses_over_cap_before_any_request_and_reports_a_partial_failure() {
+    let s = MockServer::start().await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    let mut big = region();
+    big.markers = (0..501)
+        .map(|i| json!({"lat": 0, "lng": i, "label": "x"}))
+        .collect();
+    assert!(matches!(
+        b.publish_region(&big, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    let mut small = region();
+    small.width_px = 20;
+    assert!(matches!(
+        b.publish_region(&small, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    let mut odd = region();
+    odd.image_ext = "bmp".into();
+    assert!(matches!(
+        b.publish_region(&odd, None).await,
+        Err(BridgeError::Precheck(_))
+    ));
+    assert!(s.received_requests().await.unwrap().is_empty());
+    // The map is made but the overlay is refused: the slug comes back to retry.
+    Mock::given(method("POST"))
+        .and(path("/maps/new"))
+        .respond_with(ResponseTemplate::new(303).insert_header("location", "/maps/atlas"))
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/maps/atlas/overlay"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_json(json!({"detail": "Too many markers/regions"})),
+        )
+        .mount(&s)
+        .await;
+    match b.publish_region(&region(), None).await {
+        Err(BridgeError::Partial { slug, step, .. }) => {
+            assert_eq!((slug.as_str(), step), ("atlas", "overlay"))
+        }
+        other => panic!("expected Partial, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn chat_sends_one_user_turn_and_returns_the_result_text() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/ai/chat"))
+        .and(query_param("w", "neon"))
+        .and(body_json(json!({
+            "messages": [{"role": "user", "content": "a crypt"}],
+            "system": "be strict", "model": "", "options": {},
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"result": "{\"name\":\"x\"}"})),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    assert_eq!(
+        b.chat("be strict", "a crypt", None).await.unwrap(),
+        "{\"name\":\"x\"}"
+    );
+}
+
+#[tokio::test]
+async fn chat_failures_are_told_apart() {
+    for (status, body, want) in [
+        (401, json!({"detail": "no"}), "not logged in"),
+        (500, json!({"detail": "boom"}), "refused"),
+        (
+            200,
+            json!({"result": "[AI error: model not loaded]"}),
+            "refused",
+        ),
+        (
+            200,
+            json!({"result": "[AI unavailable: connection refused]"}),
+            "refused",
+        ),
+        (
+            200,
+            json!({"result": "[empty response from the model]"}),
+            "refused",
+        ),
+        (200, json!({"nope": 1}), "no result"),
+    ] {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ai/chat"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&s)
+            .await;
+        let b = Bridge::new(&s.uri(), None).unwrap();
+        let e = b.chat("s", "u", Some("m")).await.unwrap_err().to_string();
+        assert!(e.contains(want), "{status}: {e}");
+    }
+}
+
+#[tokio::test]
+async fn location_names_keeps_only_locations() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/entities/picker"))
+        .and(query_param("w", "neon"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"entities": [
+                {"id": 1, "name": "Port Neon", "kind": "location", "folder": ""},
+                {"id": 2, "name": "Mara", "kind": "character", "folder": ""},
+                {"id": 3, "name": "The Drowned Abbey", "kind": "location", "folder": "ruins"},
+            ]})),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    assert_eq!(
+        b.location_names().await.unwrap(),
+        ["Port Neon", "The Drowned Abbey"]
+    );
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/entities/picker"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    assert!(b
+        .location_names()
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not logged in"));
+}
+
+#[tokio::test]
+async fn direct_chat_speaks_the_openai_shape_and_never_overlaps_two_requests() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(wiremock::matchers::header("authorization", "Bearer sk-test"))
+        .and(body_json(json!({
+            "model": "llama3", "stream": false,
+            "messages": [{"role": "system", "content": "be strict"}, {"role": "user", "content": "a crypt"}],
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"choices": [{"message": {"role": "assistant", "content": "{\"ok\":1}"}}]})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let d = DirectChat::new(
+        &format!("{}/v1/", s.uri()),
+        "llama3",
+        Some("sk-test".into()),
+    )
+    .unwrap();
+    assert_eq!(d.chat("be strict", "a crypt").await.unwrap(), "{\"ok\":1}");
+    assert!(d.describe().contains("llama3"));
+    // Bad settings are refused before any request.
+    assert!(DirectChat::new("ftp://x", "m", None).is_err());
+    assert!(DirectChat::new("http://x", " ", None).is_err());
+}
+
+#[tokio::test]
+async fn direct_chat_failures_are_told_apart() {
+    for (status, body, want) in [
+        (401, json!({}), "not logged in"),
+        (404, json!({"error": "model not found"}), "refused"),
+        (200, json!({"choices": []}), "no choices"),
+        (
+            200,
+            json!({"choices": [{"message": {"content": "  "}}]}),
+            "empty reply",
+        ),
+    ] {
+        let s = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&s)
+            .await;
+        let d = DirectChat::new(&s.uri(), "m", None).unwrap();
+        let e = d.chat("s", "u").await.unwrap_err().to_string();
+        assert!(e.contains(want), "{status}: {e}");
+    }
+    // A server that is not there at all.
+    let d = DirectChat::new("http://127.0.0.1:9", "m", None).unwrap();
+    assert!(d
+        .chat("s", "u")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("cannot reach"));
+}
+
+fn image_req() -> ImageRequest {
+    ImageRequest {
+        prompt: "weathered flagstones, top down".into(),
+        negative: String::new(),
+        width: 512,
+        height: 512,
+        steps: 20,
+        seed: 7,
+        init_image: None,
+        init_strength: 0.6,
+        upscale: None,
+    }
+}
+
+#[tokio::test]
+async fn imagegen_job_lifecycle_start_poll_fetch() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/ai/imagegen/jobs"))
+        .and(query_param("w", "neon"))
+        .and(body_json(json!({"prompt": "weathered flagstones, top down", "negative": "", "width": 512, "height": 512, "steps": 20, "seed": 7})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"job_id": 41})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/ai/imagegen/jobs/41"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 41, "status": "done", "error": null, "urls": ["/uploads/ai-images/a.png"]})))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/uploads/ai-images/a.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1u8, 2, 3]))
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    let id = b.imagegen_start(&image_req()).await.unwrap();
+    assert_eq!(id, 41);
+    let job = b.imagegen_status(id).await.unwrap();
+    assert_eq!(
+        (job.status.as_str(), job.urls.len(), job.error),
+        ("done", 1, None)
+    );
+    assert_eq!(b.fetch_image(&job.urls[0]).await.unwrap(), vec![1, 2, 3]);
+    // Only same-server paths are fetched.
+    for bad in [
+        "http://evil.example/x.png",
+        "//evil.example/x.png",
+        "/uploads/../etc/passwd",
+        "uploads/a.png",
+    ] {
+        assert!(
+            b.fetch_image(bad)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected image address"),
+            "{bad}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn imagegen_init_image_and_failures() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/ai/imagegen/jobs"))
+        .and(body_json(json!({"prompt": "weathered flagstones, top down", "negative": "", "width": 512, "height": 512, "steps": 20, "seed": 7, "init_image": "/uploads/ai-images/seed.png", "init_strength": 0.6})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"job_id": 5})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), None).unwrap();
+    let mut r = image_req();
+    r.init_image = Some("/uploads/ai-images/seed.png".into());
+    assert_eq!(b.imagegen_start(&r).await.unwrap(), 5);
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&s)
+        .await;
+    assert!(Bridge::new(&s.uri(), None)
+        .unwrap()
+        .imagegen_start(&image_req())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not logged in"));
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/ai/imagegen/jobs/9"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"status": "error", "error": "no GPU", "urls": []})),
+        )
+        .mount(&s)
+        .await;
+    let job = Bridge::new(&s.uri(), None)
+        .unwrap()
+        .imagegen_status(9)
+        .await
+        .unwrap();
+    assert_eq!(
+        (job.status.as_str(), job.error.as_deref()),
+        ("error", Some("no GPU"))
+    );
+}
+
+#[tokio::test]
+async fn a_published_map_is_read_back_from_its_three_routes() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/maps/schematic/vault/walls.json")).and(query_param("w", "neon"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "walls": [{"id": "w1", "pts": [[0.0, 0.0], [64.0, 0.0]], "kind": "wall"}, {"id": "w2", "pts": [[64.0, 0.0], [64.0, 32.0]], "kind": "door", "state": "closed"}],
+            "fog": {}, "lights": [{"id": "l1", "x": 32.0, "y": 32.0, "range": 4.0, "color": "#ffaa00", "intensity": 0.8, "on": true}],
+        }))).expect(1).mount(&s).await;
+    Mock::given(method("GET"))
+        .and(path("/maps/schematic/vault/rooms.json"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"cell": 32, "cols": 2, "rows": 1})),
+        )
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/uploads/schematics/vault.webp"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&s)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/uploads/schematics/vault.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![9u8, 9, 9]))
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    let p = b.fetch_published("vault").await.unwrap();
+    assert_eq!(
+        (
+            p.walls.len(),
+            p.lights.len(),
+            p.cell_px,
+            p.image_ext.as_str(),
+            p.image.len()
+        ),
+        (2, 1, Some(32.0), "png", 3)
+    );
+    assert!(b
+        .fetch_published("../etc")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("lowercase"));
+    // The Rust-only image has no walls.json: it says what it needs.
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/maps/schematic/vault/walls.json"))
+        .respond_with(ResponseTemplate::new(501))
+        .mount(&s)
+        .await;
+    assert!(Bridge::new(&s.uri(), None)
+        .unwrap()
+        .fetch_published("vault")
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("cannot do that"));
+}
+
+#[tokio::test]
+async fn upscaling_is_sent_only_when_asked_for() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/api/ai/imagegen/jobs"))
+        .and(body_json(json!({"prompt": "weathered flagstones, top down", "negative": "", "width": 512, "height": 512, "steps": 20, "seed": 7, "upscale_model": "4x-ultrasharp", "upscale_factor": 2.0})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"job_id": 8}))).expect(1).mount(&s).await;
+    let mut r = image_req();
+    r.upscale = Some(("4x-ultrasharp".into(), 2.0));
+    assert_eq!(
+        Bridge::new(&s.uri(), None)
+            .unwrap()
+            .imagegen_start(&r)
+            .await
+            .unwrap(),
+        8
+    );
+}
+
+#[tokio::test]
+async fn every_entity_is_listed_with_its_id_and_kind() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/entities/picker"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"entities": [
+                {"id": 1, "name": "Port Neon", "kind": "location", "folder": ""},
+                {"id": 2, "name": "Mara", "kind": "character", "folder": ""},
+                {"name": "broken row"},
+            ]})),
+        )
+        .mount(&s)
+        .await;
+    let all = Bridge::new(&s.uri(), None)
+        .unwrap()
+        .entities()
+        .await
+        .unwrap();
+    assert_eq!(
+        all,
+        vec![
+            (1, "Port Neon".to_string(), "location".to_string()),
+            (2, "Mara".to_string(), "character".to_string())
+        ]
+    );
+}

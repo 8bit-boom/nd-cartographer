@@ -1,7 +1,9 @@
 # nd-cartographer — a standalone TTRPG map creator & editor, with deep nd-world integration
 
-**Status: PLAN ONLY. Nothing has been created, coded, or committed. This document is the
-complete design; execution starts only on an explicit go.**
+**Status (2026-11-05, revised): M0 and M1 are complete, M2 is mostly built — see
+[ARCHITECTURE.md](ARCHITECTURE.md) for what exists and §20 below for the done/remaining
+table. This document is the design; §19 records the review pass that revised the milestone
+order and corrected nd-world facts.**
 
 Plan for a Rust desktop + Docker application that is a **full map creator in its own
 right** — battle-map painting in the Dungeondraft class, world/region map-making in the
@@ -963,7 +965,7 @@ filters — painting here is constructive: materials, stamps, heightmaps); isome
 rendering in 1.x; i18n in 1.x; Inkarnate import (no open format); any runtime play
 feature beyond the table remote — nd-world owns the table.
 
-## 18. Execution checklist (for the go-ahead — NOT done)
+## 18. Execution checklist (original; progress noted)
 
 1. Create the sibling repo `nd-cartographer` (private first), with this plan adapted
    into its `README.md` + `docs/ARCHITECTURE.md`; MIT `LICENSE`; CI skeletons from §11.
@@ -982,6 +984,118 @@ feature beyond the table remote — nd-world owns the table.
 7. Seed the new repo's issue tracker from §17: the P1 items are already in the
    milestone table above; every P2 item becomes a labeled backlog issue so nothing
    in the round-two pass is lost.
+
+---
+
+## 19. Review pass (2026-11-05) — corrections and re-ordering
+
+Found by re-reading this plan against the M0 code and the current nd-world tree.
+These supersede the text above where they conflict.
+
+**Corrected nd-world facts**
+1. **The Rust-only nd-world image does not serve `POST /maps/schematic/import-uvtt`**
+   (Python only; the gateway has walls/lights/rooms in `edits.rs`). Publish A must
+   probe `/health` (`ND_MODE`, `ND_PYTHON_FREE`) and the routes it needs, and fall back
+   to the per-part path (create map → background upload → `/walls` → `/lights` →
+   `/rooms` → `/grid`) — or port `import-uvtt` to the gateway as Tier-1 work. Every
+   other route in §9.2 must be checked against the gateway the same way.
+2. `import-uvtt` **refuses a file with no picture**, so a full-map render is a
+   prerequisite of publish A, not a later export feature.
+3. nd-world's limits are the studio's limits: light range ≤ 60 squares (the core
+   allowed 200), 5,000 lines / 20,000 points per UVTT import, every UVTT portal
+   imports as a door (windows are not distinguished). The linter flags all of these.
+4. Cite routes by name, not by `file:line` (they drift); §18.4's re-verification is
+   mandatory before publish work starts.
+
+**Re-ordered milestones**
+- **M1 splits.** *M1a — structure & publish* (rooms, marks, walls-from-rooms, full-map
+  PNG export, UVTT in/out, publish A against a local nd-world, linter v1) comes first
+  because §18.6 says the publish path is the product. *M1b — painting* (brushes,
+  materials with blending, stamps + shadows, starter pack) follows once publishing is
+  proven.
+- **Hex battle maps are out of v1**: walls-from-rooms, nd-world's room grid and UVTT
+  are square-only. Hex stays a region-map overlay (M2).
+- **Tauri shell moves to M5** with the installers; browser mode covers everything
+  until then. M0's remaining items (WebGL viewport, WS change feed, bench budgets in
+  CI, the 100k-object and kill -9 tests) are tracked in ARCHITECTURE.md.
+
+**More verified nd-world facts (read from the handlers, then confirmed live)**
+- `POST /maps/schematic/{slug}/grid` takes `{"grid_type": "square", "config":
+  {cell_size, offset_x, offset_y, unit_per_cell, unit_label}}`, not the flat body
+  §9.2 shows. `POST /maps/schematic/new` is a form post answering `303` with the
+  slug in `Location` (it also needs a 100..20,000 px canvas).
+- The Rust-only gateway *does* serve `/new`, `/upload`, `/embed-image`, `/grid`,
+  `/walls`, `/lights`, `/rooms`, `/elements` (`edits.rs`); only `import-uvtt` is
+  Python-only. Publish A therefore uses the per-part routes on every image.
+- Background upload accepts WebP and AVIF as well as PNG/JPEG, so a publish can
+  send the smaller formats.
+- nd-world's room state is not a pass-through: space ids are integers 1..9999,
+  kinds come from a fixed list, cells are run-length coded, and an edge mark names
+  the cell whose top (`h`) or left (`v`) edge it is.
+
+**Verified live on both images** (a real nd-world in Python mode, and the Rust-only
+`nd-gateway` built from the current tree with `ND_PYTHON_FREE=1`, no Python behind it,
+on throwaway data): create → picture → grid → walls → lights → rooms, then an in-place
+re-publish with an AVIF background, succeed on both and read back correctly on Python.
+**One gap on the Rust-only image:** `GET /maps/schematic/{slug}/walls.json` and
+`rooms.json` answer `501`; only `view.json` is served. So §9.2's "reopen a published
+map" works against Python/hybrid but not Rust-only. Publishing is unaffected (the
+studio keeps its own document); the probe reports `read_back`. Closing it is a Tier-1
+nd-world change (port those two GETs to the gateway) — noted, not done.
+
+**Order change (owner go-ahead):** split exports → outliner → materials/starter pack →
+brush engine. The starter pack moved *behind* the material system it is made of, so
+M1b opened with `ndcart-paint` (materials, procedural patterns, edge blending) and the
+first-party procedural pack; the brush engine followed: strokes as journal ops with pressure/tilt, round and
+scatter brushes, an eraser that reveals the room layer, all deterministic and
+tile-identical (see ARCHITECTURE). Stamps with drop shadows remain.
+
+**Resolved:** wall ids are now stable (derived from the edge), so a re-publish keeps nd-world's runtime door state for any door that has not moved.
+
+**Publish B facts (read from the handlers, then confirmed live on both images):**
+- `POST /maps/new` is a multipart form (`name`, `width`, `height`, `image_file`) that answers
+  `303 /maps/{slug}`. It **silently ignores a picture whose extension is not allowed** and makes
+  a map with no image, so the bridge refuses unsupported types before the first request.
+  `POST /maps/{slug}/upload` swaps the picture in place (WebP and AVIF are accepted).
+- **The plan was wrong that the importer "merges" overlays**: `map_overlay` *appends*
+  (`markers.extend`), so re-publishing through it would duplicate every marker. Overlays are
+  therefore set with the replace route `POST /api/maps/{slug}/overlay`
+  (`{custom_markers, custom_regions}`, ≤ 500 each), which both images serve. There is no JSON
+  read route (the viewer inlines the overlay into the page), so a replace discards markers added
+  by hand in nd-world; `ndcart publish --keep-overlay` skips it on a re-publish.
+- Coordinates are Leaflet `CRS.Simple` over `[[0,0],[height,width]]`: `lat` counts up from the
+  bottom of the picture (`lat = height_px - y_px`), `lng` is `x_px`. Regions are
+  `{points:[[lat,lng],…], name, color, opacity}`. nd-world has **no route overlay**, so routes
+  appear in the baked picture only.
+
+**Image formats** — exports support PNG, WebP and AVIF (owner request). UVTT pictures
+stay PNG/WebP (the consumers can't read AVIF). Lossy WebP for cap-fitting is a
+follow-up (needs libwebp); until then cap-fitting uses AVIF for plain exports and
+downscaling for publish.
+
+**Hardening pulled forward (done in M0+)**
+- Token gate when listening off loopback (§11.2) — implemented.
+- Crash-safe saves (temp file + fsync + rename) — implemented.
+- Doc/plan drift: the code uses `manifest.json`, PNG tiles at `{x}_{y}`, port 8300;
+  the plan's `manifest.toml` / `.webp` / port 8000 are the eventual `.ndmap` shape.
+
+---
+
+## 20. Where the work stands
+
+| Milestone | State | Built | Still to do |
+|---|---|---|---|
+| **M0 skeleton** | done except three items | document model, append-only linear-history journal, sparse room grid, walls-from-rooms (stable ids), tile baker, browser viewport, token gate, atomic saves, Docker, `bench` | WebGL viewport (Canvas2D today), WebSocket change feed, the 100k-object/60 fps and kill -9 acceptance tests; Tauri shell is parked for M5 |
+| **M1 battle-map studio** | **done** | materials + edge blending, brush engine (round/scatter, pressure/tilt, eraser), stamps with shadows, doors/windows, linter v1, outliner v1, split exports, UVTT in/out, publish A (verified on the Python app and the Rust-only gateway), first-party starter pack, PNG/WebP/AVIF | lossy WebP (needs libwebp), pattern-stamp brushes and fill/line/rect variants |
+| **M2 overland studio** | **done** | heightmap terrain (sparse chunks, brush + river carving, exact undo), shading with global grading, seeded world generator, markers/regions/routes, **typography with text along paths and collision handling**, publish B (verified on both images), world-map UI, **square/hex map grid** (`set_map_grid`; square lines tile-exact, hex edges within one anti-alias sample of the full render at tile borders), **spline roads and rivers** (routes carry `smooth`, a Catmull-Rom curve through the clicked points, same maths on every platform; rivers are smoothed before they are carved; a curve may differ from the full render by a few anti-aliased edge pixels at tile borders) | none left in the M2 scope; **mass scatter and biomes** are a jittered-grid scatter (`POST /scatter`, one undo step, seeded) and five biome presets (forest, meadow, rocky, swamp, desert: tinted region + props) via the Biome tool. Not done: scatter does not read terrain height or slope (it fills the outlined area only) |
+| **M3 structure & scale** | done | — | **done:** multi-floor (floor id per journal entry, structure history, floor bar, onion skin), per-floor publish (`--all-floors`), stairs links, symmetry painting, zones, multi-select + select-by with bulk colour/kind/prefix/delete (one undo step), named checkpoints, battle-map generators (dungeon, cave, building, ship deck, city district), linter extras, batch publish (`--all-docs`, report; no rollback because nd-world has no map-delete route), prefab library + cross-project paste, projects gallery, start-from-generator wizard, minimap, saved views (browser-local), copy view as image, live refresh when the project changes elsewhere. **not done / honest limits:** symmetry mirrors rooms, doors/windows, props and freehand brush strokes; prefabs do not carry props/strokes; bulk ops have no move/resize; no history browser beyond checkpoints; the §6 performance budgets are not re-measured at city scale; the 200-overlay district publish was not run live |
+| **M4 play & AI** | done, with limits | — | **Done:** player-visibility preview; publish gate; **MapSpec** (room graph → deterministic layout) and **WorldSpec** (land, rivers, biome masks on dry ground, places, regions) with validation messages written for an AI; **proposal workflow** for both (preview, accept, reject, another layout); **AI clients** (`ndcart draft`, ✨ dialog): nd-world's `/api/ai/chat` queue *or* a standalone OpenAI-compatible model (`ND_CARTO_LLM_*`, one request at a time, banner shows which), strict-JSON prompts with two repair rounds; **refine selection** (floor → spec, pinned rooms must come back unchanged; the result is a new floor to preview); **furnishing** by room name/kind (never in a doorway); **house style** (tone in prompts, palette on generated rooms); **lore-grounded names** (nd-world location entities fed into drafts); **ask-your-maps** (keyword search across every project); **imagegen client** (background jobs through nd-world's queue, sequential variants with a shared seed family, cancel, same-server fetch only); **AI/imported art → paintable material** (wrap-around seamless blend, tile-exact in the baker) **and → placeable prop** (chroma-key cut-out, feather, despill, trim, drop shadow, tile-exact) with provenance (prompt, seed, date) kept, GM-confirmed tags with AI suggestions, underlay placement. **Verified live:** the nd-world calls up to its "[AI unavailable … Ollama]" answer; the whole image pipeline (login cookie, job, polling, fetch, cut-out, palette, render) and the standalone model path against local fakes that speak the real routes' shapes. **Not verified:** any real model's or imagegen backend's output quality. **Not done:** height/normal maps from textures, natural-language Q&A over maps (search is keyword) |
+| **M5 ecosystem & 1.0** | partly done | — | **Done:** `ndcart doctor`; **PDF print at true scale** (one inch a square, paged, corner ticks; verified with poppler); **art-pack import** (Dungeondraft `.pck` v1 archives and folders → props and materials, provenance kept; read from archives built to the Godot 3 format, not yet tried on a range of real packs); **table screen** (`/table/<project>`, follows the GM's player view, read-only); docs set (`README`, `MAP_SPEC`, `PACK`, `AI_CARTOGRAPHER_GUIDE`); a tag-triggered **release workflow** (Linux musl, Windows, macOS binaries + checksums; written, never run); the Dockerfile fixed (it lacked the terrain crate) and the musl release build verified natively. **Not done (stated plainly):** schematic/diagram mode and publish C (a second, vector editor plus nd-world's element schema, which I could not verify), height/normal maps from textures (nothing would use them yet), Wonderdraft-specific import (its folders import like any folder), tinting of materials, desktop installers (no Tauri shell; the release workflow builds plain archives), the WebSocket change feed and a WebGL viewport (the viewport is Canvas2D over baked tiles with 3 s polling), journal compaction (the journal keeps every edit's inverse, so it grows), the first tagged release (the tag push needs your go-ahead), and a real Docker image build (no daemon here). **Never verified against the real thing:** a real LLM's or imagegen backend's output, Foundry VTT, Dungeondraft packs in the wild, Windows and macOS builds. **Perf pass:** measured, not just budgeted (see ARCHITECTURE.md): a 115 MP WebP export in 7.5 s, a 12 MB project reopens in 0.19 s; file exports now allowed up to 120 MP and baked off the async threads |
+
+Known costs worth knowing before M3: `save_doc` rewrites the whole journal on every op (a
+terrain-heavy document grows MBs of undo snapshots; the append-only segment format planned for
+`.ndmap` fixes it); prepared strokes are rebuilt per tile; underlays are bilinear without
+mip-maps. The Docker image has not been built since the AVIF/TLS/terrain crates were added.
 
 ---
 

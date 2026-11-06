@@ -11,7 +11,6 @@
 
 use crate::error::CoreResult;
 use crate::grid::{Edge, MarkKind, MarkState, RoomGrid};
-use crate::ids::new_id;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -209,12 +208,50 @@ fn emit(walls: &mut Vec<Wall>, seg: Seg, horizontal: bool, s: f64) {
             [seg.line as f64 * s, seg.to as f64 * s],
         ]
     };
+    // Stable ids: derived from where the run starts and what it is, so a
+    // re-derivation (and so a re-publish) gives the same id and nd-world keeps
+    // the runtime state of a door the table has opened. Doors never merge with
+    // their neighbours, so a door's id only changes if the door itself moves.
+    let kind = match seg.kind {
+        WallKind::Wall => "w",
+        WallKind::Door => "d",
+        WallKind::Window => "n",
+        WallKind::Secret => "s",
+    };
     walls.push(Wall {
-        id: new_id("w"),
+        id: format!(
+            "{}{}{}_{}_{}",
+            if horizontal { "h" } else { "v" },
+            kind,
+            seg.line,
+            seg.from,
+            seg.to - seg.from
+        ),
         pts,
         kind: seg.kind,
         state: seg.state,
     });
+}
+
+/// Every wall on a floor, in lattice pixels at `cell_size`: the walls derived
+/// from rooms, then the imported ones (cells -> pixels). This is the one place
+/// the two sources meet, so exports, publishing and the linter all agree.
+/// Imported ids are `iw<index>`, stable for an unchanged import.
+pub fn floor_walls(floor: &crate::doc::FloorDoc, cell_size: f64) -> CoreResult<Vec<Wall>> {
+    let mut walls = walls_from_grid(&floor.grid, cell_size)?;
+    for (i, w) in floor.imported_walls.iter().enumerate() {
+        walls.push(Wall {
+            id: format!("iw{i}"),
+            pts: w
+                .pts
+                .iter()
+                .map(|p| [f64::from(p[0]) * cell_size, f64::from(p[1]) * cell_size])
+                .collect(),
+            kind: w.kind,
+            state: w.state,
+        });
+    }
+    Ok(walls)
 }
 
 /// A helper for the linter: how far over nd-world's publish cap a
@@ -242,7 +279,7 @@ pub fn tally(walls: &[Wall]) -> BTreeMap<&'static str, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::{EdgeKey, Space, SpaceKind};
+    use crate::grid::{EdgeKey, Mark, Space, SpaceKind};
     use crate::CellKey;
 
     fn grid_with(cells: &[(i32, i32)], space: &str) -> RoomGrid {
@@ -252,6 +289,7 @@ mod tests {
             name: space.to_string(),
             color: "#112233".into(),
             kind: SpaceKind::Room,
+            material: None,
         })
         .unwrap();
         let keys: Vec<_> = cells.iter().map(|(x, y)| CellKey::new(*x, *y)).collect();
@@ -284,6 +322,7 @@ mod tests {
             name: "b".into(),
             color: "#445566".into(),
             kind: SpaceKind::Room,
+            material: None,
         })
         .unwrap();
         g.paint(&[CellKey::new(1, 0)], Some("b")).unwrap();
@@ -388,5 +427,74 @@ mod tests {
         let west = walls.iter().find(|w| w.pts[0][0] == 0.0).unwrap();
         assert_eq!(west.kind, WallKind::Secret);
         assert_eq!(west.state, Some(WallState::Closed));
+    }
+
+    #[test]
+    fn wall_ids_are_stable_and_a_doors_id_survives_unrelated_edits() {
+        let mut g = RoomGrid::default();
+        g.upsert_space(Space {
+            id: "a".into(),
+            name: "A".into(),
+            color: "#112233".into(),
+            kind: SpaceKind::Room,
+            material: None,
+        })
+        .unwrap();
+        let cells: Vec<CellKey> = (0..4)
+            .flat_map(|x| (0..3).map(move |y| CellKey::new(x, y)))
+            .collect();
+        g.paint(&cells, Some("a")).unwrap();
+        g.set_mark(
+            EdgeKey {
+                cell: CellKey::new(1, 0),
+                edge: Edge::North,
+            },
+            Some(Mark::new(MarkKind::Door)),
+        )
+        .unwrap();
+        let ids = |g: &RoomGrid| -> Vec<String> {
+            let mut v: Vec<String> = walls_from_grid(g, 32.0)
+                .unwrap()
+                .into_iter()
+                .map(|w| w.id)
+                .collect();
+            v.sort();
+            v
+        };
+        let a = ids(&g);
+        assert_eq!(a, ids(&g), "two derivations agree");
+        let mut set = a.clone();
+        set.dedup();
+        assert_eq!(set.len(), a.len(), "ids are unique");
+        let door = |g: &RoomGrid| {
+            walls_from_grid(g, 32.0)
+                .unwrap()
+                .into_iter()
+                .find(|w| w.kind == WallKind::Door)
+                .unwrap()
+                .id
+        };
+        let before = door(&g);
+        // Paint a far-away room: the door's id must not change.
+        g.paint(&[CellKey::new(20, 20)], Some("a")).unwrap();
+        assert_eq!(door(&g), before);
+        // Move the door: its id changes.
+        g.set_mark(
+            EdgeKey {
+                cell: CellKey::new(1, 0),
+                edge: Edge::North,
+            },
+            None,
+        )
+        .unwrap();
+        g.set_mark(
+            EdgeKey {
+                cell: CellKey::new(2, 0),
+                edge: Edge::North,
+            },
+            Some(Mark::new(MarkKind::Door)),
+        )
+        .unwrap();
+        assert_ne!(door(&g), before);
     }
 }
