@@ -39,6 +39,116 @@ const statusEl = document.getElementById('status');
 const docName = document.getElementById('doc-name');
 const docMeta = document.getElementById('doc-meta');
 
+// ---------- WebGL tile layer ----------
+// Tiles draw through WebGL2 when it is available (one textured quad per
+// tile, one buffer per frame); the 2D canvas sits ABOVE it, transparent,
+// and keeps every overlay (strokes, terrain, drafts, previews). Without
+// WebGL2 the old 2D path draws the tiles itself — nothing else changes.
+const glCanvas = document.getElementById('gl');
+let gl = null, glProg = null, glBuf = null;
+let glFrame = [];            // tiles collected during one render pass
+const glLocs = {};
+function initGL() {
+  try {
+    gl = glCanvas.getContext('webgl2', { antialias: false, alpha: false });
+    if (!gl) return;
+    const vs = `#version 300 es
+in vec2 a_pos; in vec2 a_uv;
+uniform vec2 u_res;
+out vec2 v_uv;
+void main() {
+  vec2 clip = vec2(a_pos.x / u_res.x * 2.0 - 1.0, 1.0 - a_pos.y / u_res.y * 2.0);
+  gl_Position = vec4(clip, 0.0, 1.0);
+  v_uv = a_uv;
+}`;
+    const fs = `#version 300 es
+precision mediump float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 o;
+void main() { o = texture(u_tex, v_uv); }`;
+    const shader = (type, src) => {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+      return s;
+    };
+    glProg = gl.createProgram();
+    gl.attachShader(glProg, shader(gl.VERTEX_SHADER, vs));
+    gl.attachShader(glProg, shader(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(glProg);
+    if (!gl.getProgramParameter(glProg, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(glProg));
+    glBuf = gl.createBuffer();
+    glLocs.pos = gl.getAttribLocation(glProg, 'a_pos');
+    glLocs.uv = gl.getAttribLocation(glProg, 'a_uv');
+    glLocs.res = gl.getUniformLocation(glProg, 'u_res');
+    gl.useProgram(glProg);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    document.body.classList.add('gl');   // the 2D canvas goes transparent
+  } catch (e) {
+    console.warn('WebGL2 unavailable, using the 2D tile path:', e);
+    gl = null;
+  }
+}
+function sizeGL() {
+  if (!gl) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.floor(glCanvas.clientWidth * dpr));
+  const h = Math.max(1, Math.floor(glCanvas.clientHeight * dpr));
+  if (glCanvas.width !== w || glCanvas.height !== h) {
+    glCanvas.width = w;
+    glCanvas.height = h;
+  }
+  gl.viewport(0, 0, w, h);
+}
+function glTexture(img) {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
+}
+function flushGL() {
+  if (!gl || glFrame.length === 0) { glFrame = []; return; }
+  sizeGL();
+  gl.clearColor(0x14 / 255, 0x16 / 255, 0x1a / 255, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  const dpr = window.devicePixelRatio || 1;
+  gl.useProgram(glProg);
+  gl.uniform2f(glLocs.res, glCanvas.width, glCanvas.height);
+  gl.bindBuffer(gl.ARRAY_BUFFER, glBuf);
+  gl.enableVertexAttribArray(glLocs.pos);
+  gl.enableVertexAttribArray(glLocs.uv);
+  const verts = new Float32Array(6 * 4);
+  for (const { sx, sy, tex } of glFrame) {
+    // One quad (two triangles); uv y runs top-down to match the upload.
+    verts.set([
+      sx * dpr, sy * dpr, 0, 0, (sx + TILE) * dpr, sy * dpr, 1, 0,
+      sx * dpr, (sy + TILE) * dpr, 0, 1, (sx + TILE) * dpr, sy * dpr, 1, 0,
+      (sx + TILE) * dpr, (sy + TILE) * dpr, 1, 1, sx * dpr, (sy + TILE) * dpr, 0, 1,
+    ]);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
+    gl.vertexAttribPointer(glLocs.pos, 2, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribPointer(glLocs.uv, 2, gl.FLOAT, false, 16, 8);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+  glFrame = [];
+}
+let glRaf = 0;
+function scheduleGL() {
+  if (glRaf) return;
+  glRaf = requestAnimationFrame(() => { glRaf = 0; render(); });
+}
+initGL();
+
 // ---------- API ----------
 
 async function api(method, url, body) {
@@ -280,6 +390,7 @@ function resizeCanvas() {
   canvas.width = Math.floor(canvas.clientWidth * dpr);
   canvas.height = Math.floor(canvas.clientHeight * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  sizeGL();
   render();
 }
 
@@ -287,8 +398,10 @@ function render() {
   if (!state.doc) return;
   const w = canvas.clientWidth, h = canvas.clientHeight;
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#14161a';
-  ctx.fillRect(0, 0, w, h);
+  if (!gl) {
+    ctx.fillStyle = '#14161a';
+    ctx.fillRect(0, 0, w, h);
+  }
 
   const scale = 2 ** state.z;
   const [wx0, wy0] = screenToWorld(0, 0);
@@ -307,6 +420,7 @@ function render() {
       pending.push(drawTile(url, sx, sy));
     }
   }
+  flushGL();
   drawStrokePreview();
   drawLiveStroke();
   drawTerrainOverlay();
@@ -315,8 +429,15 @@ function render() {
   drawMinimap();
 }
 
-const tileCache = new Map(); // url -> Image
+const tileCache = new Map(); // url -> Image (2D path) or {tex} (WebGL path)
+// GL textures must be freed when the cache is invalidated; keep every
+// existing `tileCache.clear()` call site working through this override.
+tileCache.clear = function () {
+  if (gl) for (const t of tileCache.values()) if (t && t.tex) gl.deleteTexture(t.tex);
+  Map.prototype.clear.call(tileCache);
+};
 function drawTile(url, sx, sy) {
+  if (gl) return drawTileGL(url, sx, sy);
   return new Promise((resolve) => {
     let img = tileCache.get(url);
     if (!img) {
@@ -335,6 +456,40 @@ function drawTile(url, sx, sy) {
     }
   });
 }
+
+function drawTileGL(url, sx, sy) {
+  return new Promise((resolve) => {
+    let rec = tileCache.get(url);
+    if (!rec) {
+      if (tileCache.size > 600) tileCache.clear();
+      rec = { tex: null };
+      tileCache.set(url, rec);
+      // One decode per URL even if several render passes ask for it.
+      rec.p = new Promise((done) => {
+        const img = new Image();
+        img.onload = () => {
+          if (!gl || tileCache.get(url) !== rec) { done(); return; }  // evicted or GL lost
+          rec.tex = glTexture(img);
+          scheduleGL();                // late tiles appear next frame
+          done();
+        };
+        img.onerror = () => done();
+        img.src = url;
+      });
+    }
+    rec.p.then(() => {
+      if (rec.tex) glFrame.push({ sx, sy, tex: rec.tex });
+      resolve();
+    });
+  });
+}
+glCanvas.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  gl = null;
+  document.body.classList.remove('gl');
+  tileCache.clear();
+  render();                            // the 2D path takes over
+});
 
 function drawStrokePreview() {
   if (!state.painting) return;

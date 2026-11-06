@@ -39,10 +39,16 @@ button.tool.active { background: var(--accent); color: #06131a; border-color: va
 #palette .swatch.active { border-color: #fff; }
 main { position: relative; flex: 1; overflow: hidden; display: flex; }
 #stage { position: relative; flex: 1; overflow: hidden; min-width: 0; }
+canvas#gl {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+  pointer-events: none;
+}
 canvas#canvas {
   width: 100%; height: 100%; display: block;
   cursor: grab; background: var(--bg);
 }
+/* With WebGL2 the tiles render on #gl; #canvas is the transparent overlay. */
+body.gl canvas#canvas { background: transparent; }
 canvas#canvas.painting { cursor: crosshair; }
 canvas#canvas.panning { cursor: grabbing; }
 #status {
