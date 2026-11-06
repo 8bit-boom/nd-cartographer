@@ -68,6 +68,32 @@ fn neighbor(c: CellKey, e: Edge) -> CellKey {
     }
 }
 
+/// Marker links into other maps (the atlas chain): where a marker opens a
+/// map slug that no document in this studio has published (yet) — usually a
+/// typo, or the child map is still unpublished.
+pub fn lint_marker_links(
+    floor: &FloorDoc,
+    published_slugs: &std::collections::BTreeSet<String>,
+) -> Vec<Problem> {
+    let mut out = Vec::new();
+    for m in &floor.markers {
+        let Some(link) = &m.link_schematic else {
+            continue;
+        };
+        let name = if m.label.is_empty() { &m.id } else { &m.label };
+        if !published_slugs.contains(link) {
+            out.push(problem(
+                Severity::Warning,
+                "marker_link_unpublished",
+                format!(
+                    "'{name}' opens '{link}', which no map in this studio has published (publish it, or fix the slug)."
+                ),
+            ));
+        }
+    }
+    out
+}
+
 /// Stairs, ladders and lifts across the floors of one document: where a link
 /// points nowhere (a floor was removed) or nothing leads back.
 pub fn lint_links(floor: &FloorDoc, floors: &[FloorDoc]) -> Vec<Problem> {
@@ -111,6 +137,20 @@ pub fn lint_links(floor: &FloorDoc, floors: &[FloorDoc]) -> Vec<Problem> {
 pub fn lint(floor: &FloorDoc, cell_size: f64) -> Vec<Problem> {
     let grid = &floor.grid;
     let mut out = Vec::new();
+
+    // An encounter whose room is gone (the room was removed after it was set).
+    for e in &floor.encounters {
+        if !grid.spaces.contains_key(&e.space) {
+            out.push(problem(
+                Severity::Warning,
+                "encounter_in_missing_room",
+                format!(
+                    "An encounter ({} creature lines) sits in a room that no longer exists.",
+                    e.creatures.len()
+                ),
+            ));
+        }
+    }
 
     // "Empty" means nothing at all: a map opened from a picture has no rooms
     // but is not empty.
@@ -755,6 +795,31 @@ mod tests {
         })
         .unwrap();
         assert_eq!(codes(&lint(&f, 32.0)), ["light_in_void"]);
+    }
+
+    #[test]
+    fn marker_links_to_unpublished_maps_are_flagged() {
+        let mut f = FloorDoc::new("f".into(), "World".into());
+        f.markers.push(crate::overlay::Marker {
+            id: "mk1".into(),
+            x: 3.0,
+            y: 4.0,
+            label: "The Keep".into(),
+            note: String::new(),
+            color: "#e8b030".into(),
+            link_schematic: Some("the-keep".into()),
+            links_to: None,
+        });
+        let published: std::collections::BTreeSet<String> =
+            ["harbour".to_string()].into_iter().collect();
+        let codes = |ps: Vec<Problem>| ps.into_iter().map(|p| p.code).collect::<Vec<_>>();
+        assert_eq!(
+            codes(crate::lint::lint_marker_links(&f, &published)),
+            ["marker_link_unpublished"]
+        );
+        let published: std::collections::BTreeSet<String> =
+            ["the-keep".to_string()].into_iter().collect();
+        assert!(crate::lint::lint_marker_links(&f, &published).is_empty());
     }
 
     #[test]

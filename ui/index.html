@@ -9,6 +9,7 @@
 <body>
 <header id="topbar">
   <strong id="doc-name">nd-cartographer</strong>
+  <button id="nav-back" hidden title="Back to the map you came from (the atlas chain)">← </button>
   <select id="doc-select" title="Switch project" aria-label="Project"></select>
   <button id="btn-preview" title="Player view: what the table sees from one spot (double-click the map to move the viewer)" aria-pressed="false">👁 Player view</button>
   <button id="btn-spec" title="Describe a map as rooms and how they connect, preview the layout, accept or reject it">✨ From a spec…</button>
@@ -38,6 +39,7 @@
       <button id="tool-marker" class="tool" title="Marker: click to place a point of interest (K)">📍 Marker</button>
       <button id="tool-region" class="tool" title="Region: click corners, Enter to finish (O is outline; use the button)">🟥 Region</button>
       <button id="tool-route" class="tool" title="Route: click points, Enter to finish (U)">🛤 Route</button>
+      <button id="btn-atlas" title="Point markers at other maps: the atlas chain">🗺 Atlas links…</button>
     </span>
     <button id="tool-paint" class="tool battle-only" title="Paint cells (drag)">🖌 Paint</button>
     <button id="tool-brush" class="tool" title="Brush: freehand material (R). Pen pressure and tilt shape the line">🖍 Brush</button>
@@ -92,6 +94,7 @@
       <button id="bk-prefix" title="Add text before every selected room's name">Prefix</button>
       <button id="bk-refine" title="Ask the AI to revise the floor, keeping the selected rooms exactly (result is a new floor to preview)">Refine…</button>
       <button id="bk-link" title="Tie the one selected room to a thing in your nd-world (a location, an NPC…)">Link…</button>
+      <button id="bk-encounter" title="Who waits in the one selected room? Stays studio-side (GM information — never published)">⚔ Encounter</button>
       <button id="bk-furnish" title="Put props in the selected rooms, chosen from what each room is">Furnish</button>
       <button id="bk-delete" title="Delete the selected rooms (undoable)">Delete</button>
     </div>
@@ -223,6 +226,29 @@
         <button value="cancel" type="button" id="gn-cancel">Cancel</button>
         <button value="ok" id="gn-ok" class="primary">Generate</button>
       </menu>
+    </form>
+  </dialog>
+  <dialog id="atlas-dialog">
+    <form method="dialog" id="atlas-form">
+      <h3>Atlas links</h3>
+      <p class="dim hint">Point a marker at another map in this studio: after both are
+        published, clicking the marker in nd-world opens that map, and the
+        marker links show in the Problems panel until the target is published.</p>
+      <label>Marker
+        <select id="at-marker"></select>
+      </label>
+      <label>Opens
+        <select id="at-target"></select>
+      </label>
+      <label>…or an nd-world map slug
+        <input id="at-slug" placeholder="leave empty to use the map above" maxlength="120">
+      </label>
+      <menu>
+        <button value="cancel" type="button" id="at-close">Close</button>
+        <button value="clear" type="button" id="at-clear">Remove link</button>
+        <button value="ok" id="at-ok" class="primary">Save link</button>
+      </menu>
+      <ul id="at-list" class="hint"></ul>
     </form>
   </dialog>
   <dialog id="new-dialog">

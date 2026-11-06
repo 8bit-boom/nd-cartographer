@@ -102,6 +102,8 @@ struct FloorView {
     routes: Vec<ndcart_core::Route>,
     zones: Vec<ndcart_core::Zone>,
     entity_links: Vec<ndcart_core::doc::EntityLink>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    encounters: Vec<ndcart_core::doc::Encounter>,
     #[serde(skip_serializing_if = "Option::is_none")]
     map_grid: Option<ndcart_core::MapGrid>,
 }
@@ -149,6 +151,7 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         routes: floor.routes.clone(),
         zones: floor.zones.clone(),
         entity_links: floor.entity_links.clone(),
+        encounters: floor.encounters.clone(),
         map_grid: floor.map_grid.clone(),
     }
 }
@@ -198,6 +201,10 @@ struct DocSummary {
     kind: &'static str,
     rev: u64,
     floors: Vec<String>,
+    /// The nd-world slug of the last publish, so markers can link to it and
+    /// the UI can tell published maps from drafts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slug: Option<String>,
 }
 
 async fn list_docs(State(app): State<App>) -> Json<serde_json::Value> {
@@ -211,6 +218,7 @@ async fn list_docs(State(app): State<App>) -> Json<serde_json::Value> {
             kind: d.manifest.kind.as_str(),
             rev: d.rev,
             floors: d.floors.iter().map(|f| f.name.clone()).collect(),
+            slug: d.manifest.nd_world.as_ref().map(|l| l.slug.clone()),
         })
         .collect();
     Json(serde_json::json!({ "docs": docs }))
@@ -1812,6 +1820,20 @@ async fn lint_doc(
         .ok_or_else(|| CoreError::NotFound("floor".into()))?;
     let mut problems = ndcart_core::lint(floor, doc.manifest.cell_size);
     problems.extend(ndcart_core::lint::lint_links(floor, &doc.floors));
+    // The atlas chain: markers that open other maps. A link is healthy when
+    // some document in this studio was published under that slug (its own
+    // slug or one of its per-floor slugs).
+    let published: std::collections::BTreeSet<String> = store
+        .docs
+        .values()
+        .filter_map(|d| d.manifest.nd_world.as_ref())
+        .flat_map(|l| {
+            let mut v: Vec<String> = l.floor_slugs.values().cloned().collect();
+            v.push(l.slug.clone());
+            v
+        })
+        .collect();
+    problems.extend(ndcart_core::lint::lint_marker_links(floor, &published));
     Ok(Json(serde_json::json!({
         "floor": floor.id,
         "blocks_publish": ndcart_core::blocks_publish(&problems),

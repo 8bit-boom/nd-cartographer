@@ -266,6 +266,143 @@ document.getElementById('fl-undo').onclick = async () => {
 };
 document.getElementById('fl-onion').onchange = (e) => { state.onion = e.target.checked; tileCache.clear(); render(); };
 
+
+// ---------- atlas links (markers that open other maps) ----------
+
+// Where a marker navigation came from, so "←" can go back up the chain.
+state.nav = [];
+
+async function atlasDocs() {
+  const { docs } = await api('GET', '/api/docs');
+  return docs;
+}
+
+/// Follow a marker's link: into a sibling document when the slug belongs to
+/// one of this studio's maps, otherwise to the map in nd-world itself.
+async function openLink(slug) {
+  const docs = await atlasDocs();
+  // Published maps are linked by their nd-world slug; unpublished ones by
+  // their studio id (the linter flags those until they are published).
+  const hit = docs.find((d) => d.slug === slug || d.id === slug);
+  if (hit && hit.id !== state.docId) {
+    state.nav.push({ docId: state.docId, name: state.doc.manifest.name });
+    await openDoc(hit.id);
+    statusEl.textContent = `Opened '${hit.name}' from the atlas chain`;
+    return;
+  }
+  const server = state.doc.manifest.nd_world?.server;
+  if (server) {
+    window.open(`${server.replace(/\/$/, '')}/maps/${encodeURIComponent(slug)}`, '_blank', 'noopener');
+  } else {
+    statusEl.textContent = `'${slug}' is not a project here, and no nd-world server is set for this map`;
+  }
+}
+
+function updateNavBack() {
+  const b = document.getElementById('nav-back');
+  const top = state.nav[state.nav.length - 1];
+  b.hidden = !top;
+  if (top) b.textContent = `← ${top.name}`;
+}
+
+document.getElementById('nav-back').onclick = async () => {
+  const prev = state.nav.pop();
+  if (!prev) return;
+  await openDoc(prev.docId);
+  updateNavBack();
+};
+
+// The atlas dialog: set or clear a marker's link.
+const atlasDialog = document.getElementById('atlas-dialog');
+let atlasMarkerId = null;
+
+async function openAtlasDialog(markerId) {
+  atlasMarkerId = markerId || null;
+  const [docs, floor] = [await atlasDocs(), curFloor()];
+  const markers = floor.markers || [];
+  if (!markers.length) {
+    statusEl.textContent = 'Place a marker first (world maps: the 📍 tool)';
+    return;
+  }
+  const mSel = document.getElementById('at-marker');
+  mSel.textContent = '';
+  for (const m of markers) {
+    const o = document.createElement('option');
+    o.value = m.id;
+    o.textContent = m.label || m.id;
+    if (m.id === atlasMarkerId) o.selected = true;
+    mSel.appendChild(o);
+  }
+  const tSel = document.getElementById('at-target');
+  tSel.textContent = '';
+  const none = document.createElement('option');
+  none.value = '';
+  none.textContent = '— no link —';
+  tSel.appendChild(none);
+  for (const d of docs) {
+    if (d.id === state.docId) continue;
+    const o = document.createElement('option');
+    o.value = d.id;
+    o.textContent = d.slug ? `${d.name} (published as ${d.slug})` : `${d.name} (not published yet)`;
+    tSel.appendChild(o);
+  }
+  const markerOf = () => markers.find((m) => m.id === mSel.value);
+  const sync = () => {
+    const m = markerOf();
+    document.getElementById('at-slug').value = m?.link_schematic || '';
+  };
+  mSel.onchange = sync;
+  sync();
+  renderAtlasList();
+  atlasDialog.showModal();
+}
+
+function renderAtlasList() {
+  const ul = document.getElementById('at-list');
+  ul.textContent = '';
+  for (const m of curFloor().markers || []) {
+    if (!m.link_schematic) continue;
+    const li = document.createElement('li');
+    li.textContent = `${m.label || m.id} → ${m.link_schematic}`;
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.textContent = 'Go';
+    go.title = `Open ${m.link_schematic}`;
+    go.onclick = () => { atlasDialog.close(); openLink(m.link_schematic); };
+    li.appendChild(go);
+    ul.appendChild(li);
+  }
+}
+
+document.getElementById('at-close').onclick = () => atlasDialog.close();
+document.getElementById('at-clear').onclick = async () => {
+  const m = (curFloor().markers || []).find((x) => x.id === document.getElementById('at-marker').value);
+  if (!m || !m.link_schematic) return;
+  await postOps([{ t: 'put_overlay', item: { ...m, kind: 'marker', link_schematic: null } }]);
+  renderAtlasList();
+};
+document.getElementById('at-ok').onclick = async () => {
+  const m = (curFloor().markers || []).find((x) => x.id === document.getElementById('at-marker').value);
+  if (!m) return;
+  const custom = document.getElementById('at-slug').value.trim();
+  let link = custom;
+  if (!link) {
+    const targetId = document.getElementById('at-target').value;
+    if (!targetId) {
+      await postOps([{ t: 'put_overlay', item: { ...m, kind: 'marker', link_schematic: null } }]);
+      renderAtlasList();
+      return;
+    }
+    const docs = await atlasDocs();
+    const d = docs.find((x) => x.id === targetId);
+    // A published map links by its nd-world slug; an unpublished one by its
+    // studio id (the linter flags it until it is published).
+    link = d?.slug || d?.id;
+  }
+  await postOps([{ t: 'put_overlay', item: { ...m, kind: 'marker', link_schematic: link } }]);
+  renderAtlasList();
+};
+
 // ---------- projects ----------
 
 async function loadDocList() {
@@ -289,7 +426,9 @@ async function openDoc(id) {
   await loadDocList();
 }
 
-document.getElementById('doc-select').onchange = (e) => openDoc(e.target.value);
+document.getElementById('doc-select').onchange = (e) => { state.nav = []; updateNavBack(); openDoc(e.target.value); };
+
+document.getElementById('btn-atlas').onclick = () => openAtlasDialog(null);
 
 const newDialog = document.getElementById('new-dialog');
 const ndKind = () => document.querySelector('input[name=nd-kind]:checked').value;
@@ -367,6 +506,7 @@ async function refresh() {
   buildFloorBar();
   setExportLinks();
   buildOutline();
+  updateNavBack();
   refreshProblems();
   loadMiniImage();
   buildViews();
@@ -1293,6 +1433,8 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 canvas.addEventListener('pointerup', (e) => {
+  const wasClick = dragging && dragging.sx !== undefined
+    && Math.abs(e.offsetX - dragging.sx) + Math.abs(e.offsetY - dragging.sy) <= 4;
   if (dragging && dragging.stroking) finishStroke();
   if (dragging && dragging.terrain) finishTerrainStroke();
   if (dragging && dragging.painting) {
@@ -1302,6 +1444,13 @@ canvas.addEventListener('pointerup', (e) => {
   }
   dragging = null;
   canvas.classList.remove('panning');
+  // The atlas chain: a plain click near a linked marker opens its map.
+  if (wasClick && state.tool === 'pan' && (curFloor().markers || []).length) {
+    const s = ppc();
+    const hit = curFloor().markers.find((m) => m.link_schematic
+      && Math.hypot(m.x * s + state.px - e.offsetX, m.y * s + state.py - e.offsetY) < 14);
+    if (hit) openLink(hit.link_schematic);
+  }
 });
 
 canvas.addEventListener('wheel', (e) => {
@@ -1477,6 +1626,7 @@ function addRow(parent, key, level, html, label, handlers = {}) {
 const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const linkOf = (id) => (curFloor().entity_links || []).find(l => l.space === id);
+const encOf = (id) => (curFloor().encounters || []).find(e => e.space === id);
 
 function buildOutline() {
   const o = curFloor().outline;
@@ -1501,7 +1651,7 @@ function buildOutline() {
     if (g === 'rooms') for (const s of o.spaces) {
       const where = s.bbox ? `${s.cells} squares` : 'no squares yet';
       const r = addRow(treeEl, `s:${s.id}`, 2,
-        `<span class="chip" style="background:${esc(s.color)}"></span>${esc(s.name)}<span class="meta">${where} · ${esc(s.kind)}${linkOf(s.id) ? ' · 🔗 ' + esc(linkOf(s.id).name) : ''}</span>`,
+        `<span class="chip" style="background:${esc(s.color)}"></span>${esc(s.name)}<span class="meta">${where} · ${esc(s.kind)}${linkOf(s.id) ? ' · 🔗 ' + esc(linkOf(s.id).name) : ''}${encOf(s.id) ? ' · ⚔ ' + esc(encOf(s.id).creatures.join(', ')) : ''}</span>`,
         `Room ${s.name}, ${where}, ${s.kind}`);
       r.dataset.kind = 'space';
       r.setAttribute('aria-selected', String(state.sel.has(s.id)));
@@ -1538,7 +1688,9 @@ function buildOutline() {
       const kind = g === 'markers' ? 'marker' : g === 'regions' ? 'region' : 'route';
       for (const it of f[g]) {
         const name = it.label ?? it.name ?? it.id;
-        const where = kind === 'marker' ? `${it.x.toFixed(1)}, ${it.y.toFixed(1)}` : `${it.points.length} points`;
+        const where = kind === 'marker'
+          ? `${it.x.toFixed(1)}, ${it.y.toFixed(1)}${it.link_schematic ? ' → ' + it.link_schematic : ''}`
+          : `${it.points.length} points`
         const r = addRow(treeEl, `o:${kind}:${it.id}`, 2, `${esc(name)}<span class="meta">${where}</span>`, `${kind} ${name}, ${where}`);
         r.dataset.kind = kind;
         const pt = kind === 'marker' ? { x: it.x, y: it.y } : { x: it.points[0][0], y: it.points[0][1] };
@@ -2139,7 +2291,7 @@ document.getElementById('btn-gallery').onclick = async () => {
     const mt = document.createElement('div'); mt.className = 'mt';
     mt.textContent = `${d.kind} · ${d.floors.length} floor${d.floors.length === 1 ? '' : 's'}`;
     card.append(img, nm, mt);
-    card.onclick = () => { galleryDialog.close(); if (d.id !== state.docId) openDoc(d.id); };
+    card.onclick = () => { galleryDialog.close(); if (d.id !== state.docId) { state.nav = []; updateNavBack(); openDoc(d.id); } };
     grid.appendChild(card);
   }
   galleryDialog.showModal();
@@ -2371,6 +2523,26 @@ document.getElementById('bk-link').onclick = async () => {
     if (!e) return;
     await postOps([{ t: 'link_entity', link: { space, entity_id: e.id, name: e.name, kind: e.kind } }]);
   } catch (err) { statusEl.textContent = err.message; }
+};
+document.getElementById('bk-encounter').onclick = async () => {
+  if (state.sel.size !== 1) { statusEl.textContent = 'Select exactly one room for an encounter.'; return; }
+  const [space] = [...state.sel];
+  const room = curFloor().grid.spaces[space];
+  const existing = (curFloor().encounters || []).find(e => e.space === space);
+  if (existing) {
+    const drop = window.confirm(`Encounter in "${room?.name || space}": ${existing.creatures.join(', ')}.
+OK removes it.`);
+    if (drop) await postOps([{ t: 'remove_encounter', space }]);
+    return;
+  }
+  const creatures = window.prompt('Who waits here? (one line each is fine: "gob x4, wolf")', 'guard x2');
+  if (creatures === null) return;
+  const list = creatures.split(',').map(s => s.trim()).filter(Boolean).slice(0, 20);
+  if (!list.length) { statusEl.textContent = 'An encounter needs at least one creature.'; return; }
+  const note = window.prompt('Notes (tactics, treasure — optional)', '') ?? '';
+  await postOps([{ t: 'put_encounter', encounter: {
+    id: newId('enc'), space, creatures: list, note: String(note).slice(0, 500),
+  } }]);
 };
 document.getElementById('bk-refine').onclick = async () => {
   const instruction = window.prompt(`What should change? (${state.sel.size} room(s) selected stay exactly as they are)`, 'Add a barracks next to the entrance');
