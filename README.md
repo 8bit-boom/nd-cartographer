@@ -65,9 +65,12 @@ how it is built is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ## What is not here yet
 
 Honest list, so nothing surprises you: no desktop installer (run the binary or the
-Docker image), no Wonderdraft-specific import (its folders import like any folder), Foundry scenes exported but not tried in a running Foundry, no Windows/macOS builds checked by CI by me, and the AI
-features have been exercised against stand-ins for nd-world and a model but not
-against a real model's output. The plan and what is done are tracked in
+Docker image); no diagram/schematic mode; Foundry scenes are exported and imported
+but not tried in a running Foundry; the Dungeondraft pack reader follows the Godot 3
+archive format but has not been tried on many real packs; Windows and macOS builds
+are set up (a release workflow) but have never been run; and the AI features have
+been exercised against stand-ins for nd-world and a model, not a real model's
+output. The plan and what is done are tracked in
 [docs/ND_CARTOGRAPHER_PLAN.md](docs/ND_CARTOGRAPHER_PLAN.md) §20.
 
 ## Layout
