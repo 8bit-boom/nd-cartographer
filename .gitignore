@@ -5,3 +5,5 @@
 .env
 /data
 Cargo.lock.bak
+binaries/
+crates/ndcart-desktop/binaries/

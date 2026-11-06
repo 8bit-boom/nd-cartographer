@@ -1,0 +1,19 @@
+[package]
+name = "ndcart-desktop"
+description = "The nd-cartographer desktop shell (Tauri v2): a native window over the same ndcart server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde_json = "1"
+
+# Not a default workspace member (see the root Cargo.toml): building the
+# shell needs the platform webview dev packages on Linux, so plain
+# `cargo test`/clippy in CI stays on the server crates.

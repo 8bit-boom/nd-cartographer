@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "nd-cartographer",
+  "version": "0.1.0",
+  "identifier": "com.ndworld.ndcartographer",
+  "build": {
+    "frontendDist": "../../ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "GraphicsAndDesign",
+    "shortDescription": "TTRPG map studio",
+    "longDescription": "A standalone tabletop map creator and editor: paint battle maps, generate dungeons and worlds, print at true scale, and publish playable maps to nd-world.",
+    "targets": ["nsis", "msi", "appimage", "deb"],
+    "externalBin": ["binaries/ndcart"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
+  }
+}

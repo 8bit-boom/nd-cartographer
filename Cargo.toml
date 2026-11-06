@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/ndcart-core", "crates/ndcart-bridge", "crates/ndcart-formats", "crates/ndcart-paint", "crates/ndcart-terrain", "crates/ndcart-server"]
+members = ["crates/ndcart-core", "crates/ndcart-bridge", "crates/ndcart-formats", "crates/ndcart-paint", "crates/ndcart-terrain", "crates/ndcart-server", "crates/ndcart-desktop"]
+# The desktop shell needs the platform webview dev packages on Linux, so the
+# default commands (test, clippy, the Docker build) stay on the server crates.
+default-members = ["crates/ndcart-core", "crates/ndcart-bridge", "crates/ndcart-formats", "crates/ndcart-paint", "crates/ndcart-terrain", "crates/ndcart-server"]
 
 [workspace.package]
 edition = "2021"

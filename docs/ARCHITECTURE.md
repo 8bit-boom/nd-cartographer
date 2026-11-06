@@ -19,6 +19,11 @@ tracks what actually exists, crate by crate, as milestones land.
     computed against the state it was applied to (undo is exact, replay is a
     fold, NdJSON on disk). Refused ops are never journaled.
   - `doc` — manifest, floors, lights (≤ 60, the nd-world cap), labels.
+- **`ndcart-desktop`** — the Tauri v2 desktop shell (not a default workspace
+  member: Linux needs the webview dev packages). It bundles `ndcart` as a
+  sidecar, starts it on a free loopback port with the user's data folder and
+  opens a native window at it; closing the app stops the server. There is no
+  second renderer — the desktop is the same studio the browser serves.
 - **`ndcart-server`** — the `ndcart` binary: axum app serving the M0 UI,
   the doc/ops/undo API, tiles (tiny-skia bake on a zoom pyramid, 16 px/cell
   at z0), optional `--data-dir` persistence, and `bench`.

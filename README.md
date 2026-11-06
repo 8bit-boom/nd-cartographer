@@ -64,8 +64,9 @@ how it is built is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## What is not here yet
 
-Honest list, so nothing surprises you: no desktop installer (run the binary or the
-Docker image); no diagram/schematic mode; Foundry scenes are exported and imported
+Honest list, so nothing surprises you: a desktop shell exists (`ndcart-desktop`, a
+Tauri v2 window over the same server — [docs/DESKTOP.md](docs/DESKTOP.md)) but no
+signed installers yet and it has never run outside CI; no diagram/schematic mode; Foundry scenes are exported and imported
 but not tried in a running Foundry; the Dungeondraft pack reader follows the Godot 3
 archive format but has not been tried on many real packs; Windows and macOS builds
 are set up (a release workflow) but have never been run; and the AI features have
@@ -83,6 +84,7 @@ output. The plan and what is done are tracked in
 | `ndcart-formats` | Universal VTT |
 | `ndcart-bridge` | the optional nd-world client and direct-model client |
 | `ndcart-server` | the studio: web UI, API, tile baker, exports |
+| `ndcart-desktop` | the Tauri v2 desktop shell (a window over the same server) |
 
 ## License
 
