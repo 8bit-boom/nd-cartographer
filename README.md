@@ -1,66 +1,88 @@
 # nd-cartographer
 
-A standalone TTRPG map creator & editor in Rust — battle-map painting in the
-Dungeondraft class, world/region map-making in the Canvas of Kings class, big-and-
-complex made easy, AI as a co-cartographer — with deep, optional integration into
-[nd-world](https://github.com/8bit-boom/nd-world).
+A map studio for tabletop games, written in Rust and run in your browser: paint
+battle maps, generate dungeons and whole worlds, print them at true scale, and
+(optionally) publish them to [nd-world](https://github.com/8bit-boom/nd-world)
+with doors, lights and walls ready to play. It works fully on its own; nothing
+requires nd-world or an AI.
 
-**Status: M0 skeleton works; M1a (publish to nd-world, linter, outliner, split exports) done; M1 complete; M2 mostly built (terrain, rivers, generator, markers/regions/routes, publish to nd-world as an image map) — see docs/ND_CARTOGRAPHER_PLAN.md §20** — cargo workspace with `ndcart-core` (document
-model, append-only journal with exact undo, sparse room grid,
-walls-from-rooms in nd-world's shape) and the `ndcart` server binary
-(doc/ops/undo API, baked zoom tiles, optional persistence, `bench`), a
-paintable browser viewport, CI, and a Dockerfile. Run it:
-`cargo run -p ndcart-server --bin ndcart serve` → http://127.0.0.1:8300.
-The founding plan is [docs/ND_CARTOGRAPHER_PLAN.md](docs/ND_CARTOGRAPHER_PLAN.md);
-what exists is tracked in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the
-API in [docs/HTTP_API.md](docs/HTTP_API.md).
+## Quick start
 
-## What it will be
+```bash
+cargo run --release -p ndcart-server --bin ndcart -- serve --data-dir ~/ndcart-data
+```
 
-- **Standalone first** — fully usable offline, for any TTRPG system and any table
-  (nd-world, Foundry, Roll20, paper). No feature requires the server.
-- **Battle maps** — material painting with automatic edge blending, pattern brushes,
-  pen pressure/tilt, stamps with shadows and recoloring, painted light, caves;
-  print-quality export.
-- **World maps** — heightmap terrain (hillshade, hypso tints, carving rivers, biomes),
-  mass scatter as density fields, typography with text-along-path, political regions.
-- **Generators** — seeded, deterministic dungeons, caves, buildings, city districts,
-  overland terrain; every room reachable, links never guessed.
-- **AI co-cartographer** — the model plans *semantic* specs (room kinds, links,
-  biome mixes), deterministic Rust code builds the geometry; and it makes the art
-  itself (seamless materials, cut-out stamps, mini-packs). Every AI output is a
-  reviewable, undoable proposal.
-- **nd-world integration (optional)** — one press publishes a *playable* map
-  (background, grid, walls, doors, lights, fog-ready) via nd-world's verified HTTP
-  API, plus a table remote (doors/lights/fog) and TV-mode deep links.
-- **Interchange** — Universal VTT in/out, Foundry scenes, Dungeondraft/Wonderdraft
-  pack import, PNG/WebP/PDF out.
+Then open http://127.0.0.1:8300. Your projects live in the data folder.
+If something does not work, run `ndcart doctor` (it checks the folder, the
+picture formats, the font, the port, and the AI/nd-world settings, and tells
+you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
+8300 with `/data` as the volume.
 
-## Shape (one binary, three ways to run)
+## What you can do
+
+- **Paint battle maps**: rooms, corridors, doors, windows, secret doors; material
+  painting with edge blending, freehand brushes, props with shadows, lights,
+  text (with text along a path), floors with stairs between them, onion skin.
+- **Generate**: dungeons, caves, buildings, ship decks, city districts, and
+  overland worlds (continents, mountains, rivers, forests, swamps). Seeded: the
+  same seed always gives the same map, and every generation is one undo step.
+- **Work at scale**: zones, multi-select and bulk edits, symmetric painting,
+  prefabs you can reuse across projects, named checkpoints, a minimap, saved
+  views, search across all your maps, a problems panel with one-click fixes.
+- **Player view**: see exactly what the table sees from a spot (line of sight,
+  closed doors, lamps), and show it on a TV or tablet at `/table/<project>`.
+- **Print**: a PDF at one inch per square, cut into pages with corner ticks.
+- **Export**: PNG, WebP, AVIF, Universal VTT (works with Foundry through the
+  usual UVTT importer), players' copy without secrets.
+- **Bring your own art**: import a Dungeondraft pack or a folder of pictures;
+  turn any picture into a seamless material or a cut-out prop. See
+  [docs/PACK.md](docs/PACK.md).
+- **Publish to nd-world** (optional): one map or every project and floor at
+  once, updating in place on later runs.
+- **AI help** (optional): describe a map in words and get a preview to accept or
+  reject; revise a floor while keeping the rooms you pin; pictures through
+  nd-world's image queue. See [docs/AI_CARTOGRAPHER_GUIDE.md](docs/AI_CARTOGRAPHER_GUIDE.md)
+  and [docs/MAP_SPEC.md](docs/MAP_SPEC.md).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `ndcart serve [--listen ADDR] [--data-dir DIR]` | the studio (default `127.0.0.1:8300`; on a non-local address it asks for a token) |
+| `ndcart doctor` | check the setup |
+| `ndcart import-pack FILE_OR_FOLDER --data-dir DIR` | add a Dungeondraft pack or a folder of art |
+| `ndcart publish DOC --server URL --email E [--all-floors] [--all-docs] [--report FILE]` | publish to nd-world |
+| `ndcart draft "a flooded crypt" ...` | ask an AI for a map spec |
+| `ndcart convert IN OUT` | convert pictures between PNG, WebP and AVIF |
+| `ndcart bench` | time the renderer |
+
+Passwords and keys are read from the environment (`ND_CARTO_PASSWORD` or
+`ND_CARTO_PASSWORD_FILE`, `ND_CARTO_LLM_KEY[_FILE]`), never from arguments, and
+are never printed or logged. The HTTP API is in [docs/HTTP_API.md](docs/HTTP_API.md);
+how it is built is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## What is not here yet
+
+Honest list, so nothing surprises you: no desktop installer (run the binary or the
+Docker image), no Foundry scene export of its own (use UVTT), no Foundry or
+Wonderdraft import, no Windows/macOS builds checked by CI by me, and the AI
+features have been exercised against stand-ins for nd-world and a model but not
+against a real model's output. The plan and what is done are tracked in
+[docs/ND_CARTOGRAPHER_PLAN.md](docs/ND_CARTOGRAPHER_PLAN.md) §20.
+
+## Layout
 
 | Crate | Role |
 |---|---|
-| `ndcart-core` | document model, command journal, room grid, walls-from-rooms, generators |
-| `ndcart-paint` | brush engine, materials + blending, patterns |
-| `ndcart-terrain` | heightmaps, hillshade, rivers, biomes |
-| `ndcart-formats` | UVTT, Foundry, art-pack interchange |
-| `ndcart-render` | tile baker (tiny-skia + rayon), LOD pyramid |
-| `ndcart-server` | axum app: UI, REST + WebSocket, tiles, health |
-| `ndcart-ai` | MapSpec proposals, LLM/imagegen clients |
-| `ndcart-bridge` | the optional nd-world client (publish, table remote) |
-| `ndcart-desktop` | Tauri v2 shell (Windows/Linux) |
-
-`ndcart` desktop · `ndcart serve` (Docker/browser) · `ndcart gen|export|publish` (CLI).
-UI: TypeScript + WebGL2/Canvas2D, all dependencies vendored with licenses.
-
-## Status
-
-See the plan's milestone table: **M0 — Skeleton** is in progress
-(workspace, CI, document model + journal, tile baker, viewport, Tauri/Docker shells,
-`ndcart bench`).
+| `ndcart-core` | document model, command journal, room grid, walls, generators, specs, linter |
+| `ndcart-paint` | materials and blending, brushes, the built-in props |
+| `ndcart-terrain` | heightmaps, shading, rivers, world generator |
+| `ndcart-formats` | Universal VTT |
+| `ndcart-bridge` | the optional nd-world client and direct-model client |
+| `ndcart-server` | the studio: web UI, API, tile baker, exports |
 
 ## License
 
-MIT — see [LICENSE](LICENSE). First-party art packs will be MIT too; the studio never
-redistributes third-party art-pack contents (each pack stays under its own license,
-surfaced at import).
+MIT, see [LICENSE](LICENSE). Imported art packs stay under their own licenses;
+the studio never redistributes them, and every imported item keeps the name of
+the pack and its author.

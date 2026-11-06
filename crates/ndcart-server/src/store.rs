@@ -25,6 +25,18 @@ pub struct Checkpoint {
 pub const MAX_CHECKPOINTS: usize = 30;
 pub const MAX_PROPOSALS: usize = 10;
 
+/// What the table screen shows right now (in memory only): the player view
+/// from one spot. `n` changes whenever the GM moves or changes it.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct TableState {
+    pub floor: String,
+    pub x: f64,
+    pub y: f64,
+    pub radius: f64,
+    pub darkness: bool,
+    pub n: u64,
+}
+
 /// A pending world map: nothing is drawn until it is accepted.
 #[derive(Clone)]
 pub struct WorldProposal {
@@ -52,6 +64,8 @@ pub struct StoredDoc {
     /// Pending AI/spec proposals (in memory only).
     pub proposals: Vec<Proposal>,
     pub world_proposals: Vec<WorldProposal>,
+    /// The shared table view, if the GM turned it on.
+    pub table: Option<TableState>,
     pub rev: u64,
 }
 
@@ -78,6 +92,7 @@ impl StoredDoc {
             checkpoints: Vec::new(),
             proposals: Vec::new(),
             world_proposals: Vec::new(),
+            table: None,
             rev: 0,
         }
     }
@@ -461,6 +476,7 @@ impl Store {
                         .unwrap_or_default(),
                     proposals: Vec::new(),
                     world_proposals: Vec::new(),
+                    table: None,
                     rev,
                 },
             );

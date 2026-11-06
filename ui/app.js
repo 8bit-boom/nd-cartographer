@@ -1674,6 +1674,7 @@ function loadPreview() {
   pvTimer = setTimeout(() => {
     const key = `${state.docId}|${pvParams()}`;
     if (key === state.pv.key) return;
+    pushTable();
     const img = new Image();
     img.onload = () => { state.pv.img = img; state.pv.key = key; render(); };
     img.onerror = () => { state.pv.img = null; state.pv.key = key; statusEl.textContent = 'Nothing to preview on this floor yet.'; render(); };
@@ -1691,11 +1692,31 @@ function drawPreview() {
   ctx.beginPath(); ctx.arc(vx, vy, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
   ctx.restore();
 }
+// Share the view to the table screen (/table/<project>), kept in step as the GM moves it.
+state.pv.share = false;
+async function pushTable() {
+  if (!state.pv.share) return;
+  try {
+    await api('POST', `/api/docs/${state.docId}/table`, {
+      floor: state.floorId, x: state.pv.x, y: state.pv.y,
+      radius: Number(document.getElementById('pv-radius').value), darkness: document.getElementById('pv-dark').checked,
+    });
+  } catch (e) { statusEl.textContent = `Table: ${e.message}`; }
+}
+async function setShare(on) {
+  state.pv.share = on;
+  const btn = document.getElementById('pv-share');
+  btn.setAttribute('aria-pressed', String(on));
+  document.getElementById('pv-link').textContent = on ? `On the table: open ${location.origin}/table/${state.docId} on the TV or tablet` : '';
+  if (on) await pushTable();
+  else { try { await api('DELETE', `/api/docs/${state.docId}/table`); } catch { /* already off */ } }
+}
+document.getElementById('pv-share').onclick = () => setShare(!state.pv.share);
 function setPreview(on) {
   state.pv.on = on;
   document.getElementById('btn-preview').setAttribute('aria-pressed', String(on));
   document.getElementById('previewbar').hidden = !on;
-  if (on) { state.pv.key = ''; loadPreview(); } else render();
+  if (on) { state.pv.key = ''; loadPreview(); } else { if (state.pv.share) setShare(false); render(); }
 }
 document.getElementById('btn-preview').onclick = () => setPreview(!state.pv.on);
 document.getElementById('pv-radius').oninput = (e) => { document.getElementById('pv-radius-o').textContent = e.target.value; loadPreview(); };

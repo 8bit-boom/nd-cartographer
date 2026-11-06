@@ -2052,6 +2052,110 @@ async fn reject_world(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+struct TableBody {
+    #[serde(default)]
+    floor: Option<String>,
+    x: f64,
+    y: f64,
+    #[serde(default = "d_radius")]
+    radius: f64,
+    #[serde(default = "yes_bool")]
+    darkness: bool,
+}
+fn d_radius() -> f64 {
+    12.0
+}
+
+/// `POST /api/docs/{id}/table` `{floor?, x, y, radius?, darkness?}` — show the
+/// players' view from this spot on the table screen (`/table/{id}`). `DELETE` turns it off.
+async fn table_set(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<TableBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    if !(b.x.is_finite() && b.y.is_finite() && b.radius.is_finite())
+        || !(0.5..=200.0).contains(&b.radius)
+    {
+        return Err(ApiError(CoreError::Invalid(
+            "x and y must be numbers and radius 0.5-200".into(),
+        )));
+    }
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor = match &b.floor {
+        Some(f) => doc.floors[floors_by_id(&doc.floors, f)?].id.clone(),
+        None => doc.floors[0].id.clone(),
+    };
+    let n = doc.table.as_ref().map_or(1, |t| t.n + 1);
+    doc.table = Some(store::TableState {
+        floor,
+        x: b.x,
+        y: b.y,
+        radius: b.radius,
+        darkness: b.darkness,
+        n,
+    });
+    Ok(Json(serde_json::json!({ "ok": true, "n": n })))
+}
+
+async fn table_off(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.table = None;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// `GET /api/docs/{id}/table` — what the table screen polls: `{on, n, rev, …}`.
+async fn table_get(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    Ok(Json(match &doc.table {
+        Some(t) => {
+            serde_json::json!({ "on": true, "rev": doc.rev, "name": doc.manifest.name, "state": t })
+        }
+        None => serde_json::json!({ "on": false, "rev": doc.rev, "name": doc.manifest.name }),
+    }))
+}
+
+const TABLE_HTML: &str = include_str!("../../../ui/table.html");
+
+/// `GET /table/{id}` — the table screen: the players' view, full screen, kept in
+/// step with the GM. Put it on a TV or a tablet; nothing on it can edit anything.
+async fn table_page(Path(id): Path<String>) -> Response {
+    // The id is only ever used by the page as a URL path segment; refuse anything odd.
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return (StatusCode::BAD_REQUEST, "bad project id").into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        TABLE_HTML.replace("__DOC__", &id),
+    )
+        .into_response()
+}
+
 /// `GET /api/docs/{id}/preview?x=&y=&radius=&darkness=&ppc=` — what the table
 /// sees from one point: the player's copy of the floor (secrets stripped)
 /// under fog, with sight blocked by walls and closed doors and lamps lighting
@@ -2515,6 +2619,11 @@ fn build_router(app: App) -> Router {
         .route("/api/search", get(search_maps))
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
+        .route(
+            "/api/docs/{id}/table",
+            get(table_get).post(table_set).delete(table_off),
+        )
+        .route("/table/{id}", get(table_page))
         .route("/api/docs/{id}/export/pdf", get(export_pdf))
         .route("/api/draft", post(draft_spec))
         .route("/api/ai/status", get(ai_status))
@@ -4432,6 +4541,75 @@ mod tests {
                 String::from_utf8_lossy(&b)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_table_screen_follows_the_gm_and_cannot_edit() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(
+            &router,
+            "POST",
+            "/api/docs",
+            br#"{"name":"Table"}"#.to_vec(),
+        )
+        .await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let state = || {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}/table"));
+            async move { json(call(&router, "GET", &uri, vec![]).await.1) }
+        };
+        assert_eq!(state().await["on"], false);
+        let post = |body: &str| {
+            let (router, uri, body) = (
+                router.clone(),
+                format!("/api/docs/{id}/table"),
+                body.as_bytes().to_vec(),
+            );
+            async move { call(&router, "POST", &uri, body).await.0 }
+        };
+        assert_eq!(
+            post(r#"{"x":4.5,"y":2.5,"radius":8}"#).await,
+            StatusCode::OK
+        );
+        let s = state().await;
+        assert_eq!(
+            (
+                s["on"].as_bool(),
+                s["state"]["n"].as_u64(),
+                s["state"]["x"].as_f64()
+            ),
+            (Some(true), Some(1), Some(4.5))
+        );
+        assert_eq!(
+            post(r#"{"x":6.0,"y":2.5,"darkness":false}"#).await,
+            StatusCode::OK
+        );
+        assert_eq!(state().await["state"]["n"], 2, "every change is a new step");
+        for bad in [
+            r#"{"x":1,"y":1,"radius":0}"#,
+            r#"{"x":1,"y":1,"radius":999}"#,
+            r#"{"y":1}"#,
+            r#"{"x":1,"y":1,"floor":"fl_nope"}"#,
+        ] {
+            assert!(post(bad).await.is_client_error(), "{bad}");
+        }
+        // The page is HTML for this project only, and odd ids are refused.
+        let (st, page) = call(&router, "GET", &format!("/table/{id}"), vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let html = String::from_utf8_lossy(&page);
+        assert!(html.contains(&format!("const DOC = '{id}';")) && !html.contains("__DOC__"));
+        assert_eq!(
+            call(&router, "GET", "/table/a%22b", vec![]).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(&router, "DELETE", &format!("/api/docs/{id}/table"), vec![])
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(state().await["on"], false);
     }
 
     #[tokio::test]
