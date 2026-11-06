@@ -6,8 +6,10 @@ mod aijobs;
 mod assets;
 mod auth;
 mod convert;
+mod doctor;
 #[cfg(feature = "bridge")]
 mod draft;
+mod pdf;
 #[cfg(feature = "bridge")]
 mod publish;
 mod store;
@@ -2045,6 +2047,95 @@ async fn preview(
         .into_response())
 }
 
+#[derive(Deserialize)]
+struct PdfQuery {
+    floor: Option<String>,
+    /// `letter` (default) or `a4`.
+    paper: Option<String>,
+    /// Inches per square on paper (default 1: print and use miniatures).
+    inch: Option<f32>,
+    /// Print resolution (default 150).
+    dpi: Option<u32>,
+    audience: Option<String>,
+}
+
+/// `GET /api/docs/{id}/export/pdf?floor&paper&inch&dpi&audience` — the floor on
+/// paper at true scale (one inch a square by default), cut into pages with
+/// corner ticks and a "page r of n" label. The players' copy hides secrets.
+async fn export_pdf(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<PdfQuery>,
+) -> Result<Response, ApiError> {
+    let paper = pdf::paper(q.paper.as_deref().unwrap_or("letter"))
+        .ok_or_else(|| ApiError(CoreError::Invalid("paper must be letter or a4".into())))?;
+    let inch = q.inch.unwrap_or(1.0);
+    let dpi = q.dpi.unwrap_or(150);
+    if !(72..=300).contains(&dpi) {
+        return Err(ApiError(CoreError::Invalid("dpi must be 72-300".into())));
+    }
+    let audience = match q.audience.as_deref() {
+        None => ndcart_core::Audience::Gm,
+        Some(a) => ndcart_core::Audience::parse(a)
+            .ok_or_else(|| ApiError(CoreError::Invalid("audience must be gm or player".into())))?,
+    };
+    let (floor, name, cell_size) = {
+        let store = app.store.read().await;
+        let doc = store
+            .docs
+            .get(&id)
+            .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+        let idx = match &q.floor {
+            Some(f) => floors_by_id(&doc.floors, f)?,
+            None => 0,
+        };
+        (
+            ndcart_core::for_audience(&doc.floors[idx], audience),
+            format!("{} - {}", doc.manifest.name, doc.floors[idx].name),
+            doc.manifest.cell_size,
+        )
+    };
+    let margin = 36.0;
+    let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let (cols, rows) = tiles::grid_extent(&floor);
+        let plan = pdf::plan(cols, rows, inch, paper, margin)?;
+        let ppc = ((f64::from(dpi) * f64::from(inch)).round() as i64).clamp(8, 300);
+        let walls = tiles::derive_walls(&floor, cell_size);
+        let mut pages = Vec::with_capacity(plan.len());
+        for r in &plan {
+            let (px_w, px_h) = (r.cols * ppc as u32, r.rows * ppc as u32);
+            let rgb = tiles::print_region(
+                &floor,
+                &walls,
+                cell_size,
+                ppc,
+                (i64::from(r.cx) * ppc, i64::from(r.cy) * ppc, px_w, px_h),
+            );
+            pages.push(pdf::Page {
+                rgb,
+                px: (px_w, px_h),
+                size_pt: (r.cols as f32 * inch * 72.0, r.rows as f32 * inch * 72.0),
+                label: format!(
+                    "{name} - page {} of {} (row {}, column {}) - {inch} in per square",
+                    r.page, r.of, r.row, r.col
+                ),
+            });
+        }
+        pdf::build(paper, margin, &name, &pages)
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("pdf failed: {e}"))))?
+    .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/pdf"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 /// `GET /api/docs/{id}/export/png[?floor=ID&ppc=N]` — the whole floor as one PNG.
 async fn export_png(
     State(app): State<App>,
@@ -2368,6 +2459,7 @@ fn build_router(app: App) -> Router {
         .route("/api/search", get(search_maps))
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
+        .route("/api/docs/{id}/export/pdf", get(export_pdf))
         .route("/api/draft", post(draft_spec))
         .route("/api/ai/status", get(ai_status))
         .route("/api/docs/{id}/refine", post(refine_floor))
@@ -2583,6 +2675,12 @@ async fn main() {
     match cmd.as_str() {
         "bench" => run_bench(args.collect()),
         "convert" => run_convert(args.collect()),
+        "doctor" => {
+            if let Err(m) = doctor::run(args.collect()).await {
+                eprintln!("ndcart: {m}");
+                std::process::exit(1);
+            }
+        }
         #[cfg(feature = "bridge")]
         "draft" => {
             if let Err(m) = draft::run(args.collect()).await {
@@ -2660,7 +2758,7 @@ async fn main() {
         }
         other => {
             eprintln!(
-                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | publish DOC ... | draft PROMPT ...]"
+                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | doctor | publish DOC ... | draft PROMPT ...]"
             );
             eprintln!("  unknown command: {other}");
             std::process::exit(2);
@@ -4106,6 +4204,58 @@ mod tests {
                 post(r#"{"kind":"prop","prompt":"a crate"}"#).await,
                 StatusCode::NOT_FOUND
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_print_export_is_a_pdf_at_true_scale_and_checks_its_input() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let (_, b) = call(
+            &router,
+            "POST",
+            "/api/docs",
+            br#"{"name":"Print"}"#.to_vec(),
+        )
+        .await;
+        let id = json(b)["id"].as_str().unwrap().to_string();
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/generate-map"),
+            br#"{"kind":"building","seed":2,"width":24,"height":20}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let get = |q: &str| {
+            let (router, uri) = (router.clone(), format!("/api/docs/{id}/export/pdf?{q}"));
+            async move { call(&router, "GET", &uri, vec![]).await }
+        };
+        let (st, pdf) = get("dpi=72").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(pdf.starts_with(b"%PDF-1.4") && pdf.ends_with(b"%%EOF\n"));
+        // 24 x 20 squares at 1 inch on letter (7 x 10 per page): 4 x 2 pages.
+        let pages = String::from_utf8_lossy(&pdf)
+            .matches("/Type /Page ")
+            .count();
+        assert_eq!(pages, 4 * 2);
+        // Half-inch squares need fewer pages; the player's copy and A4 work too.
+        let (_, half) = get("dpi=72&inch=0.5&paper=a4&audience=player").await;
+        assert!(
+            String::from_utf8_lossy(&half)
+                .matches("/Type /Page ")
+                .count()
+                < pages
+        );
+        for bad in [
+            "paper=tabloid",
+            "inch=0.1",
+            "inch=9",
+            "dpi=10",
+            "dpi=900",
+            "audience=x",
+        ] {
+            assert_eq!(get(bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
         }
     }
 

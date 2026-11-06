@@ -192,6 +192,39 @@ pub const MAX_SIDE_PX: i64 = 20_000; // nd-world's schematic canvas limit
 pub const MAX_FULL_PX: i64 = 40_000_000; // nd-world's import-uvtt pixel budget
 
 /// Everything on the floor in cells (rooms, underlay, strokes, stamps), min 1x1.
+/// Encode `pm` and report the size, for `ndcart doctor`.
+pub fn encode_for_doctor(pm: &tiny_skia::Pixmap, format: ImageFormat) -> Result<usize, String> {
+    encode(pm, format, 80).map(|b| b.len())
+}
+
+/// A block of the floor as RGB on white, for printing (where nothing is drawn the
+/// paper stays white). Same renderer as the screen, so pages are seamless crops.
+pub fn print_region(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    (x0, y0, w, h): (i64, i64, u32, u32),
+) -> Vec<u8> {
+    let pm = render_pixmap_on(
+        floor,
+        walls,
+        cell_size,
+        ppc,
+        (x0, y0, w, h),
+        None,
+        [0xff; 4],
+    );
+    let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+    for p in pm.pixels() {
+        let (a, d) = (u16::from(p.alpha()), p.demultiply());
+        // Premultiplied over white: c*a + 255*(1-a).
+        let mix = |c: u8| ((u16::from(c) * a + 255 * (255 - a)) / 255) as u8;
+        rgb.extend_from_slice(&[mix(d.red()), mix(d.green()), mix(d.blue())]);
+    }
+    rgb
+}
+
 pub fn grid_extent(floor: &FloorDoc) -> (u32, u32) {
     floor.extent()
 }
@@ -1517,13 +1550,27 @@ fn render_pixmap_onion(
     h: u32,
     onion: Option<(&FloorDoc, &[Wall])>,
 ) -> tiny_skia::Pixmap {
+    render_pixmap_on(floor, walls, cell_size, ppc, (x0, y0, w, h), onion, VOID)
+}
+
+/// The renderer proper, with the colour of the empty ground chosen (the screen
+/// uses [`VOID`]; print uses white so paper and ink are not wasted).
+fn render_pixmap_on(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    (x0, y0, w, h): (i64, i64, u32, u32),
+    onion: Option<(&FloorDoc, &[Wall])>,
+    ground: [u8; 4],
+) -> tiny_skia::Pixmap {
     let tile_px_w = i64::from(w);
     let tile_px_h = i64::from(h);
     let k = ppc as f32 / cell_size.max(1.0) as f32; // wall pixels -> image pixels
 
     let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("pixmap");
     pixmap.fill(tiny_skia::Color::from_rgba8(
-        VOID[0], VOID[1], VOID[2], 0xff,
+        ground[0], ground[1], ground[2], 0xff,
     ));
 
     if let Some((other, other_walls)) = onion {

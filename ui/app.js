@@ -2112,6 +2112,7 @@ function setExportLinks() {
   document.getElementById('exp-webp').href = `${base}/png?${q}&format=webp`;
   document.getElementById('exp-avif').href = `${base}/png?${q}&format=avif`;
   document.getElementById('exp-uvtt').href = `${base}/uvtt?${q}`;
+  document.getElementById('exp-pdf').href = `${base}/pdf?${q}`;
   document.getElementById('exp-png').download = `${state.doc.manifest.name}${suffix}.png`;
   document.getElementById('exp-webp').download = `${state.doc.manifest.name}${suffix}.webp`;
   document.getElementById('exp-avif').download = `${state.doc.manifest.name}${suffix}.avif`;
