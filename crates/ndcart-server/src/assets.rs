@@ -171,6 +171,7 @@ impl Assets {
     }
 
     /// The decoded picture as a premultiplied pixmap, cached.
+    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
     pub fn get_pixmap(&self, id: &str) -> Option<Arc<tiny_skia::Pixmap>> {
         if let Some(p) = self.decoded.lock().expect("assets").get(id) {
             return Some(p.clone());
