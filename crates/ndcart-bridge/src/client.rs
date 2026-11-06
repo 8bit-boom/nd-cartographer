@@ -130,6 +130,11 @@ pub struct PublishMap {
     pub lights: Vec<Light>,
     /// nd-world room-tool state (see [`crate::rooms::to_nd_world`]); `None` skips it.
     pub rooms: Option<Value>,
+    /// Editable vector elements over the picture (publish C): rooms as
+    /// rects, walls and doors as lines, labels as text, lights as circles.
+    /// Ids are stable across publishes, so nd-world's replace keeps
+    /// re-publishes idempotent. Empty skips the step.
+    pub elements: Vec<Value>,
 }
 
 #[derive(Debug, Default)]
@@ -697,7 +702,33 @@ impl Bridge {
             self.json_step("rooms", &path("rooms"), rooms, &mut report, &part, true)
                 .await?;
         }
+        // Editable vector elements (publish C): replace nd-world's copy with
+        // the studio's (stable ids keep a re-publish idempotent).
+        if !map.elements.is_empty() {
+            Self::precheck_elements(&map.elements)?;
+            self.json_step(
+                "elements",
+                &path("elements"),
+                &json!({ "elements": map.elements }),
+                &mut report,
+                &part,
+                true,
+            )
+            .await?;
+        }
         Ok(report)
+    }
+
+    /// A defensive cap: nd-world's editor answers, but a runaway element
+    /// count would make every view of the map heavy.
+    fn precheck_elements(elements: &[Value]) -> Result<(), BridgeError> {
+        if elements.len() > 5_000 {
+            return Err(BridgeError::Precheck(format!(
+                "{} elements is over the 5,000 cap; simplify the map or publish without elements",
+                elements.len()
+            )));
+        }
+        Ok(())
     }
 
     fn precheck_region(map: &PublishRegion) -> Result<(), BridgeError> {

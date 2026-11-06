@@ -18,6 +18,7 @@ fn wall(i: usize) -> Wall {
 
 fn map() -> PublishMap {
     PublishMap {
+        elements: Vec::new(),
         name: "Vault".into(),
         canvas_w: 640,
         canvas_h: 480,

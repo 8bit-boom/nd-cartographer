@@ -42,6 +42,10 @@ pub struct Args {
     pub audience: Audience,
     /// World maps: on a re-publish leave the markers and regions in nd-world alone.
     pub keep_overlay: bool,
+    /// Battle maps: skip the editable-elements step (publish C). Default on;
+    /// the elements REPLACE nd-world's copy each publish, so edits made by
+    /// hand in nd-world's schematic editor are overwritten unless this is set.
+    pub no_elements: bool,
 }
 
 pub fn parse(args: Vec<String>) -> Result<Args, String> {
@@ -50,6 +54,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
     let mut max_mb = DEFAULT_UPLOAD_CAP_MB;
     let mut audience = Audience::Gm;
     let mut keep_overlay = false;
+    let mut no_elements = false;
     let mut all_floors = false;
     let mut publish_anyway = false;
     let (mut all_docs, mut report, mut keep_going) = (false, None, false);
@@ -69,6 +74,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
             "--format" => format = val("--format")?,
             "--data-dir" => data_dir = Some(PathBuf::from(val("--data-dir")?)),
             "--keep-overlay" => keep_overlay = true,
+            "--no-elements" => no_elements = true,
             "--all-floors" => all_floors = true,
             "--publish-anyway" => publish_anyway = true,
             "--all-docs" => all_docs = true,
@@ -123,6 +129,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
         max_mb,
         audience,
         keep_overlay,
+        no_elements,
     })
 }
 
@@ -194,7 +201,117 @@ pub fn build_map(
             })
             .collect(),
         rooms: Some(rooms::to_nd_world(&floor.grid, ppc_f)?),
+        elements: build_elements(floor, &walls, ppc_f, cell_size),
     })
+}
+
+/// The studio's geometry as **editable nd-world schematic elements** (publish
+/// C, plan §21.12): rooms as rects, walls/doors as lines, lights as circles,
+/// labels as text — laid over the baked picture, so the map stays editable in
+/// nd-world's own schematic editor. Ids are stable across publishes (floor-
+/// and object-keyed, wall order is deterministic), so nd-world's
+/// replace-then-save keeps re-publishes idempotent. Everything comes from the
+/// audience-filtered floor: a secret door a player may not see is a plain
+/// wall here too, and GM-only labels never become text elements.
+pub fn build_elements(
+    floor: &ndcart_core::FloorDoc,
+    walls: &[ndcart_core::Wall],
+    ppc: f64,
+    cell_size: f64,
+) -> Vec<serde_json::Value> {
+    let k = ppc / cell_size;
+    let r = |v: f64| (v * 100.0).round() / 100.0;
+    let mut out = Vec::new();
+
+    // Rooms: one rect over each space's painted bounding box.
+    for (space_id, space) in &floor.grid.spaces {
+        let cells: Vec<_> = floor
+            .grid
+            .cells()
+            .filter(|(_, s)| *s == space_id)
+            .map(|(c, _)| c)
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        let (min_x, min_y) = (
+            cells.iter().map(|c| c.x).min().unwrap(),
+            cells.iter().map(|c| c.y).min().unwrap(),
+        );
+        let (max_x, max_y) = (
+            cells.iter().map(|c| c.x).max().unwrap(),
+            cells.iter().map(|c| c.y).max().unwrap(),
+        );
+        out.push(serde_json::json!({
+            "id": format!("{}-sp-{space_id}", floor.id),
+            "type": "rect",
+            "layer": "Background",
+            "x": r(min_x as f64 * ppc),
+            "y": r(min_y as f64 * ppc),
+            "w": r(((max_x - min_x + 1) as f64) * ppc),
+            "h": r(((max_y - min_y + 1) as f64) * ppc),
+            "fill": space.color,
+            "opacity": 0.85,
+        }));
+    }
+
+    // Walls, doors, windows, secrets: lines in kind colours, width with the zoom.
+    let stroke_w = (ppc / 10.0).clamp(2.0, 6.0);
+    for (n, w) in walls.iter().enumerate() {
+        if w.pts.len() != 2 {
+            continue;
+        }
+        let stroke = match w.kind {
+            ndcart_core::WallKind::Wall => "#d8e2ec",
+            ndcart_core::WallKind::Door => "#e8b030",
+            ndcart_core::WallKind::Window => "#7fb4d8",
+            ndcart_core::WallKind::Secret => "#b06ad0",
+        };
+        out.push(serde_json::json!({
+            "id": format!("{}-w{n}", floor.id),
+            "type": "line",
+            "layer": "Tracks",
+            "x1": r(w.pts[0][0]), "y1": r(w.pts[0][1]),
+            "x2": r(w.pts[1][0]), "y2": r(w.pts[1][1]),
+            "stroke": stroke,
+            "strokeW": stroke_w,
+        }));
+    }
+
+    // Lights: a small disc in the light's colour.
+    for l in &floor.lights {
+        let rad = (l.range * ppc * 0.4).clamp(3.0, 60.0);
+        out.push(serde_json::json!({
+            "id": format!("{}-lt-{}", floor.id, l.id),
+            "type": "circle",
+            "layer": "Stations",
+            "cx": r(l.x * k),
+            "cy": r(l.y * k),
+            "rx": r(rad),
+            "ry": r(rad),
+            "fill": l.color,
+            "opacity": 0.2,
+            "stroke": l.color,
+            "strokeW": 1,
+        }));
+    }
+
+    // Labels: text at the stored spot. Labels live in cell coordinates
+    // (unlike lights, which are px at the document's cell size).
+    for lb in &floor.labels {
+        out.push(serde_json::json!({
+            "id": format!("{}-lb-{}", floor.id, lb.id),
+            "type": "text",
+            "layer": "Labels",
+            "x": r(lb.x * ppc),
+            "y": r(lb.y * ppc),
+            "text": lb.text,
+            "size": (lb.size * ppc).clamp(8.0, 120.0),
+            "color": lb.color,
+            "bold": lb.bold,
+        }));
+    }
+    out
 }
 
 /// Build the map, stepping the resolution down (by a quarter each time, never
@@ -419,7 +536,10 @@ fn prepare(st: &store::Store, id: &str, a: &Args) -> Result<Vec<Job>, String> {
             }
             (Payload::Region(m), p)
         } else {
-            let (m, p) = build_map_fitted(doc, Some(fid), a.ppc, a.format, cap, a.audience)?;
+            let (mut m, p) = build_map_fitted(doc, Some(fid), a.ppc, a.format, cap, a.audience)?;
+            if a.no_elements {
+                m.elements.clear();
+            }
             (Payload::Battle(m), p)
         };
         if used_ppc != a.ppc {
@@ -742,6 +862,81 @@ mod tests {
     use super::*;
     use ndcart_core::journal::Op;
     use ndcart_core::DocKind;
+    #[test]
+    fn elements_carry_the_rooms_walls_and_labels_with_stable_ids() {
+        let d = doc();
+        let floor = &d.floors[0];
+        let walls = tiles::derive_walls(floor, 32.0);
+        let els = build_elements(floor, &walls, 32.0, 32.0);
+
+        // One rect per space over its bounding box.
+        let rect = els
+            .iter()
+            .find(|e| e["type"] == "rect" && e["id"] == format!("{}-sp-s", floor.id))
+            .expect("room rect");
+        assert_eq!(rect["x"], serde_json::json!(0.0));
+        assert_eq!(rect["w"], serde_json::json!(64.0)); // 2 cells across
+        assert_eq!(rect["fill"], serde_json::json!("#7f5539"));
+
+        // Six wall segments for the L shape (a re-entrant corner adds two).
+        let lines: Vec<_> = els.iter().filter(|e| e["type"] == "line").collect();
+        assert_eq!(lines.len(), 6, "{els:?}");
+        assert!(lines
+            .iter()
+            .all(|l| l["stroke"] == serde_json::json!("#d8e2ec")));
+        assert!(lines
+            .iter()
+            .all(|l| l["id"].as_str().unwrap().contains("-w")));
+
+        // The light is a circle at its px spot.
+        let circle = els.iter().find(|e| e["type"] == "circle").unwrap();
+        assert_eq!(circle["cx"], serde_json::json!(32.0));
+        assert_eq!(
+            circle["id"],
+            serde_json::json!(format!("{}-lt-l", floor.id))
+        );
+
+        // Determinism: same floor, same order, same ids.
+        let again = build_elements(floor, &walls, 32.0, 32.0);
+        assert_eq!(els, again);
+    }
+
+    #[test]
+    fn secret_walls_reach_elements_only_as_plain_walls_for_players() {
+        let mut d = doc();
+        let fid = d.floors[0].id.clone();
+        // A secret door on the north edge of cell (0,0).
+        let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+            {"t":"set_mark","edge":{"cell":{"x":0,"y":0},"edge":"north"},
+             "mark":{"kind":"secret","state":"closed"}}
+        ]))
+        .unwrap();
+        d.apply_ops(&fid, &ops).unwrap();
+
+        let gm_floor = ndcart_core::for_audience(&d.floors[0], Audience::Gm);
+        let gm_walls = tiles::derive_walls(&gm_floor, 32.0);
+        let gm: Vec<_> = build_elements(&gm_floor, &gm_walls, 32.0, 32.0)
+            .iter()
+            .filter(|e| e["type"] == "line")
+            .map(|e| e["stroke"].clone())
+            .collect();
+        assert!(
+            gm.contains(&serde_json::json!("#b06ad0")),
+            "the GM sees the secret"
+        );
+
+        let pl_floor = ndcart_core::for_audience(&d.floors[0], Audience::Player);
+        let pl_walls = tiles::derive_walls(&pl_floor, 32.0);
+        let pl: Vec<_> = build_elements(&pl_floor, &pl_walls, 32.0, 32.0)
+            .iter()
+            .filter(|e| e["type"] == "line")
+            .map(|e| e["stroke"].clone())
+            .collect();
+        assert!(
+            !pl.contains(&serde_json::json!("#b06ad0")),
+            "players see a plain wall"
+        );
+    }
 
     fn doc() -> store::StoredDoc {
         let mut d = store::StoredDoc::new("Vault", DocKind::Battle);
