@@ -36,6 +36,8 @@ pub struct ImageRequest {
     /// An image path on the server to start from (never nd-world's own art).
     pub init_image: Option<String>,
     pub init_strength: f64,
+    /// Upscale the finished picture by this factor with `upscale_model` (both or neither).
+    pub upscale: Option<(String, f64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -390,6 +392,10 @@ impl Bridge {
             "width": req.width, "height": req.height,
             "steps": req.steps, "seed": req.seed,
         });
+        if let Some((model, factor)) = &req.upscale {
+            body["upscale_model"] = json!(model);
+            body["upscale_factor"] = json!(factor);
+        }
         if let Some(init) = &req.init_image {
             body["init_image"] = json!(init);
             body["init_strength"] = json!(req.init_strength);

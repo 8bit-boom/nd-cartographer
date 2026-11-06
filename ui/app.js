@@ -1611,6 +1611,15 @@ function artItem(job, assetId, seed) {
     await reloadPalettes();
     document.getElementById('art-msg').textContent = `Added "${name}" to the props (${r.id}).`;
   });
+  if (job.kind !== 'underlay') mk('More like this', async () => {
+    // A style anchor: the next set starts from this picture, so it stays coherent.
+    const size = Number(document.getElementById('art-size').value);
+    const r = await api('POST', '/api/ai/image', { kind: job.kind, prompt: job.prompt, width: size, height: size, count: 3,
+      seed: Math.floor(Math.random() * 1e6), like: { job: job.id, index: job.assets.indexOf(assetId) } });
+    artJob = r.job; document.getElementById('art-results').textContent = '';
+    document.getElementById('art-go').disabled = true; document.getElementById('art-cancel').hidden = false;
+    pollArt();
+  });
   if (job.kind === 'underlay') mk('Use as underlay', async () => {
     const f = curFloor(); const cols = Math.max(f.canvas?.[0] || 0, 20), rows = Math.max(f.canvas?.[1] || 0, 15);
     await api('POST', `/api/docs/${state.docId}/underlay`, { floor: state.floorId, asset: assetId, x: 0, y: 0, w: cols, h: rows, opacity: 1 });

@@ -281,7 +281,8 @@ Not measured: 60 fps pan/zoom with 100,000 objects (the browser viewport is
 Canvas2D over baked tiles; a floor holds at most 20,000 props), tiles on a
 slow machine, and big terrain. An edit appends to `journal.ndjson` (synced); `snapshot.json` is
 rewritten every 200 edits or a minute, and a reload replays the journal's tail
-over it (so a crash loses nothing that was acknowledged).
+over it (so a crash loses nothing that was acknowledged: checked by killing a running
+studio with SIGKILL after 120 acknowledged edits and reopening it).
 
 ## Still open in M0
 

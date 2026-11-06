@@ -24,6 +24,8 @@ pub struct AiJob {
     /// Asset ids of the finished pictures, in order.
     pub assets: Vec<String>,
     pub seeds: Vec<i64>,
+    /// Where nd-world keeps each finished picture, so a later job can start from one.
+    pub urls: Vec<String>,
 }
 
 fn registry() -> &'static Mutex<BTreeMap<String, AiJob>> {
@@ -33,6 +35,11 @@ fn registry() -> &'static Mutex<BTreeMap<String, AiJob>> {
 
 pub fn get(id: &str) -> Option<AiJob> {
     registry().lock().expect("jobs").get(id).cloned()
+}
+
+/// The nd-world address of picture `index` of a finished job, for a style anchor.
+pub fn url_of(id: &str, index: usize) -> Option<String> {
+    get(id)?.urls.get(index).cloned()
 }
 
 pub fn cancel(id: &str) -> bool {
@@ -104,6 +111,7 @@ pub fn register(kind: &str, prompt: &str, count: usize) -> Result<String, String
             count,
             assets: Vec::new(),
             seeds: Vec::new(),
+            urls: Vec::new(),
         },
     );
     Ok(id)
@@ -117,6 +125,10 @@ pub struct Spec {
     pub height: u32,
     pub count: usize,
     pub seed: i64,
+    /// Start every picture from this nd-world picture (a style anchor), and how strongly it holds.
+    pub anchor: Option<(String, f64)>,
+    /// Upscale model and factor.
+    pub upscale: Option<(String, f64)>,
 }
 
 /// Do the work of a registered job: connect, then for each variant queue it,
@@ -153,8 +165,9 @@ pub async fn run(id: String, cfg: crate::draft::Config, spec: Spec) {
                 height: spec.height,
                 steps: 20,
                 seed,
-                init_image: None,
-                init_strength: 0.6,
+                init_image: spec.anchor.as_ref().map(|a| a.0.clone()),
+                init_strength: spec.anchor.as_ref().map_or(0.6, |a| a.1),
+                upscale: spec.upscale.clone(),
             };
             let job = bridge
                 .imagegen_start(&req)
@@ -199,9 +212,11 @@ pub async fn run(id: String, cfg: crate::draft::Config, spec: Spec) {
             let asset = tokio::task::spawn_blocking(move || crate::assets::global().put(&bytes))
                 .await
                 .map_err(|e| e.to_string())??;
+            let url = url.clone();
             update(&id, |j| {
                 j.assets.push(asset);
                 j.seeds.push(seed);
+                j.urls.push(url);
             });
         }
         Ok(())
@@ -249,6 +264,10 @@ mod tests {
         let c = register("underlay", "z", 1).unwrap();
         assert!(get(&c).is_some() && get(&b).unwrap().status == "running");
         assert!(get("nope").is_none() && !cancel("nope"));
+        // A finished picture's address is what a style anchor starts from.
+        update(&c, |j| j.urls.push("/uploads/ai-images/7.png".into()));
+        assert_eq!(url_of(&c, 0).as_deref(), Some("/uploads/ai-images/7.png"));
+        assert_eq!(url_of(&c, 1), None);
         cancel(&b);
         cancel(&c);
     }

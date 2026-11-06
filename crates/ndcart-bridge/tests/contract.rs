@@ -634,6 +634,7 @@ fn image_req() -> ImageRequest {
         seed: 7,
         init_image: None,
         init_strength: 0.6,
+        upscale: None,
     }
 }
 
@@ -788,4 +789,22 @@ async fn a_published_map_is_read_back_from_its_three_routes() {
         .unwrap_err()
         .to_string()
         .contains("cannot do that"));
+}
+
+#[tokio::test]
+async fn upscaling_is_sent_only_when_asked_for() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/api/ai/imagegen/jobs"))
+        .and(body_json(json!({"prompt": "weathered flagstones, top down", "negative": "", "width": 512, "height": 512, "steps": 20, "seed": 7, "upscale_model": "4x-ultrasharp", "upscale_factor": 2.0})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"job_id": 8}))).expect(1).mount(&s).await;
+    let mut r = image_req();
+    r.upscale = Some(("4x-ultrasharp".into(), 2.0));
+    assert_eq!(
+        Bridge::new(&s.uri(), None)
+            .unwrap()
+            .imagegen_start(&r)
+            .await
+            .unwrap(),
+        8
+    );
 }

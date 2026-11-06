@@ -53,7 +53,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/style` | `{tone, palette:[#rrggbb…]}` | The project's house style (fed to drafts; the palette colours generated rooms). Empty clears. |
 | POST | `/api/draft-world` | `{prompt, doc?, lore?}` | Like `/api/draft` for a WorldSpec. `lore:true` reuses the world's location names (nd-world). |
 | GET | `/api/ai/status` | – | `{mode: nd-world\|standalone\|off, detail}`. Standalone = `ND_CARTO_LLM_URL` + `ND_CARTO_LLM_MODEL` (+ `ND_CARTO_LLM_KEY[_FILE]`), an OpenAI-compatible endpoint. |
-| POST | `/api/ai/image` | `{kind: underlay\|material\|prop, prompt, width?, height?, count?, seed?}` | Queue pictures through nd-world's imagegen in the background → `{job}`. nd-world only. |
+| POST | `/api/ai/image` | `{kind: underlay\|material\|prop, prompt, width?, height?, count?, seed?, like?: {job, index}, strength?, upscale?}` | Queue pictures through nd-world's imagegen in the background → `{job}`. nd-world only. |
 | GET | `/api/ai/jobs/{id}` | – | `{status: running\|done\|error\|cancelled, message, assets:[ids], seeds}`; POST `…/cancel`. |
 | POST | `/api/assets/{id}/make-material` | `{name, size?, seamless?, prompt?, seed?, ai?}` | Make the picture seamless and add it to the palette (`mat_…`). |
 | POST | `/api/assets/{id}/make-stamp` | `{name, size?, key?, tolerance?, prompt?, seed?, ai?}` | Cut the prop out of its flat background, trim it, add it to the props (`stp_…`). |

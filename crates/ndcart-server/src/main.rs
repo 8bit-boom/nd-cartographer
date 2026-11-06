@@ -1111,6 +1111,26 @@ struct AiImageBody {
     #[serde(default = "minus_one")]
     #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
     seed: i64,
+    /// Start from a picture an earlier job made (`{job, index}`), so a set stays coherent.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    like: Option<AnchorRef>,
+    /// 0.1-0.95: how strongly the anchor holds (default 0.6).
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    strength: Option<f64>,
+    /// Upscale the result by this factor (needs `ND_CARTO_UPSCALE_MODEL` in the studio's environment).
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    upscale: Option<f64>,
+}
+#[derive(Deserialize)]
+struct AnchorRef {
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    job: String,
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    index: usize,
 }
 fn d_img() -> u32 {
     512
@@ -1156,6 +1176,42 @@ async fn ai_image(
                     .into(),
             )));
         }
+        let anchor = match &b.like {
+            Some(a) => {
+                let url = aijobs::url_of(&a.job, a.index).ok_or_else(|| {
+                    ApiError(CoreError::NotFound(format!(
+                        "picture {} of job {}",
+                        a.index, a.job
+                    )))
+                })?;
+                let strength = b.strength.unwrap_or(0.6);
+                if !(0.1..=0.95).contains(&strength) {
+                    return Err(ApiError(CoreError::Invalid(
+                        "strength must be 0.1-0.95".into(),
+                    )));
+                }
+                Some((url, strength))
+            }
+            None => None,
+        };
+        let upscale = match b.upscale {
+            Some(f) => {
+                if !(1.0..=4.0).contains(&f) {
+                    return Err(ApiError(CoreError::Invalid("upscale must be 1-4".into())));
+                }
+                let model = std::env::var("ND_CARTO_UPSCALE_MODEL")
+                    .ok()
+                    .filter(|m| !m.is_empty())
+                    .ok_or_else(|| {
+                        ApiError(CoreError::NotFound(
+                            "set ND_CARTO_UPSCALE_MODEL to the upscale model nd-world should use"
+                                .into(),
+                        ))
+                    })?;
+                (f > 1.0).then_some((model, f))
+            }
+            None => None,
+        };
         let id = aijobs::register(&b.kind, &prompt, count)
             .map_err(|m| ApiError(CoreError::CapExceeded(m)))?;
         tokio::spawn(aijobs::run(
@@ -1168,6 +1224,8 @@ async fn ai_image(
                 height: b.height,
                 count,
                 seed: b.seed,
+                anchor,
+                upscale,
             },
         ));
         Ok(Json(serde_json::json!({ "job": id })))
