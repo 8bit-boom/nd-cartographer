@@ -24,12 +24,12 @@ jobs:
       - name: Start and check
         run: |
           mkdir -p "$RUNNER_TEMP/data" && sudo chown 568:568 "$RUNNER_TEMP/data"
-          docker run -d --name t -p 8300:8300 -e ND_CARTO_TOKEN=ci-token -v "$RUNNER_TEMP/data:/data" --user 568:568 nd-cartographer:ci
+          docker run -d --name ndcart-ci -p 8300:8300 -e ND_CARTO_TOKEN=ci-token -v "$RUNNER_TEMP/data:/data" --user 568:568 nd-cartographer:ci
           for i in $(seq 1 20); do
-            docker exec t ndcart healthcheck && ok=1 && break
+            docker exec ndcart-ci ndcart healthcheck && ok=1 && break
             sleep 1
           done
-          docker logs t
+          docker logs ndcart-ci
           test "${ok:-}" = 1
           curl -fsS http://localhost:8300/health
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8300/api/docs)" = 401

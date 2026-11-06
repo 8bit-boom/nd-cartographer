@@ -201,6 +201,7 @@ fn encode_chunk(d: &[u16]) -> String {
     base64::encode(&bytes)
 }
 
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 fn decode_chunk(s: &str) -> CoreResult<Vec<u16>> {
     let bytes =
         base64::decode(s).ok_or_else(|| CoreError::Invalid("chunk data is not base64".into()))?;
