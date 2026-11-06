@@ -6,14 +6,15 @@
 
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Level {
     Ok,
     Warn,
     Fail,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Check {
     pub level: Level,
     pub what: &'static str,
@@ -119,6 +120,11 @@ fn env(k: &str) -> Option<String> {
 
 /// The offline checks.
 pub fn local_checks(data: Option<&Path>, listen: &str) -> Vec<Check> {
+    local_checks_with(data, Some(listen))
+}
+
+/// The offline checks; `listen: None` skips the address check (the studio is already listening).
+pub fn local_checks_with(data: Option<&Path>, listen: Option<&str>) -> Vec<Check> {
     let mut v = vec![ok(
         "build",
         format!(
@@ -133,7 +139,9 @@ pub fn local_checks(data: Option<&Path>, listen: &str) -> Vec<Check> {
         None => warn("data folder", "none set: projects live in memory and vanish when the studio stops. Use --data-dir or ND_CARTO_DATA_DIR."),
     });
     v.extend(codecs_and_fonts());
-    v.push(port(listen));
+    if let Some(l) = listen {
+        v.push(port(l));
+    }
     v
 }
 

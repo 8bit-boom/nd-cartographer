@@ -622,7 +622,8 @@ async function loadStamps() {
   wrap.textContent = '';
   for (const s of STAMPS) {
     const b = document.createElement('button');
-    b.title = s.name;
+    b.title = s.tags?.length ? `${s.name} (${s.tags.join(', ')})` : s.name;
+    b.dataset.find = `${s.name} ${(s.tags || []).join(' ')}`.toLowerCase();
     b.className = state.stamp?.id === s.id ? 'active' : '';
     const img = document.createElement('img');
     img.src = `/api/stamps/${s.id}/icon.png`;
@@ -632,7 +633,16 @@ async function loadStamps() {
     wrap.appendChild(b);
   }
   if (!state.stamp && STAMPS.length) state.stamp = STAMPS[0];
+  applyStampFilter();
 }
+
+function applyStampFilter() {
+  const words = document.getElementById('stamp-filter').value.toLowerCase().split(/\s+/).filter(Boolean);
+  for (const b of document.getElementById('stamp-palette').children) {
+    b.hidden = !words.every(w => (b.dataset.find || '').includes(w));
+  }
+}
+document.getElementById('stamp-filter').addEventListener('input', applyStampFilter);
 
 function loadStampsSelection() {
   [...document.getElementById('stamp-palette').children].forEach((b, i) =>
@@ -1589,6 +1599,25 @@ document.getElementById('art-cancel').onclick = async () => {
   if (artJob) { try { await api('POST', `/api/ai/jobs/${artJob}/cancel`); } catch { /* finished already */ } }
 };
 document.getElementById('art-close').onclick = () => artDialog.close();
+
+// ---------- settings and health ----------
+const settingsDialog = document.getElementById('settings-dialog');
+document.getElementById('btn-settings').onclick = async () => {
+  const list = document.getElementById('settings-list');
+  list.textContent = 'Checking…';
+  settingsDialog.showModal();
+  try {
+    const { checks } = await api('GET', '/api/doctor');
+    list.textContent = '';
+    for (const c of checks) {
+      const li = document.createElement('li'); li.className = c.level;
+      const lv = document.createElement('span'); lv.className = 'lv'; lv.textContent = c.level === 'ok' ? 'ok' : c.level === 'warn' ? 'warn' : 'FAIL';
+      const t = document.createElement('span'); t.textContent = `${c.what}: ${c.detail}`;   // text, never HTML
+      li.append(lv, t); list.appendChild(li);
+    }
+  } catch (e) { list.textContent = e.message; }
+};
+document.getElementById('settings-close').onclick = () => settingsDialog.close();
 
 // ---------- import an art pack ----------
 document.getElementById('btn-pack').onclick = () => document.getElementById('pack-file').click();

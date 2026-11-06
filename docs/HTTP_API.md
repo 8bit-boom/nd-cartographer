@@ -37,6 +37,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 
 | POST | `/api/docs/{id}/generate-map` | `{floor?, kind: dungeon\|cave\|building\|deck\|district, seed, width, height}` | 16–120 squares a side. Adds to the floor as one undoable step; same seed, same map. |
 | GET | `/api/docs/{id}/export/pdf?floor&paper=letter\|a4&inch=1&dpi=150&audience` | – | The floor at true scale, one inch a square by default, cut into pages (≤80). White ground, corner ticks, a "page r of n" label. |
+| GET | `/api/doctor` | – | The `ndcart doctor` checks as `{checks:[{level: ok\|warn\|fail, what, detail}]}` (no address check, nothing secret). |
 | POST | `/api/packs/import?name=file` | raw `.dungeondraft_pack` bytes (≤200 MB) | Objects → props, terrain → materials; `{pack, stamps, materials, skipped, notes}`. Zip and newer archive formats are refused with advice. |
 | POST / GET / DELETE | `/api/docs/{id}/table` | POST `{floor?, x, y, radius?, darkness?}` | The shared table view. GET returns what the screen polls; DELETE turns it off. The screen itself is `GET /table/{id}` (read-only HTML). |
 | POST | `/api/docs/{id}/furnish` | `{floor?, spaces:[room ids], seed, only_empty?}` | Props from each room's name/kind, never in a doorway. One undo step. |

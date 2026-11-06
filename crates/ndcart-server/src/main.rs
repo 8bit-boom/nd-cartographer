@@ -1857,6 +1857,20 @@ async fn refine_floor(
     }
 }
 
+/// `GET /api/doctor` — the same checks as `ndcart doctor`, for the Settings panel:
+/// `{checks: [{level: ok|warn|fail, what, detail}]}`. Read-only; nothing secret is shown.
+async fn doctor_checks(State(app): State<App>) -> Json<serde_json::Value> {
+    let data = app.data_dir.clone();
+    #[allow(unused_mut)]
+    let mut checks =
+        tokio::task::spawn_blocking(move || doctor::local_checks_with(data.as_deref(), None))
+            .await
+            .unwrap_or_default();
+    #[cfg(feature = "bridge")]
+    checks.extend(doctor::ai_checks().await);
+    Json(serde_json::json!({ "checks": checks }))
+}
+
 /// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
 /// `{mode: "nd-world" | "standalone" | "off", detail}`.
 async fn ai_status() -> Json<serde_json::Value> {
@@ -2638,6 +2652,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/export/pdf", get(export_pdf))
         .route("/api/draft", post(draft_spec))
         .route("/api/ai/status", get(ai_status))
+        .route("/api/doctor", get(doctor_checks))
         .route("/api/docs/{id}/refine", post(refine_floor))
         .route("/api/docs/{id}/style", post(set_style))
         .route("/api/draft-world", post(draft_world_spec))
@@ -3945,6 +3960,31 @@ mod tests {
         assert_eq!(style(r##"{"tone":"","palette":[]}"##).await, StatusCode::OK);
         let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
         assert!(json(d)["manifest"]["style"].is_null());
+    }
+
+    #[tokio::test]
+    async fn the_settings_panel_gets_the_doctors_checks_and_no_secrets() {
+        let router = build_router(test_app());
+        let (st, b) = call(&router, "GET", "/api/doctor", vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        let checks = v["checks"].as_array().unwrap();
+        assert!(checks
+            .iter()
+            .any(|c| c["what"] == "fonts" && c["level"] == "ok"));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c["what"] == "data folder" && c["level"] == "warn"),
+            "no data dir in tests: a warning, not a failure"
+        );
+        assert!(
+            !checks.iter().any(|c| c["what"] == "address"),
+            "the studio is already listening"
+        );
+        assert!(!String::from_utf8_lossy(&b)
+            .to_lowercase()
+            .contains("password\":"));
     }
 
     #[tokio::test]

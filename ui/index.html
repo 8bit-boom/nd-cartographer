@@ -17,6 +17,7 @@
   <button id="btn-art" title="Make pictures with nd-world's AI: a map underlay, a tiling material, or a set of props">🖼 Make art…</button>
   <button id="btn-pack" title="Add a Dungeondraft pack (.dungeondraft_pack): its objects become props, its terrain textures become materials">📦 Import pack…</button>
   <input id="pack-file" type="file" accept=".dungeondraft_pack,.pck" hidden>
+  <button id="btn-settings" title="Is everything set up? Folder, picture formats, fonts, AI and nd-world">⚙ Settings</button>
   <button id="btn-gallery" title="All projects as thumbnails">🗂 Projects</button>
   <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
   <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
@@ -177,6 +178,12 @@
     </div>
     <menu><button id="spec-close" type="button">Close</button></menu>
   </dialog>
+  <dialog id="settings-dialog">
+    <h3>Settings and health</h3>
+    <ul id="settings-list" class="checks" aria-live="polite"></ul>
+    <p class="dim">AI and nd-world are set in the environment the studio starts in (never typed here); see the README. The same checks run with <code>ndcart doctor</code>.</p>
+    <menu><button id="settings-close" type="button">Close</button></menu>
+  </dialog>
   <dialog id="gallery-dialog">
     <h3>Projects</h3>
     <div id="gallery-grid" role="list"></div>
@@ -289,6 +296,7 @@
     <span class="dim" id="lb-hint"></span>
   </div>
   <div id="stampbar" hidden>
+    <input id="stamp-filter" type="search" placeholder="Find a prop (name or tag)" aria-label="Filter props" style="width:11em">
     <span id="stamp-palette"></span>
     <label>Scale <input type="range" id="st-scale" min="0.3" max="3" step="0.1" value="1"></label>
     <label>Rotate <input type="range" id="st-rot" min="0" max="345" step="15" value="0"><output id="st-rot-o">0°</output></label>
