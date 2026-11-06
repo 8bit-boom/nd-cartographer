@@ -16,7 +16,7 @@ Then open http://127.0.0.1:8300. Your projects live in the data folder.
 If something does not work, run `ndcart doctor` (it checks the folder, the
 picture formats, the font, the port, and the AI/nd-world settings, and tells
 you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
-8300 with `/data` as the volume.
+8300 with `/data` as the volume; [docs/DOCKER.md](docs/DOCKER.md) has the TrueNAS SCALE steps and a compose file.
 
 ## What you can do
 

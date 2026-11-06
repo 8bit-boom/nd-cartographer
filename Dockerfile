@@ -38,8 +38,15 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/ndcart /usr/local/bin/ndcart
+# Runs as an unprivileged user (568 = the "apps" user on TrueNAS SCALE). If your
+# dataset has another owner, set `user:` in compose (docs/DOCKER.md).
+RUN useradd --system --uid 568 --user-group --home-dir /data --shell /usr/sbin/nologin ndcart \
+    && mkdir -p /data && chown ndcart:ndcart /data
+USER 568:568
 ENV ND_CARTO_LISTEN=0.0.0.0:8300 \
     ND_CARTO_DATA_DIR=/data
 VOLUME ["/data"]
 EXPOSE 8300
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/ndcart", "healthcheck"]
 CMD ["/usr/local/bin/ndcart", "serve"]
