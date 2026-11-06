@@ -549,6 +549,25 @@ impl Journal {
         self.entries.truncate(n);
     }
 
+    /// Drop the oldest `n` entries (journal compaction): the undo window
+    /// shrinks, the document itself is untouched. Undo marks are indices, so
+    /// they are remapped; a mark at a dropped entry is cleared (that entry
+    /// becomes a plain forward op — it still replays, and its own inverse
+    /// keeps it undoable).
+    pub fn drop_front(&mut self, n: usize) {
+        let n = n.min(self.entries.len());
+        if n == 0 {
+            return;
+        }
+        self.entries.drain(..n);
+        for e in &mut self.entries {
+            e.undoes = match e.undoes {
+                Some(i) if i >= n => Some(i - n),
+                _ => None,
+            };
+        }
+    }
+
     /// Undo the most recent entry that has not been undone yet: apply its
     /// stored inverse and APPEND that as a new entry marked `undoes`. Nothing is
     /// rewritten or deleted (append-only), and repeated undo walks back through
@@ -781,6 +800,73 @@ mod tests {
         let mut fresh = FloorDoc::new("f1".into(), "Ground".into());
         back.replay_into(&mut fresh).unwrap();
         assert_eq!(fresh.grid.cell_count(), 1);
+    }
+
+    #[test]
+    fn drop_front_compacts_and_undo_still_works() {
+        let (mut floor, mut journal) = painted_floor();
+        // Ten painted cells, each its own entry.
+        for x in 0..10 {
+            journal
+                .push(
+                    &mut floor,
+                    &Op::PaintCells {
+                        cells: vec![CellKey::new(x, 0)],
+                        space: Some("a".into()),
+                    },
+                )
+                .unwrap();
+        }
+        // One undo (marks the last entry as undoing the tenth paint), then
+        // compact away the first eight (the seed space upsert + seven paints).
+        journal.undo_last(&mut floor).unwrap();
+        assert_eq!(floor.grid.cell_count(), 9);
+        journal.drop_front(8);
+        assert_eq!(journal.len(), 4);
+        // The undo mark shifted with its entry: another undo steps back again
+        // (to the state after entry 7), not forward.
+        journal.undo_last(&mut floor).unwrap();
+        assert_eq!(floor.grid.cell_count(), 8);
+        // And the compacted journal still replays: snapshot base (the state
+        // the dropped entries produced) + the window = the current state.
+        let text = journal.to_ndjson();
+        let back = Journal::from_ndjson(&text).unwrap();
+        let mut fresh = FloorDoc::new("f1".into(), "Ground".into());
+        crate::journal::apply_op(&mut fresh, &Op::UpsertSpace { space: space_a() }).unwrap();
+        crate::journal::apply_op(
+            &mut fresh,
+            &Op::PaintCells {
+                cells: (0..7).map(|x| CellKey::new(x, 0)).collect(),
+                space: Some("a".into()),
+            },
+        )
+        .unwrap();
+        back.replay_into(&mut fresh).unwrap();
+        assert_eq!(fresh.grid.cell_count(), 8, "base + window = current");
+    }
+
+    #[test]
+    fn drop_front_clears_marks_into_dropped_entries() {
+        let (mut floor, mut journal) = painted_floor();
+        journal
+            .push(
+                &mut floor,
+                &Op::PaintCells {
+                    cells: vec![CellKey::new(0, 0)],
+                    space: Some("a".into()),
+                },
+            )
+            .unwrap();
+        journal.undo_last(&mut floor).unwrap();
+        assert_eq!(floor.grid.cell_count(), 0);
+        // The seed upsert and the paint were dropped; the undo (whose mark
+        // pointed at the dropped paint) becomes a plain forward op.
+        journal.drop_front(2);
+        assert_eq!(journal.len(), 1);
+        assert!(journal.entries()[0].undoes.is_none());
+        // It still undoes via its own inverse...
+        journal.undo_last(&mut floor).unwrap();
+        assert_eq!(floor.grid.cell_count(), 1);
     }
 
     #[test]

@@ -75,6 +75,16 @@ pub struct Persisted {
 const SNAPSHOT_EVERY_OPS: usize = 200;
 const SNAPSHOT_EVERY_SECS: u64 = 60;
 
+/// Compaction: the undo journal is capped. A document edited for months must
+/// not carry every edit's inverse forever (in memory or in `journal.ndjson`);
+/// checkpoints are the long-term history. At `JOURNAL_COMPACT_AT` entries the
+/// oldest are dropped so `JOURNAL_KEEP` remain; the next save rewrites the
+/// files once (`save_doc_fast`'s "the journal got shorter" path) and normal
+/// appends resume. Undo reaches back `JOURNAL_KEEP` edits — the undo error
+/// message says so.
+pub const JOURNAL_COMPACT_AT: usize = 4096;
+pub const JOURNAL_KEEP: usize = 2048;
+
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -156,7 +166,18 @@ impl StoredDoc {
         }
         self.rev += 1;
         self.manifest.updated_at = ndcart_core::doc::now_iso();
+        self.compact_journal();
         Ok(())
+    }
+
+    /// Enforce the undo-window cap (see [`JOURNAL_COMPACT_AT`]). Purely
+    /// in-memory: the next save reconciles the files, because a shrunken
+    /// journal makes `save_doc_fast` fall back to a full rewrite.
+    fn compact_journal(&mut self) {
+        let len = self.journal.len();
+        if len >= JOURNAL_COMPACT_AT {
+            self.journal.drop_front(len - JOURNAL_KEEP);
+        }
     }
 
     fn touched(&mut self) {
@@ -434,6 +455,7 @@ impl StoredDoc {
         self.journal.undo_last(floor)?;
         self.rev += 1;
         self.manifest.updated_at = ndcart_core::doc::now_iso();
+        self.compact_journal();
         Ok(())
     }
 }
@@ -821,6 +843,35 @@ mod persistence_tests {
         let mut b = reload(&dir).docs.remove(&id).unwrap();
         b.undo_last(&fid).unwrap();
         assert_eq!(b.floors[0].grid.cell_count(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_journal_compacts_at_the_cap_and_a_reload_still_matches() {
+        let dir = tmpdir("compact");
+        let mut d = StoredDoc::new("Compact", DocKind::Battle);
+        let (id, fid) = (d.manifest.id.clone(), d.floors[0].id.clone());
+        save_doc(Some(&dir), &d);
+        let edits = JOURNAL_COMPACT_AT + 100;
+        for x in 0..edits {
+            d.apply_ops(&fid, &paint(x as i32)).unwrap();
+            save_doc_fast(Some(&dir), &d);
+        }
+        // The window is capped (the oldest entries are gone, memory and disk).
+        assert_eq!(d.journal.len(), JOURNAL_KEEP + 100);
+        // Undo still reaches back into the retained window.
+        d.undo_last(&fid).unwrap();
+        // The next save rewrites the files whole; a reload reproduces the state.
+        save_doc_fast(Some(&dir), &d);
+        let back = reload(&dir);
+        let b = &back.docs[&id];
+        assert_eq!(b.floors, d.floors, "state survives compaction + reload");
+        assert_eq!(b.journal.len(), d.journal.len());
+        assert_eq!(
+            b.floors[0].grid.cell_count(),
+            edits - 1,
+            "every edit painted a distinct cell, one was undone"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
