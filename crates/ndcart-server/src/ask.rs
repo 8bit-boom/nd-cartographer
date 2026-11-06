@@ -58,6 +58,14 @@ pub fn digest(store: &Store) -> String {
                 };
                 block.push_str(&format!("    marker {}{}\n", m.label, note));
             }
+            for l in &f.entity_links {
+                if let Some(sp) = f.grid.spaces.get(&l.space) {
+                    block.push_str(&format!(
+                        "    room {} is the {} {}\n",
+                        sp.name, l.kind, l.name
+                    ));
+                }
+            }
             let zones: Vec<&str> = f.zones.iter().map(|z| z.name.as_str()).collect();
             if !zones.is_empty() {
                 block.push_str(&format!("    zones: {}\n", zones.join("; ")));

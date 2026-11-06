@@ -41,6 +41,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | GET | `/api/docs/{id}/export/foundry?floor&ppc=100&image&distance=5&units=ft&audience` | – | Foundry v11/v12 scene JSON (walls, doors, windows, lights, grid). The picture is exported separately. |
 | POST | `/api/import/foundry?name=` | scene JSON | New project with the scene's walls, doors and lights (no picture; add it as an underlay). |
 | GET | `/api/packs/export?name=&include=all` | – | Your own props and materials as a Dungeondraft-style pack; borrowed art is left out unless `include=all`. |
+| GET | `/api/world/entities?q=` | – | The world's entities (nd-world) matching the words, ≤50, for linking a room. The op `link_entity {link:{space, entity_id, name, kind}}` / `unlink_entity {space}` does the linking. |
 | POST | `/api/ask` | `{question}` | Answer a question from a digest of every project's text. Needs an AI. |
 | POST | `/api/packs/import?name=file` | raw `.dungeondraft_pack` bytes (≤200 MB) | Objects → props, terrain → materials; `{pack, stamps, materials, skipped, notes}`. Zip and newer archive formats are refused with advice. |
 | POST / GET / DELETE | `/api/docs/{id}/table` | POST `{floor?, x, y, radius?, darkness?}` | The shared table view. GET returns what the screen polls; DELETE turns it off. The screen itself is `GET /table/{id}` (read-only HTML). |

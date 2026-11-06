@@ -41,6 +41,13 @@ pub enum Op {
     RemoveLight {
         id: String,
     },
+    /// Tie a room to an entity of the world, or cut the tie.
+    LinkEntity {
+        link: crate::doc::EntityLink,
+    },
+    UnlinkEntity {
+        space: String,
+    },
     UpsertZone {
         zone: crate::zone::Zone,
     },
@@ -220,6 +227,22 @@ impl Op {
                 Ok(Op::AddLight {
                     light: light.clone(),
                 })
+            }
+            Op::LinkEntity { link } => {
+                match floor.entity_links.iter().find(|l| l.space == link.space) {
+                    Some(prev) => Ok(Op::LinkEntity { link: prev.clone() }),
+                    None => Ok(Op::UnlinkEntity {
+                        space: link.space.clone(),
+                    }),
+                }
+            }
+            Op::UnlinkEntity { space } => {
+                let link = floor
+                    .entity_links
+                    .iter()
+                    .find(|l| l.space == *space)
+                    .ok_or_else(|| CoreError::NotFound(format!("link on room {space}")))?;
+                Ok(Op::LinkEntity { link: link.clone() })
             }
             Op::UpsertZone { zone } => match floor.zones.iter().find(|z| z.id == zone.id) {
                 Some(prev) => Ok(Op::UpsertZone { zone: prev.clone() }),
@@ -416,6 +439,8 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::SetMark { edge, mark } => floor.grid.set_mark(*edge, *mark)?,
         Op::AddLight { light } => floor.add_light(light.clone())?,
         Op::RemoveLight { id } => floor.remove_light(id)?,
+        Op::LinkEntity { link } => floor.link_entity(link.clone())?,
+        Op::UnlinkEntity { space } => floor.unlink_entity(space)?,
         Op::UpsertZone { zone } => floor.upsert_zone(zone.clone())?,
         Op::RemoveZone { id } => floor.remove_zone(id)?,
         Op::UpsertLabel { label } => floor.upsert_label(label.clone())?,
@@ -1449,6 +1474,60 @@ mod tests {
         });
         f.put_overlay(again, None).unwrap();
         assert_eq!(f.markers[3].label, "moved");
+    }
+
+    #[test]
+    fn a_room_links_to_an_entity_and_the_link_undoes_exactly() {
+        use crate::grid::{default_space, SpaceKind};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.grid
+            .upsert_space(default_space("a", "Tavern", SpaceKind::Room))
+            .unwrap();
+        let link = |id: i64, name: &str| crate::doc::EntityLink {
+            space: "a".into(),
+            entity_id: id,
+            name: name.into(),
+            kind: "location".into(),
+        };
+        let mut j = Journal::default();
+        j.push(
+            &mut f,
+            &Op::LinkEntity {
+                link: link(7, "The Gilded Mug"),
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut f,
+            &Op::LinkEntity {
+                link: link(9, "The Rusty Anchor"),
+            },
+        )
+        .unwrap();
+        assert_eq!(f.entity_links.len(), 1, "one link per room");
+        assert_eq!(f.entity_links[0].entity_id, 9);
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(f.entity_links[0].name, "The Gilded Mug");
+        j.push(&mut f, &Op::UnlinkEntity { space: "a".into() })
+            .unwrap();
+        assert!(f.entity_links.is_empty());
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(f.entity_links.len(), 1);
+        // A room that does not exist, and a link with no name, are refused.
+        let mut ghost = link(1, "x");
+        ghost.space = "zzz".into();
+        assert!(j.push(&mut f, &Op::LinkEntity { link: ghost }).is_err());
+        assert!(j
+            .push(&mut f, &Op::LinkEntity { link: link(1, "") })
+            .is_err());
+        assert!(j
+            .push(
+                &mut f,
+                &Op::UnlinkEntity {
+                    space: "nope".into()
+                }
+            )
+            .is_err());
     }
 
     #[test]

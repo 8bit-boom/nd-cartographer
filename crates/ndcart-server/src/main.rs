@@ -101,6 +101,7 @@ struct FloorView {
     regions: Vec<ndcart_core::Region>,
     routes: Vec<ndcart_core::Route>,
     zones: Vec<ndcart_core::Zone>,
+    entity_links: Vec<ndcart_core::doc::EntityLink>,
     #[serde(skip_serializing_if = "Option::is_none")]
     map_grid: Option<ndcart_core::MapGrid>,
 }
@@ -147,6 +148,7 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         regions: floor.regions.clone(),
         routes: floor.routes.clone(),
         zones: floor.zones.clone(),
+        entity_links: floor.entity_links.clone(),
         map_grid: floor.map_grid.clone(),
     }
 }
@@ -2187,6 +2189,60 @@ async fn ask_maps(
     }
 }
 
+#[derive(Deserialize)]
+struct EntitiesQuery {
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    q: Option<String>,
+}
+
+/// `GET /api/world/entities?q=` — the world's entities (nd-world), filtered by name,
+/// so a room can be linked to one. At most 50 matches.
+async fn world_entities(
+    axum::extract::Query(q): axum::extract::Query<EntitiesQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    #[cfg(feature = "bridge")]
+    {
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        if cfg.direct.is_some() {
+            return Err(ApiError(CoreError::Invalid(
+                "entities live in nd-world; a standalone model has none".into(),
+            )));
+        }
+        let backend = draft::Backend::connect(&cfg)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        let draft::Backend::World(bridge, _) = &backend else {
+            return Err(ApiError(CoreError::Invalid(
+                "entities live in nd-world".into(),
+            )));
+        };
+        let words: Vec<String> =
+            q.q.unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_lowercase)
+                .collect();
+        let all = bridge
+            .entities()
+            .await
+            .map_err(|e| ApiError(CoreError::Invalid(e.to_string())))?;
+        let hits: Vec<_> = all
+            .into_iter()
+            .filter(|(_, name, _)| {
+                let n = name.to_lowercase();
+                words.iter().all(|w| n.contains(w))
+            })
+            .take(50)
+            .map(|(id, name, kind)| serde_json::json!({ "id": id, "name": name, "kind": kind }))
+            .collect();
+        Ok(Json(serde_json::json!({ "entities": hits })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = q;
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
+}
+
 /// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
 /// `{mode: "nd-world" | "standalone" | "off", detail}`.
 async fn ai_status() -> Json<serde_json::Value> {
@@ -2971,6 +3027,7 @@ fn build_router(app: App) -> Router {
         .route("/api/import/foundry", post(import_foundry))
         .route("/api/draft", post(draft_spec))
         .route("/api/ai/status", get(ai_status))
+        .route("/api/world/entities", get(world_entities))
         .route("/api/ask", post(ask_maps))
         .route("/api/doctor", get(doctor_checks))
         .route("/api/docs/{id}/refine", post(refine_floor))

@@ -808,3 +808,31 @@ async fn upscaling_is_sent_only_when_asked_for() {
         8
     );
 }
+
+#[tokio::test]
+async fn every_entity_is_listed_with_its_id_and_kind() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/entities/picker"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"entities": [
+                {"id": 1, "name": "Port Neon", "kind": "location", "folder": ""},
+                {"id": 2, "name": "Mara", "kind": "character", "folder": ""},
+                {"name": "broken row"},
+            ]})),
+        )
+        .mount(&s)
+        .await;
+    let all = Bridge::new(&s.uri(), None)
+        .unwrap()
+        .entities()
+        .await
+        .unwrap();
+    assert_eq!(
+        all,
+        vec![
+            (1, "Port Neon".to_string(), "location".to_string()),
+            (2, "Mara".to_string(), "character".to_string())
+        ]
+    );
+}

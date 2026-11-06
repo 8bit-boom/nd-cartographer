@@ -157,6 +157,36 @@ impl Label {
     }
 }
 
+/// A room tied to an entity of the world it will be published into.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct EntityLink {
+    pub space: String,
+    /// The entity's id in nd-world.
+    pub entity_id: i64,
+    /// Its name when linked (kept so the link reads well offline).
+    pub name: String,
+    /// `location`, `character`, `organization`, …
+    pub kind: String,
+}
+
+impl EntityLink {
+    pub fn validate(&self) -> CoreResult<()> {
+        let n = self.name.chars().count();
+        if self.space.is_empty()
+            || self.entity_id < 0
+            || n == 0
+            || n > 120
+            || self.kind.is_empty()
+            || self.kind.chars().count() > 40
+        {
+            return Err(CoreError::Invalid(
+                "an entity link needs a room, an id, a name (1-120) and a kind".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A lattice over the map. `size` is the width of one square, or the
 /// flat-to-flat width of one pointy-top hex, in cells.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -299,6 +329,9 @@ pub struct FloorDoc {
     pub labels: Vec<Label>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub zones: Vec<crate::zone::Zone>,
+    /// Rooms tied to things in the world (an nd-world location, an NPC's lair…).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entity_links: Vec<EntityLink>,
     /// Paint strokes in z-order (later draws over earlier). Cosmetic: they
     /// shape the baked picture, never walls or rooms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -364,6 +397,7 @@ impl FloorDoc {
             lights: Vec::new(),
             labels: Vec::new(),
             zones: Vec::new(),
+            entity_links: Vec::new(),
             map_grid: None,
             strokes: Vec::new(),
             stamps: Vec::new(),
@@ -843,6 +877,32 @@ impl FloorDoc {
                 return Err(CoreError::CapExceeded("at most 2000 labels".into()));
             }
             self.labels.push(label);
+        }
+        Ok(())
+    }
+
+    /// Tie a room to an entity (replacing that room's earlier link).
+    pub fn link_entity(&mut self, link: EntityLink) -> CoreResult<()> {
+        link.validate()?;
+        if !self.grid.spaces.contains_key(&link.space) {
+            return Err(CoreError::NotFound(format!("room {}", link.space)));
+        }
+        if let Some(l) = self.entity_links.iter_mut().find(|l| l.space == link.space) {
+            *l = link;
+        } else {
+            if self.entity_links.len() >= 2_000 {
+                return Err(CoreError::CapExceeded("at most 2000 entity links".into()));
+            }
+            self.entity_links.push(link);
+        }
+        Ok(())
+    }
+
+    pub fn unlink_entity(&mut self, space: &str) -> CoreResult<()> {
+        let before = self.entity_links.len();
+        self.entity_links.retain(|l| l.space != space);
+        if self.entity_links.len() == before {
+            return Err(CoreError::NotFound(format!("link on room {space}")));
         }
         Ok(())
     }

@@ -1321,6 +1321,8 @@ function addRow(parent, key, level, html, label, handlers = {}) {
 
 const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+const linkOf = (id) => (curFloor().entity_links || []).find(l => l.space === id);
+
 function buildOutline() {
   const o = curFloor().outline;
   // Rebuilding replaces the rows; if the keyboard was in the tree, put it back.
@@ -1344,7 +1346,7 @@ function buildOutline() {
     if (g === 'rooms') for (const s of o.spaces) {
       const where = s.bbox ? `${s.cells} squares` : 'no squares yet';
       const r = addRow(treeEl, `s:${s.id}`, 2,
-        `<span class="chip" style="background:${esc(s.color)}"></span>${esc(s.name)}<span class="meta">${where} · ${esc(s.kind)}</span>`,
+        `<span class="chip" style="background:${esc(s.color)}"></span>${esc(s.name)}<span class="meta">${where} · ${esc(s.kind)}${linkOf(s.id) ? ' · 🔗 ' + esc(linkOf(s.id).name) : ''}</span>`,
         `Room ${s.name}, ${where}, ${s.kind}`);
       r.dataset.kind = 'space';
       r.setAttribute('aria-selected', String(state.sel.has(s.id)));
@@ -2147,7 +2149,7 @@ function updateBulk() {
   for (const id of [...state.sel]) if (!have.has(id)) state.sel.delete(id);
   const n = state.sel.size;
   document.getElementById('sel-count').textContent = `${n} selected`;
-  for (const id of ['sel-none', 'bk-zone', 'bk-color', 'bk-kind', 'bk-prefix', 'bk-furnish', 'bk-delete']) {
+  for (const id of ['sel-none', 'bk-zone', 'bk-color', 'bk-kind', 'bk-prefix', 'bk-furnish', 'bk-delete', 'bk-link']) {
     document.getElementById(id).disabled = n === 0;
   }
   const sel = document.getElementById('sel-by');
@@ -2197,6 +2199,23 @@ document.getElementById('bk-prefix').onclick = () => {
   const p = window.prompt('Text to put before each name', 'East – ');
   if (p === null || !p) return;
   postOps([{ t: 'batch', ops: selSpaces().map(s => spaceOp(s, { name: (p + s.name).slice(0, 60) })) }]);
+};
+document.getElementById('bk-link').onclick = async () => {
+  if (state.sel.size !== 1) { statusEl.textContent = 'Select exactly one room to link.'; return; }
+  const [space] = [...state.sel];
+  const existing = (curFloor().entity_links || []).find(l => l.space === space);
+  if (existing && window.confirm(`Already linked to "${existing.name}". Unlink it?`)) { await postOps([{ t: 'unlink_entity', space }]); return; }
+  const q = window.prompt('Search your world for…', selSpaces()[0]?.name || '');
+  if (q === null) return;
+  try {
+    const { entities } = await api('GET', `/api/world/entities?q=${encodeURIComponent(q)}`);
+    if (!entities.length) { statusEl.textContent = `Nothing in your world matches "${q}".`; return; }
+    const list = entities.slice(0, 15).map((e, i) => `${i + 1}) ${e.name} (${e.kind})`).join('\n');
+    const pick = Number(window.prompt(`Link to which?\n${list}`, '1'));
+    const e = entities[pick - 1];
+    if (!e) return;
+    await postOps([{ t: 'link_entity', link: { space, entity_id: e.id, name: e.name, kind: e.kind } }]);
+  } catch (err) { statusEl.textContent = err.message; }
 };
 document.getElementById('bk-refine').onclick = async () => {
   const instruction = window.prompt(`What should change? (${state.sel.size} room(s) selected stay exactly as they are)`, 'Add a barracks next to the entrance');

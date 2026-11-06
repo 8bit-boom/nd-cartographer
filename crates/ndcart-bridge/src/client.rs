@@ -357,6 +357,36 @@ impl Bridge {
         Ok(out.to_string())
     }
 
+    /// Every entity of the world as `(id, name, kind)` (`GET /api/entities/picker`).
+    pub async fn entities(&self) -> Result<Vec<(i64, String, String)>, BridgeError> {
+        let resp = self
+            .send(self.req(Method::GET, "/api/entities/picker"))
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        let v: Value = check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("entities/picker answer: {e}")))?;
+        let list = v
+            .get("entities")
+            .and_then(Value::as_array)
+            .ok_or_else(|| BridgeError::Protocol("entities/picker had no entities list".into()))?;
+        Ok(list
+            .iter()
+            .filter_map(|e| {
+                Some((
+                    e.get("id")?.as_i64()?,
+                    e.get("name")?.as_str()?.to_string(),
+                    e.get("kind")?.as_str()?.to_string(),
+                ))
+            })
+            .collect())
+    }
+
     /// The names of the world's locations (`GET /api/entities/picker`, kind
     /// "location"), so generated names can agree with existing lore.
     pub async fn location_names(&self) -> Result<Vec<String>, BridgeError> {

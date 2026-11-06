@@ -349,6 +349,23 @@ fn extra_checks(floor: &FloorDoc, out: &mut Vec<Problem>) {
         }
     }
 
+    for l in &floor.entity_links {
+        if !grid.spaces.contains_key(&l.space) {
+            out.push(Problem {
+                severity: Severity::Info,
+                code: "entity_link_stale",
+                message: format!(
+                    "The link to '{}' points at a room that no longer exists.",
+                    l.name
+                ),
+                at: None,
+                fix: Some(Op::UnlinkEntity {
+                    space: l.space.clone(),
+                }),
+            });
+        }
+    }
+
     let cells: Vec<(CellKey, &str)> = grid.cells().collect();
     let mut per_space: BTreeMap<&str, usize> = BTreeMap::new();
     for (_, s) in &cells {
