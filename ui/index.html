@@ -170,6 +170,10 @@
     </div>
     <div id="spec-result" hidden>
       <div id="spec-floors"></div>
+      <div class="row" id="spec-talk">
+        <input id="spec-change" type="text" maxlength="1000" placeholder="Change this layout: make the hall bigger, add a kitchen…" aria-label="Ask for a change" style="flex:1;min-width:240px">
+        <button id="spec-change-go" type="button" title="Ask the AI to revise the first floor shown, keeping its other rooms">Revise</button>
+      </div>
       <div class="row">
         <button id="spec-accept" type="button" class="primary">Accept (adds the floors)</button>
         <button id="spec-again" type="button">Another layout</button>

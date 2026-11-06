@@ -413,7 +413,19 @@ async function toggleMark(edge, kind) {
   const existing = markAt(edge);
   const target = existing ? existing.edge : edge;
   const mark = existing && existing.mark.kind === kind ? null : { kind, state: 'closed' };
-  await postOps([{ t: 'set_mark', edge: target, mark }]);
+  const ops = [{ t: 'set_mark', edge: target, mark }];
+  // With symmetry on, the reflected edges get the same door (or lose it), skipping repeats.
+  const seen = new Set([JSON.stringify(target)]);
+  for (const [fx, fy] of symVariants().slice(1)) {
+    const m = mirrorEdge(edge, fx, fy);
+    const there = markAt(m);
+    const t = there ? there.edge : m;
+    if (seen.has(JSON.stringify(t))) continue;
+    seen.add(JSON.stringify(t));
+    if (!mark && !there) continue;          // nothing to remove over there
+    ops.push({ t: 'set_mark', edge: t, mark });
+  }
+  await postOps(ops.length === 1 ? ops : [{ t: 'batch', ops }]);
 }
 
 async function postOps(ops) {
@@ -485,6 +497,25 @@ function mirrored(x, y) {
   const xs = v ? [x, 2 * ax - 1 - x] : [x];
   const ys = h ? [y, 2 * ay - 1 - y] : [y];
   return xs.flatMap((mx) => ys.map((my) => [mx, my]));
+}
+
+// The reflections symmetry asks for, as [flipX, flipY] pairs (the identity first).
+function symVariants() {
+  const { v, h } = state.sym;
+  const out = [[false, false]];
+  if (v) out.push([true, false]);
+  if (h) out.push([false, true]);
+  if (v && h) out.push([true, true]);
+  return out;
+}
+const OPPOSITE = { west: 'east', east: 'west', north: 'south', south: 'north' };
+// An edge reflected: cells mirror about the axis lines (see mirrored()), and the side flips with them.
+function mirrorEdge(edge, fx, fy) {
+  const { ax, ay } = state.sym;
+  let { x, y } = edge.cell, e = edge.edge;
+  if (fx) { x = 2 * ax - 1 - x; if (e === 'west' || e === 'east') e = OPPOSITE[e]; }
+  if (fy) { y = 2 * ay - 1 - y; if (e === 'north' || e === 'south') e = OPPOSITE[e]; }
+  return { cell: { x, y }, edge: e };
 }
 
 function queuePaint(cellX, cellY) {
@@ -663,7 +694,16 @@ async function placeStamp(wx, wy) {
     flip: document.getElementById('st-flip').checked,
     shadow: document.getElementById('st-shadow').checked,
   };
-  await postOps([{ t: 'add_stamp', stamp }]);
+  // With symmetry on, reflected copies go down too (flipped so a reflected prop faces the right way).
+  const { ax, ay } = state.sym;
+  const stamps = symVariants().map(([fx, fy], i) => {
+    if (i === 0) return stamp;
+    let { x: sx, y: sy, rotation: r, flip: f } = stamp;
+    if (fx) { sx = 2 * ax - sx; r = -r; f = !f; }
+    if (fy) { sy = 2 * ay - sy; r = Math.PI - r; f = !f; }
+    return { ...stamp, id: stamp.id + '_' + i, x: sx, y: sy, rotation: r, flip: f };
+  });
+  await postOps(stamps.length === 1 ? [{ t: 'add_stamp', stamp }] : [{ t: 'batch', ops: stamps.map(st => ({ t: 'add_stamp', stamp: st })) }]);
 }
 
 document.getElementById('st-rot').oninput = (e) => {
@@ -1481,6 +1521,28 @@ document.getElementById('spec-draft').onclick = async () => {
 document.getElementById('spec-example').onclick = () => { document.getElementById('spec-text').value = JSON.stringify(specMode() === 'world' ? WORLD_EXAMPLE : SPEC_EXAMPLE, null, 2); };
 document.getElementById('spec-go').onclick = () => runSpec(Math.floor(Math.random() * 1e6));
 document.getElementById('spec-again').onclick = () => runSpec(Math.floor(Math.random() * 1e6));
+// Keep talking to it: revise the first floor of what is being previewed (battle maps).
+document.getElementById('spec-change-go').onclick = async () => {
+  const msg = document.getElementById('spec-msg');
+  const instruction = document.getElementById('spec-change').value.trim();
+  if (!instruction) { msg.textContent = 'Say what to change first.'; return; }
+  if (specMode() !== 'battle') { msg.textContent = 'Revising works on battle maps.'; return; }
+  let spec;
+  try { spec = JSON.parse(document.getElementById('spec-text').value); } catch (e) { msg.textContent = `That is not valid JSON: ${e.message}`; return; }
+  const btn = document.getElementById('spec-change-go');
+  btn.disabled = true; msg.textContent = 'Asking the AI to revise…';
+  try {
+    const out = await api('POST', `/api/docs/${state.docId}/refine`, { spec: spec.floors[0], pins: [], instruction, lore: document.getElementById('spec-lore').checked });
+    // The other floors stay as they were, and so do the first floor's stairs (where their room survives).
+    const oldStairs = spec.floors[0].stairs || [];
+    spec.floors[0] = out.spec.floors[0];
+    spec.floors[0].stairs = oldStairs.filter(st => spec.floors[0].rooms.some(r => r.id === st.room));
+    document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
+    document.getElementById('spec-change').value = '';
+    await runSpec(Math.floor(Math.random() * 1e6));
+  } catch (e) { msg.textContent = e.message; }
+  finally { btn.disabled = false; }
+};
 document.getElementById('spec-accept').onclick = async () => {
   if (!proposal) return;
   try {

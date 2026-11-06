@@ -1813,6 +1813,11 @@ struct RefineBody {
     #[serde(default)]
     #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
     lore: bool,
+    /// Refine this floor spec (a previewed proposal) instead of a floor of the project:
+    /// the "keep talking to it" case. Pins then refer to this spec's room ids.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    spec: Option<ndcart_core::mapspec::FloorSpec>,
 }
 
 /// `POST /api/docs/{id}/refine` `{floor?, pins:[room ids], instruction}` — describe
@@ -1827,7 +1832,17 @@ async fn refine_floor(
     let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
     #[cfg(feature = "bridge")]
     {
-        let (current, cell) = {
+        let (current, cell) = if let Some(mut spec) = b.spec.clone() {
+            // Stairs point at other floors, which a one-floor revision cannot see: set aside.
+            spec.stairs.clear();
+            // Check it is a spec we could lay out before asking a model to revise it.
+            let one = ndcart_core::mapspec::MapSpec {
+                name: spec.name.clone(),
+                floors: vec![spec.clone()],
+            };
+            one.validate()?;
+            (spec, 32.0)
+        } else {
             let store = app.store.read().await;
             let doc = store
                 .docs
@@ -3960,6 +3975,39 @@ mod tests {
         assert_eq!(style(r##"{"tone":"","palette":[]}"##).await, StatusCode::OK);
         let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
         assert!(json(d)["manifest"]["style"].is_null());
+    }
+
+    #[tokio::test]
+    async fn refining_a_previewed_spec_checks_the_spec_before_asking_any_model() {
+        let router = build_router(test_app());
+        let (_, b) = call(&router, "POST", "/api/docs", br#"{"name":"R"}"#.to_vec()).await;
+        let id = serde_json::from_slice::<serde_json::Value>(&b).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let url = format!("/api/docs/{id}/refine");
+        // A spec with an unreachable room is refused with the reason, whatever the AI settings.
+        let broken = r#"{"instruction":"add a barracks","spec":{"name":"G","rooms":[{"id":"a","name":"A","w":4,"h":4},{"id":"b","name":"B","w":4,"h":4}],"links":[]}}"#;
+        let (st, body) = call(&router, "POST", &url, broken.as_bytes().to_vec()).await;
+        if cfg!(feature = "bridge") {
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(String::from_utf8_lossy(&body).contains("not linked"));
+        } else {
+            assert_eq!(
+                st,
+                StatusCode::NOT_FOUND,
+                "a build without the AI client says so"
+            );
+        }
+        if std::env::var("ND_CARTO_SERVER").is_err() && std::env::var("ND_CARTO_LLM_URL").is_err() {
+            let fine = r#"{"instruction":"add a barracks","spec":{"name":"G","rooms":[{"id":"a","name":"A","w":4,"h":4}],"links":[]}}"#;
+            let (st, _) = call(&router, "POST", &url, fine.as_bytes().to_vec()).await;
+            assert_eq!(
+                st,
+                StatusCode::NOT_FOUND,
+                "valid spec, but no AI configured"
+            );
+        }
     }
 
     #[tokio::test]

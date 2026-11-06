@@ -45,7 +45,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/propose-world` | `{spec: WorldSpec, seed?}` | An overland map as a proposal (land/rivers, biome masks on dry ground, places, regions). World-map projects only. |
 | GET | `/api/docs/{id}/world-proposals/{pid}/preview?ppc=` | – | PNG. |
 | POST | `/api/docs/{id}/world-proposals/{pid}/accept` | – | Replaces the first floor's terrain/rivers; one undo step. DELETE the same path to reject. |
-| POST | `/api/docs/{id}/refine` | `{floor?, pins:[room ids], instruction}` | AI revises the floor (described as a spec) keeping the pinned rooms; returns `{spec}` to preview as a new floor. Needs an AI configured. |
+| POST | `/api/docs/{id}/refine` | `{floor? \| spec (a floor spec being previewed), pins:[room ids], instruction}` | AI revises the floor (described as a spec) keeping the pinned rooms; returns `{spec}` to preview as a new floor. Needs an AI configured. |
 | POST | `/api/docs/{id}/style` | `{tone, palette:[#rrggbb…]}` | The project's house style (fed to drafts; the palette colours generated rooms). Empty clears. |
 | POST | `/api/draft-world` | `{prompt, doc?, lore?}` | Like `/api/draft` for a WorldSpec. `lore:true` reuses the world's location names (nd-world). |
 | GET | `/api/ai/status` | – | `{mode: nd-world\|standalone\|off, detail}`. Standalone = `ND_CARTO_LLM_URL` + `ND_CARTO_LLM_MODEL` (+ `ND_CARTO_LLM_KEY[_FILE]`), an OpenAI-compatible endpoint. |
