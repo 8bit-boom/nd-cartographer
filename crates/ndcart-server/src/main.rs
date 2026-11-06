@@ -9,6 +9,7 @@ mod convert;
 mod doctor;
 #[cfg(feature = "bridge")]
 mod draft;
+mod packs;
 mod pdf;
 #[cfg(feature = "bridge")]
 mod publish;
@@ -1387,6 +1388,55 @@ async fn suggest_stamp_tags(Path(id): Path<String>) -> Result<Json<serde_json::V
     }
 }
 
+#[derive(Deserialize)]
+struct PackQuery {
+    /// The file's name, used as the pack's name when it does not name itself.
+    name: Option<String>,
+}
+
+fn report_json(r: &packs::Report) -> serde_json::Value {
+    serde_json::json!({
+        "pack": r.pack, "materials": r.materials, "stamps": r.stamps,
+        "skipped": r.skipped, "notes": r.notes,
+    })
+}
+
+/// `POST /api/packs/import?name=file.dungeondraft_pack` — the pack's bytes in the
+/// body (up to 200 MB); its props and textures join the palettes. A Godot
+/// `.pck`-style Dungeondraft pack is read directly; anything else is refused with
+/// advice. Pictures keep "from pack X by Y" as their provenance.
+async fn import_pack(
+    axum::extract::Query(q): axum::extract::Query<PackQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.len() > packs::MAX_PACK_BYTES {
+        return Err(ApiError(CoreError::Invalid(
+            "that pack is over 200 MB".into(),
+        )));
+    }
+    let fallback = q
+        .name
+        .as_deref()
+        .map(|n| n.rsplit(['/', '\\']).next().unwrap_or(n))
+        .map(|n| n.rsplit_once('.').map(|(s, _)| s).unwrap_or(n))
+        .filter(|n| !n.is_empty())
+        .unwrap_or("Imported pack")
+        .chars()
+        .take(60)
+        .collect::<String>();
+    let report = tokio::task::spawn_blocking(move || -> Result<packs::Report, String> {
+        if body.starts_with(b"PK") {
+            return Err("that is a zip file; unzip it and import the folder with `ndcart import-pack FOLDER`".into());
+        }
+        let entries = packs::read_pck(&body)?;
+        packs::import(&entries, &fallback, assets::global())
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("import failed: {e}"))))?
+    .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok(Json(report_json(&report)))
+}
+
 /// `POST /api/assets/{id}/make-material` `{name, size?, seamless?, prompt?, seed?, ai?}` —
 /// turn a picture into a paintable material: made seamless (unless told not
 /// to), stored, and added to the palette. Provenance is kept.
@@ -2437,6 +2487,12 @@ fn build_router(app: App) -> Router {
         .route("/api/assets", post(put_asset))
         .route("/api/assets/{id}", get(get_asset))
         .route("/api/assets/{id}/make-material", post(make_material))
+        .route(
+            "/api/packs/import",
+            post(import_pack).layer(axum::extract::DefaultBodyLimit::max(
+                packs::MAX_PACK_BYTES + (1 << 20),
+            )),
+        )
         .route("/api/assets/{id}/make-stamp", post(make_stamp))
         .route("/api/stamps/{id}/tags", post(set_stamp_tags))
         .route("/api/stamps/{id}/suggest-tags", post(suggest_stamp_tags))
@@ -2614,6 +2670,50 @@ fn run_bench(args: Vec<String>) {
 
 /// `ndcart convert IN OUT [--format webp|avif|png] [--quality N]` — the format
 /// defaults to OUT's extension.
+/// `ndcart import-pack FILE_OR_FOLDER --data-dir DIR` — add a Dungeondraft pack
+/// (`.dungeondraft_pack`) or a folder of pictures to the palettes of the studio
+/// that uses DIR, without the studio running.
+fn run_import_pack(args: Vec<String>) -> Result<(), String> {
+    let (mut path, mut data) = (None, None);
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--data-dir" => data = it.next().map(PathBuf::from),
+            o if !o.starts_with("--") && path.is_none() => path = Some(PathBuf::from(o)),
+            o => return Err(format!("unknown argument: {o}")),
+        }
+    }
+    let path = path.ok_or("name the pack file or folder")?;
+    let data = data
+        .or_else(|| std::env::var("ND_CARTO_DATA_DIR").ok().map(PathBuf::from))
+        .ok_or("--data-dir (or ND_CARTO_DATA_DIR) is required")?;
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Imported pack")
+        .to_string();
+    let entries = if path.is_dir() {
+        packs::read_dir(&path)?
+    } else {
+        let bytes =
+            std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if bytes.starts_with(b"PK") {
+            return Err("that is a zip file; unzip it and give the folder".into());
+        }
+        packs::read_pck(&bytes)?
+    };
+    let store = assets::init(Some(data.join("assets")));
+    let r = packs::import(&entries, &name, store)?;
+    println!(
+        "{}: added {} prop(s) and {} material(s); {} picture(s) skipped",
+        r.pack, r.stamps, r.materials, r.skipped
+    );
+    for n in &r.notes {
+        println!("note: {n}");
+    }
+    Ok(())
+}
+
 fn run_convert(args: Vec<String>) {
     let (mut files, mut format, mut quality) = (Vec::new(), None, 80u8);
     let mut it = args.into_iter();
@@ -2675,6 +2775,12 @@ async fn main() {
     match cmd.as_str() {
         "bench" => run_bench(args.collect()),
         "convert" => run_convert(args.collect()),
+        "import-pack" => {
+            if let Err(m) = run_import_pack(args.collect()) {
+                eprintln!("ndcart: {m}");
+                std::process::exit(1);
+            }
+        }
         "doctor" => {
             if let Err(m) = doctor::run(args.collect()).await {
                 eprintln!("ndcart: {m}");
@@ -2758,7 +2864,7 @@ async fn main() {
         }
         other => {
             eprintln!(
-                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | doctor | publish DOC ... | draft PROMPT ...]"
+                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | import-pack FILE | doctor | publish DOC ... | draft PROMPT ...]"
             );
             eprintln!("  unknown command: {other}");
             std::process::exit(2);
@@ -4256,6 +4362,75 @@ mod tests {
             "audience=x",
         ] {
             assert_eq!(get(bad).await.0, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_uploaded_dungeondraft_pack_fills_the_palettes_and_bad_files_say_why() {
+        let router = build_router(test_app());
+        let json = |b: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&b).unwrap_or_default();
+        let files = [
+            (
+                "pack.json",
+                br#"{"name":"Harbour Pack","author":"B. Cartographer"}"#.to_vec(),
+            ),
+            (
+                "textures/objects/lantern_post.png",
+                packs::tests::png(256, 256, [230, 200, 80, 255]),
+            ),
+            (
+                "textures/terrain/wet_cobbles.png",
+                packs::tests::png(512, 512, [70, 80, 90, 255]),
+            ),
+        ];
+        let (st, b) = call(
+            &router,
+            "POST",
+            "/api/packs/import?name=harbour.dungeondraft_pack",
+            packs::tests::build_pck(&files),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        let r = json(b);
+        assert_eq!(
+            (
+                r["pack"].as_str(),
+                r["stamps"].as_u64(),
+                r["materials"].as_u64()
+            ),
+            (Some("Harbour Pack"), Some(1), Some(1))
+        );
+        let (_, b) = call(&router, "GET", "/api/stamps", vec![]).await;
+        let lamp = json(b)["stamps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "Lantern post")
+            .cloned()
+            .expect("listed");
+        assert_eq!(
+            lamp["origin"]["prompt"],
+            "from pack Harbour Pack by B. Cartographer"
+        );
+        let (_, b) = call(&router, "GET", "/api/materials", vec![]).await;
+        assert!(json(b)["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"] == "Wet cobbles" && m["custom"] == true));
+        // A zip, junk and an empty body are refused with advice.
+        for (body, want) in [
+            (b"PK\x03\x04zipzip".to_vec(), "zip"),
+            (b"junk".to_vec(), "GDPC"),
+            (Vec::new(), "GDPC"),
+        ] {
+            let (st, b) = call(&router, "POST", "/api/packs/import", body).await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            assert!(
+                String::from_utf8_lossy(&b).contains(want),
+                "{}",
+                String::from_utf8_lossy(&b)
+            );
         }
     }
 

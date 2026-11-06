@@ -67,6 +67,17 @@ pub fn init(dir: Option<PathBuf>) -> &'static Assets {
     })
 }
 
+/// A fresh in-memory store (tests that must not share the process-wide one).
+#[cfg(test)]
+pub(crate) fn new_for_tests() -> Assets {
+    Assets {
+        dir: None,
+        custom: Mutex::new(Vec::new()),
+        bytes: Mutex::new(HashMap::new()),
+        decoded: Mutex::new(HashMap::new()),
+    }
+}
+
 /// The store; in-memory only if `init` was never called (tests).
 pub fn global() -> &'static Assets {
     init(None)

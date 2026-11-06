@@ -1590,6 +1590,22 @@ document.getElementById('art-cancel').onclick = async () => {
 };
 document.getElementById('art-close').onclick = () => artDialog.close();
 
+// ---------- import an art pack ----------
+document.getElementById('btn-pack').onclick = () => document.getElementById('pack-file').click();
+document.getElementById('pack-file').onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  statusEl.textContent = `Reading ${file.name}…`;
+  try {
+    const res = await fetch(`/api/packs/import?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.error || res.statusText);
+    await reloadPalettes();
+    statusEl.textContent = `${out.pack}: added ${out.stamps} prop(s) and ${out.materials} material(s)` + (out.skipped ? `, ${out.skipped} picture(s) skipped` : '') + (out.notes?.length ? `. ${out.notes.join(' ')}` : '.');
+  } catch (err) { statusEl.textContent = `Import failed: ${err.message}`; }
+};
+
 // ---------- house style ----------
 document.getElementById('btn-style').onclick = async () => {
   const cur = state.doc.manifest.style || { tone: '', palette: [] };
