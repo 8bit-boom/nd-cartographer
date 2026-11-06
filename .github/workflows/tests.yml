@@ -50,6 +50,14 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: stage a placeholder sidecar (tauri-build validates its presence)
+        shell: bash
+        run: |
+          cargo build -q -p ndcart-server --bin ndcart
+          mkdir -p crates/ndcart-desktop/binaries
+          exe=ndcart; [ "${{ runner.os }}" = "Windows" ] && exe=ndcart.exe
+          triple=x86_64-unknown-linux-gnu; [ "${{ runner.os }}" = "Windows" ] && triple=x86_64-pc-windows-msvc
+          cp "target/debug/$exe" "crates/ndcart-desktop/binaries/ndcart-$triple${{ runner.os == 'Windows' && '.exe' || '' }}"
       - name: check the shell compiles
         run: cargo check --locked -p ndcart-desktop
 
