@@ -5,6 +5,11 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create (for example v0.1.0-rc1; a hyphen makes it a pre-release)"
+        required: true
 
 permissions:
   contents: write
@@ -43,9 +48,11 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }} -p ndcart-server --bin ndcart
       - name: package
         shell: bash
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          dir="ndcart-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          dir="ndcart-${TAG}-${{ matrix.name }}"
           mkdir "$dir"
           bin=ndcart; [ "${{ matrix.ext }}" = zip ] && bin=ndcart.exe
           cp "target/${{ matrix.target }}/release/$bin" "$dir/"
@@ -72,6 +79,7 @@ jobs:
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          pre=""; case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes $pre
+          pre=""; case "$TAG" in *-*) pre="--prerelease" ;; esac
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --target "$GITHUB_SHA" --generate-notes $pre
