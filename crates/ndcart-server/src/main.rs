@@ -24,6 +24,7 @@ mod worldspec;
 
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
+use axum::response::sse::Sse;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -31,6 +32,7 @@ use ndcart_core::doc::{floors_by_id, DocKind, FloorDoc};
 use ndcart_core::grid::RoomGrid;
 use ndcart_core::journal::Op;
 use ndcart_core::walls::{tally, Wall};
+use ndcart_core::Audience;
 use ndcart_core::{CoreError, Label, Light, Manifest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -2068,8 +2070,154 @@ async fn floor_spec(
     ))
 }
 
-/// `GET /api/docs/{id}/stats?floor=ID` - the pacing dashboard's numbers
-/// (plan 21.6): rooms/squares/kinds, doors and secrets, lights and their
+/// `GET /api/docs/{id}/export.svg?floor=ID&audience=gm|player` - the floor's
+/// geometry as an editable SVG (plan 21.11): rooms as rects, walls/doors as
+/// lines, labels as real text. Cells are the unit: 1 cell = 1 user unit, so
+/// the file scales cleanly in Inkscape/Illustrator.
+async fn export_svg(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Response, ApiError> {
+    use ndcart_core::{SpaceKind, WallKind};
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let audience = Audience::parse(q.audience.as_deref().unwrap_or("gm"))
+        .ok_or_else(|| CoreError::Invalid("audience must be gm or player".into()))?;
+    let floor_name = doc.floors[idx].name.clone();
+    let doc_id_for_name = doc.manifest.id.clone();
+    let floor = ndcart_core::for_audience(&doc.floors[idx], audience);
+    let cell = doc.manifest.cell_size;
+    let walls = tiles::derive_walls(&floor, cell);
+    // Bounds: the painted bounding box with a one-cell margin.
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    for (c, _) in floor.grid.cells() {
+        xs.push(c.x);
+        ys.push(c.y);
+    }
+    let (Some(&min_x), Some(&min_y), Some(&max_x), Some(&max_y)) = (
+        xs.iter().min(),
+        ys.iter().min(),
+        xs.iter().max(),
+        ys.iter().max(),
+    ) else {
+        return Err(ApiError(CoreError::Invalid("the floor is empty".into())));
+    };
+    let (w, h) = ((max_x - min_x + 3) as i64, (max_y - min_y + 3) as i64);
+    let off_x = (min_x - 1) as f64;
+    let off_y = (min_y - 1) as f64;
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let mut b = String::new();
+    b.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">
+"
+    ));
+    b.push_str(&format!(
+        "<rect width=\"{w}\" height=\"{h}\" fill=\"#14161a\"/>
+"
+    ));
+    // Rooms: their painted cells grouped as one rect per space (bounding box,
+    // matching the publish elements' shapes).
+    for (space_id, space) in &floor.grid.spaces {
+        let cells: Vec<_> = floor
+            .grid
+            .cells()
+            .filter(|(_, s)| *s == space_id)
+            .map(|(c, _)| c)
+            .collect();
+        if cells.is_empty() {
+            continue;
+        }
+        let (bx0, by0) = (
+            cells.iter().map(|c| c.x).min().unwrap(),
+            cells.iter().map(|c| c.y).min().unwrap(),
+        );
+        let (bx1, by1) = (
+            cells.iter().map(|c| c.x).max().unwrap(),
+            cells.iter().map(|c| c.y).max().unwrap(),
+        );
+        b.push_str(&format!(
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\" fill-opacity=\"0.85\"/>
+",
+            bx0 as f64 - off_x,
+            by0 as f64 - off_y,
+            (bx1 - bx0 + 1) as f64,
+            (by1 - by0 + 1) as f64,
+            esc(&space.color)
+        ));
+        if !space.name.is_empty() {
+            b.push_str(&format!(
+                "<text x=\"{}\" y=\"{}\" font-family=\"sans-serif\" font-size=\"1\" fill=\"#ffffff\" text-anchor=\"middle\">{}</text>
+",
+                bx0 as f64 - off_x + (bx1 - bx0 + 1) as f64 / 2.0,
+                by0 as f64 - off_y + (by1 - by0 + 1) as f64 / 2.0,
+                esc(&space.name)
+            ));
+        }
+    }
+    // Walls and doors: kind colours on top.
+    for w in &walls {
+        if w.pts.len() != 2 {
+            continue;
+        }
+        let stroke = match w.kind {
+            WallKind::Wall => "#d8e2ec",
+            WallKind::Door => "#e8b030",
+            WallKind::Window => "#7fb4d8",
+            WallKind::Secret => "#b06ad0",
+        };
+        b.push_str(&format!(
+            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{stroke}\" stroke-width=\"0.3\"/>
+",
+            w.pts[0][0] / cell - off_x, w.pts[0][1] / cell - off_y,
+            w.pts[1][0] / cell - off_x, w.pts[1][1] / cell - off_y,
+        ));
+    }
+    // Labels as real text.
+    for l in &floor.labels {
+        b.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" font-family=\"sans-serif\" font-size=\"{}\" fill=\"{}\"{}>{}</text>
+",
+            l.x / cell - off_x, l.y / cell - off_y,
+            (l.size / 12.0).clamp(0.6, 6.0),
+            esc(&l.color),
+            if l.bold { " font-weight=\"bold\"" } else { "" },
+            esc(&l.text)
+        ));
+    }
+    b.push_str(
+        "</svg>
+",
+    );
+    drop(store);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (
+                header::CONTENT_DISPOSITION,
+                &format!("attachment; filename=\"{doc_id_for_name}-{floor_name}.svg\""),
+            ),
+        ],
+        b,
+    )
+        .into_response())
+}
+
+/// `GET /api/docs/{id}/stats?floor=ID` — the pacing dashboard's numbers
+/// (plan §21.6): rooms/squares/kinds, doors and secrets, lights and their
 /// coverage, props by provenance, GM labels, encounters, lore coverage.
 async fn doc_stats(
     State(app): State<App>,
@@ -2683,6 +2831,49 @@ async fn ai_test(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiE
         }))),
         Err(e) => Ok(Json(serde_json::json!({ "ok": false, "error": e }))),
     }
+}
+
+/// `GET /api/docs/{id}/events` — a server-sent-events feed of this
+/// document's revision (plan §21.16 + the M0 leftover "WebSocket change
+/// feed"): every tab, the table screen and a script stay in sync without
+/// polling. The loop reads the in-memory rev every 400 ms and pushes an
+/// event only when it changes; a 15 s comment keeps proxies alive.
+async fn doc_events(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    let stream = futures_util::stream::unfold(
+        (
+            app,
+            id,
+            0u64,
+            tokio::time::interval(std::time::Duration::from_millis(400)),
+        ),
+        |(app, id, mut last, mut tick)| async move {
+            tick.tick().await;
+            let rev = app.store.read().await.docs.get(&id).map(|d| d.rev);
+            match rev {
+                Some(r) if r != last => {
+                    last = r;
+                    let ev = axum::response::sse::Event::default()
+                        .event("rev")
+                        .data(r.to_string());
+                    Some((Ok::<_, std::convert::Infallible>(ev), (app, id, last, tick)))
+                }
+                Some(_) => {
+                    let ping = axum::response::sse::Event::default().comment("ping");
+                    Some((Ok(ping), (app, id, last, tick)))
+                }
+                None => Some((
+                    Ok(axum::response::sse::Event::default().event("gone").data("")),
+                    (app, id, last, tick),
+                )),
+            }
+        },
+    );
+    Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
 /// `GET /api/ai/status`/// `GET /api/ai/status`/// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
@@ -3441,6 +3632,8 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/lint", get(lint_doc))
         .route("/api/docs/{id}/floor-spec", get(floor_spec))
         .route("/api/docs/{id}/stats", get(doc_stats))
+        .route("/api/docs/{id}/export.svg", get(export_svg))
+        .route("/api/docs/{id}/events", get(doc_events))
         .route("/api/materials", get(list_materials))
         .route("/api/assets", post(put_asset))
         .route("/api/assets/{id}", get(get_asset))
@@ -3805,6 +3998,17 @@ async fn main() {
         "open-published" => {
             if let Err(m) = publish::run_open(args.collect()).await {
                 eprintln!("ndcart: {m}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(feature = "bridge")]
+        "bundle" => {
+            if !cfg!(feature = "bridge") {
+                eprintln!("bundle needs the bridge feature");
+                std::process::exit(2);
+            }
+            if let Err(e) = publish::run_bundle(args.collect()).await {
+                eprintln!("ndcart: {e}");
                 std::process::exit(1);
             }
         }

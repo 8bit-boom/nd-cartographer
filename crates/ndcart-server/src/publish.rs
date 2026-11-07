@@ -947,6 +947,135 @@ pub fn project_from_published(
 }
 
 /// `ndcart open-published SLUG --server URL --email E [--world W] [--name N] [--cell PX] --data-dir DIR`
+/// `ndcart bundle DOC --out FILE.ndmapz` - a shareable bundle (plan 21.14):
+/// the document's own files (manifest, snapshot, journal, structure,
+/// checkpoints) plus a PACKS.txt carrying every pack's licence block, so the
+/// recipient knows what art the map expects and under what terms. Imported
+/// art itself is NOT embedded by default (redistribution is the pack's
+/// licence call); `--embed-assets` adds the referenced asset files with a
+/// warning printed for imported ones.
+pub async fn run_bundle(args: Vec<String>) -> Result<(), String> {
+    let mut doc = None;
+    let mut data_dir = None;
+    let mut out = None;
+    let mut embed = false;
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        let mut val = |n: &str| it.next().ok_or(format!("{n} needs a value"));
+        match a.as_str() {
+            "--data-dir" => data_dir = Some(std::path::PathBuf::from(val("--data-dir")?)),
+            "--out" => out = Some(val("--out")?),
+            "--embed-assets" => embed = true,
+            o if !o.starts_with("--") && doc.is_none() => doc = Some(o.to_string()),
+            o => return Err(format!("unknown argument: {o}")),
+        }
+    }
+    let doc = doc.ok_or("name the document (id or exact name)")?;
+    let out = out.ok_or("--out FILE.ndmapz is required")?;
+    let data_dir = data_dir.ok_or("--data-dir is required")?;
+    let mut st = store::Store::default();
+    st.load_dir(&data_dir).map_err(|e| e.to_string())?;
+    let d = st
+        .docs
+        .values()
+        .find(|d| d.manifest.id == doc || d.manifest.name == doc)
+        .ok_or(format!("no document {doc:?} in {}", data_dir.display()))?;
+    let id = d.manifest.id.clone();
+
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for name in [
+        "manifest.json",
+        "snapshot.json",
+        "journal.ndjson",
+        "structure.ndjson",
+        "checkpoints.json",
+    ] {
+        let p = data_dir.join(&id).join(name);
+        if let Ok(b) = std::fs::read(&p) {
+            files.push((format!("{id}/{name}"), b));
+        }
+    }
+    // Pack audit + optional assets.
+    let mut packs: std::collections::BTreeMap<String, String> = Default::default();
+    packs.insert(
+        "nd-cartographer starter pack".into(),
+        "MIT (built in)".into(),
+    );
+    let mut embedded = 0usize;
+    for floor in &d.floors {
+        for s in &floor.stamps {
+            if ndcart_paint::find_stamp(&s.asset).is_some() {
+                continue;
+            }
+            let a = crate::assets::global();
+            let Some(c) = a.find_custom(&s.asset, "stamp") else {
+                continue;
+            };
+            let pack = c.meta.pack.clone().unwrap_or_else(|| "imported art".into());
+            let lic = c
+                .meta
+                .license
+                .as_ref()
+                .map(|l| {
+                    format!(
+                        "{} (map-commercial: {:?}, redistribution: {:?}, attribution: {})",
+                        if l.identifier.is_empty() {
+                            "unstated"
+                        } else {
+                            &l.identifier
+                        },
+                        l.commercial_map,
+                        l.redistribution,
+                        l.attribution_required
+                    )
+                })
+                .unwrap_or_else(|| "no licence stated".into());
+            packs.entry(pack.clone()).or_insert(lic);
+            if embed {
+                if let Some(bytes) = a.get_bytes(&c.asset) {
+                    files.push((format!("{id}/assets/{}.bin", c.asset), bytes.to_vec()));
+                    embedded += 1;
+                    if c.origin.source == "imported" {
+                        println!(
+                            "warning: embedding imported art '{}' from '{}'; check its licence",
+                            c.name, pack
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let packs_txt: String = packs
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    files.push((format!("{id}/PACKS.txt"), packs_txt.clone().into_bytes()));
+
+    files.sort();
+    let mut w = zip::ZipWriter::new(std::io::BufWriter::new(
+        std::fs::File::create(&out).map_err(|e| format!("cannot create {out}: {e}"))?,
+    ));
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, bytes) in &files {
+        w.start_file(name, opts).map_err(|e| format!("zip: {e}"))?;
+        std::io::Write::write_all(&mut w, bytes).map_err(|e| format!("zip: {e}"))?;
+    }
+    w.finish().map_err(|e| format!("zip: {e}"))?;
+    println!(
+        "bundle written: {out} ({} file(s){})",
+        files.len(),
+        if embed {
+            format!(", {embedded} asset(s) embedded")
+        } else {
+            String::new()
+        }
+    );
+    println!("packs referenced:\n{packs_txt}");
+    Ok(())
+}
+
 pub async fn run_open(args: Vec<String>) -> Result<(), String> {
     let (mut slug, mut server, mut world, mut email, mut name, mut cell, mut data) =
         (None, None, None, None, None, None, None);

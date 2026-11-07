@@ -27,6 +27,7 @@ const state = {
   z: 0,
   px: 0, py: 0,     // world->screen offset (screen = world*scale + offset)
   tool: 'pan',
+  measure: null,   // {points: [[x,y]...], closed: bool} in cells
   color: FLAT_FALLBACK[0].color,   // set from the palette at boot
   materialId: null,
   painting: null,   // in-progress stroke: Set of "x,y"
@@ -633,6 +634,7 @@ async function openDoc(id) {
   tileCache.clear();
   await refresh();
   await loadDocList();
+  subscribeDoc();
 }
 
 document.getElementById('doc-select').onchange = (e) => { state.nav = []; updateNavBack(); openDoc(e.target.value); };
@@ -771,6 +773,7 @@ function render() {
     }
   }
   flushGL();
+  drawMeasure();
   drawStrokePreview();
   drawLiveStroke();
   drawTerrainOverlay();
@@ -841,6 +844,66 @@ glCanvas.addEventListener('webglcontextlost', (e) => {
   render();                            // the 2D path takes over
 });
 
+// ---------- measure tool (plan 21.7) ----------
+
+function measureTotals() {
+  // Straight-line distances in cells via the grid's own unit conversion
+  // (unit_per_cell from the map grid, else 5 ft a square - the publish rule).
+  const pts = state.measure?.points || [];
+  let total = 0;
+  for (let i = 1; i < pts.length; i++) {
+    total += Math.hypot(pts[i][0] - pts[i-1][0], pts[i][1] - pts[i-1][1]);
+  }
+  let area = 0;
+  if (state.measure?.closed && pts.length >= 3) {
+    for (let i = 0; i < pts.length; i++) {
+      const j = (i + 1) % pts.length;
+      area += pts[i][0] * pts[j][1] - pts[j][0] * pts[i][1];
+    }
+    area = Math.abs(area) / 2;
+  }
+  return { total, area: state.measure?.closed ? area : null };
+}
+
+function unitsPerCell() {
+  const g = curFloor().map_grid;
+  return (g && g.unit_per_cell) || 5;
+}
+
+function drawMeasure() {
+  const m = state.measure;
+  const hint = document.getElementById('measure-hint');
+  if (!m || !m.points.length) { if (hint) hint.textContent = state.tool === 'measure' ? 'click points; Enter closes for area' : ''; return; }
+  const s = ppc();
+  ctx.save();
+  ctx.strokeStyle = '#4cc2ff';
+  ctx.fillStyle = '#4cc2ff';
+  ctx.lineWidth = 2;
+  const scr = m.points.map(([x, y]) => worldToScreen(x * s, y * s));
+  ctx.beginPath();
+  scr.forEach(([sx, sy], i) => (i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy)));
+  if (m.closed && scr.length > 2) ctx.closePath();
+  ctx.stroke();
+  for (const [sx, sy] of scr) { ctx.beginPath(); ctx.arc(sx, sy, 3, 0, Math.PI * 2); ctx.fill(); }
+  ctx.restore();
+  const { total, area } = measureTotals();
+  const upc = unitsPerCell();
+  const readout = `${total.toFixed(1)} cells = ${(total * upc).toFixed(0)} ${curFloor().map_grid?.unit_label || 'ft'}` +
+    (area != null ? ` · area ${area.toFixed(1)} cells² = ${(area * upc * upc).toFixed(0)} ${curFloor().map_grid?.unit_label || 'ft'}²` : '');
+  if (hint) hint.textContent = readout;
+  else statusEl.textContent = readout;
+}
+
+function measureFinish(closed) {
+  if (state.measure && state.measure.points.length) {
+    state.measure.closed = closed;
+    drawMeasure();
+  }
+}
+
+function measureClear() { state.measure = null; render(); }
+
+// hook keyboard: Enter closes, Esc clears (the KEYS table drives both).
 function drawStrokePreview() {
   if (!state.painting) return;
   const s = ppc();
@@ -862,7 +925,7 @@ const TERRAIN_TOOLS = ['raise', 'lower', 'smooth', 'flatten', 'roughen'];
 
 function setTool(tool) {
   state.tool = tool;
-  for (const t of ['pan', 'paint', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'stairs', 'prefab', 'biome', 'region', 'route', 'label', 'pathlabel']) {
+  for (const t of ['pan', 'paint', 'measure', 'brush', 'erase', 'stamp', 'door', 'window', ...TERRAIN_TOOLS, 'river', 'marker', 'stairs', 'prefab', 'biome', 'region', 'route', 'label', 'pathlabel']) {
     document.getElementById(`tool-${t}`).classList.toggle('active', tool === t);
   }
   canvas.classList.toggle('painting', tool !== 'pan');
@@ -872,6 +935,7 @@ function setTool(tool) {
   document.getElementById('labelbar').hidden = !(tool === 'label' || tool === 'pathlabel');
   document.getElementById('biomebar').hidden = tool !== 'biome';
   document.getElementById('lb-hint').textContent = tool === 'pathlabel' ? 'click points along the path, Enter to finish' : tool === 'label' ? 'click to place' : '';
+  document.getElementById('measure-hint').textContent = tool === 'measure' ? 'click points; Enter closes the polygon for area; Esc clears' : '';
   statusEl.textContent =
     tool === 'paint' ? `Painting ${activeItem().name}`
     : tool === 'brush' ? `Brush: ${activeItem().name} — drag to paint (pressure and tilt count)`
@@ -1567,6 +1631,15 @@ canvas.addEventListener('pointerdown', (e) => {
     dragging = null;
     return;
   }
+  if (state.tool === 'measure' && e.button === 0) {
+    const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
+    const s = ppc();
+    const cell = [wx / s, wy / s];
+    if (!state.measure) state.measure = { points: [], closed: false };
+    state.measure.points.push([+cell[0].toFixed(3), +cell[1].toFixed(3)]);
+    drawMeasure();
+    return;
+  }
   if (state.tool === 'marker' && e.button === 0) {
     placeMarker(wx, wy);
     dragging = null;
@@ -1692,6 +1765,8 @@ const KEYS = [
   { key: 't', label: 'Label tool', run: () => setTool('label') },
   { key: 'y', label: 'Text along a path', run: () => setTool('pathlabel') },
   { key: 'k', label: 'Marker tool (world maps)', run: () => regionOnly('marker') },
+  { key: 'm', label: 'Measure tool', run: () => setTool('measure') },
+  { key: 'Enter', label: 'Measure: close the polygon for area', run: () => measureFinish(true) },
   { key: 'u', label: 'Route tool (world maps)', run: () => regionOnly('route') },
   { key: 'Enter', label: 'Finish the river / region / route', run: () => finishDraft() },
   { key: 's', label: 'Stamp tool', run: () => setTool('stamp') },
@@ -1707,7 +1782,7 @@ const KEYS = [
   { key: 'o', label: 'Outline (focus the tree)', run: () => toggleOutline() },
   { key: 'z', ctrl: true, label: 'Undo', run: () => undo() },
   { key: 'F1', label: 'This help', run: () => toggleHelp() },
-  { key: 'Escape', label: 'Pan tool / close panels', run: () => { riverDraft = null; overlayDraft = null; toggleHelp(false); setTool('pan'); } },
+  { key: 'Escape', label: 'Pan tool / close panels / clear measure', run: () => { riverDraft = null; overlayDraft = null; measureClear(); toggleHelp(false); setTool('pan'); } },
 ];
 
 function keyLabel(k) { return (k.ctrl ? 'Ctrl+' : '') + (k.key.length === 1 ? k.key.toUpperCase() : k.key); }
@@ -2211,9 +2286,54 @@ async function askMaps() {
   if (!q) return;
   const go = document.getElementById('ask-go'), msg = document.getElementById('ask-msg'), out = document.getElementById('ask-answer');
   go.disabled = true; msg.textContent = 'Reading your maps…'; out.textContent = '';
-  try { out.textContent = (await api('POST', '/api/ask', { question: q })).answer; msg.textContent = ''; }
-  catch (e) { msg.textContent = e.message; }
+  try {
+    const answer = (await api('POST', '/api/ask', { question: q })).answer;
+    // Cited rooms (SEE: project | floor | room) become Go buttons that jump.
+    out.textContent = '';
+    const lines = answer.split('
+');
+    const body = lines.filter(l => !l.startsWith('SEE:')).join('
+').trim();
+    out.append(document.createTextNode(body));
+    for (const line of lines.filter(l => l.startsWith('SEE:'))) {
+      const [, proj, fl, room] = line.slice(4).split('|').map(s => s.trim());
+      const b = document.createElement('button');
+      b.textContent = `Go: ${room || fl} (${proj})`;
+      b.style.margin = '4px 4px 0 0';
+      b.onclick = () => goToCited(proj, fl, room);
+      out.appendChild(document.createElement('br'));
+      out.appendChild(b);
+    }
+    msg.textContent = '';
+  } catch (e) { msg.textContent = e.message; }
   finally { go.disabled = false; }
+}
+
+// Jump to a cited room: switch project, floor, centre the view on it.
+async function goToCited(proj, fl, room) {
+  const { docs } = await api('GET', '/api/docs');
+  const doc = docs.find(d => d.name === proj);
+  if (!doc) { statusEl.textContent = `No project named "${proj}" here.`; return; }
+  await openDoc(doc.id);
+  const floor = curFloor();
+  if (fl && floor.name !== fl) {
+    const target = state.doc.floors.find(f => f.name === fl);
+    if (target) await selectFloor(target.id);
+  }
+  const o = curFloor().outline;
+  const s = o.spaces.find(x => x.name === room);
+  if (s) { centerOn({ x: s.x, y: s.y }); zoomToFitRoom(s); }
+  else if (s === undefined) {
+    const any = o.spaces[0];
+    if (any) centerOn({ x: any.x, y: any.y });
+  }
+}
+function zoomToFitRoom(s) {
+  state.z = 2;
+  const sz = ppc();
+  state.px = canvas.clientWidth / 2 - s.x * sz;
+  state.py = canvas.clientHeight / 2 - s.y * sz;
+  render();
 }
 document.getElementById('ask-go').onclick = askMaps;
 document.getElementById('ask-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') askMaps(); });
@@ -2586,10 +2706,31 @@ document.getElementById('btn-gallery').onclick = async () => {
 };
 document.getElementById('gallery-close').onclick = () => galleryDialog.close();
 
-// ---------- live refresh ----------
-// If the project changes from outside (another tab, the HTTP API, a script),
-// pick the change up instead of editing a stale copy.
+// ---------- live refresh (watch mode, plan 21.16) ----------
+// Primary: the document's SSE feed (/events pushes the rev whenever the
+// project changes anywhere). Fallback: the 3 s poll, kept for old browsers
+// and for when the feed is down. Two windows on one server stay in sync.
+let es = null;
+let esDebounce = null;
+function subscribeDoc() {
+  if (es) { es.close(); es = null; }
+  if (!state.docId || typeof EventSource === 'undefined') return;
+  es = new EventSource(`/api/docs/${state.docId}/events`);
+  es.addEventListener('rev', (e) => {
+    const rev = Number(e.data);
+    if (rev <= state.rev) return;
+    clearTimeout(esDebounce);
+    esDebounce = setTimeout(async () => {
+      if (document.hidden || state.painting || dragging || document.querySelector('dialog[open]')) return;
+      tileCache.clear();
+      await refresh();
+      statusEl.textContent = 'Updated: this project was changed elsewhere.';
+    }, 150);
+  });
+  es.onerror = () => { /* the poll below covers it; EventSource retries itself */ };
+}
 setInterval(async () => {
+  if (es && es.readyState === 1) return; // the feed is doing this job
   if (!state.doc || document.hidden || state.painting || dragging || document.querySelector('dialog[open]')) return;
   try {
     const { docs } = await api('GET', '/api/docs');
