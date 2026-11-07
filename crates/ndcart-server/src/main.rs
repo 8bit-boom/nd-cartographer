@@ -2,6 +2,7 @@
 //! run it (plan §4): `ndcart serve` (desktop/docker), `ndcart bench`.
 //! Desktop is the Tauri shell wrapping this same server (M0 ships serve).
 
+mod ai_settings;
 mod aijobs;
 mod ask;
 mod assets;
@@ -46,6 +47,9 @@ type WallCache = HashMap<(String, String, u64), Arc<Vec<Wall>>>;
 struct AppState {
     store: tokio::sync::RwLock<store::Store>,
     data_dir: Option<PathBuf>,
+    /// The studio's AI model settings ( Unsloth / Ollama / any
+    /// OpenAI-compatible endpoint); loaded from the data dir, saved on POST.
+    ai: Mutex<ai_settings::StoredAiSettings>,
     wall_cache: Mutex<WallCache>,
     /// "doc/floor/z/x_y/rev" -> PNG bytes; cleared wholesale when big.
     tile_cache: Mutex<HashMap<String, Vec<u8>>>,
@@ -1012,7 +1016,9 @@ async fn world_entity_preview(
     let _ = app;
     #[cfg(feature = "bridge")]
     {
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         if cfg.direct.is_some() {
             return Err(ApiError(CoreError::Invalid(
                 "lore lives in nd-world; a standalone model has none".into(),
@@ -1308,6 +1314,7 @@ fn one_usize() -> usize {
 /// pictures through nd-world's imagegen in the background. Returns the job; poll
 /// `GET /api/ai/jobs/{id}`. Nothing is added anywhere until the GM accepts a picture.
 async fn ai_image(
+    State(app): State<App>,
     body: Result<Json<AiImageBody>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
@@ -1334,7 +1341,9 @@ async fn ai_image(
     };
     #[cfg(feature = "bridge")]
     {
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         if cfg.direct.is_some() {
             return Err(ApiError(CoreError::Invalid(
                 "image generation needs nd-world's imagegen; a standalone text model cannot draw"
@@ -1777,13 +1786,18 @@ fn clean_tags_strict(raw: &[String]) -> Result<Vec<String>, ApiError> {
 
 /// `POST /api/stamps/{id}/suggest-tags` — ask the AI for tags from the prop's
 /// name and the prompt that made it. Returns suggestions only; nothing is saved.
-async fn suggest_stamp_tags(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn suggest_stamp_tags(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let c = assets::global()
         .find_custom(&id, "stamp")
         .ok_or_else(|| CoreError::NotFound(format!("custom prop {id}")))?;
     #[cfg(feature = "bridge")]
     {
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         let tags = draft::suggest_tags(&cfg, &c.name, &c.origin.prompt)
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;
@@ -2281,7 +2295,9 @@ async fn draft_spec(
         body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
     #[cfg(feature = "bridge")]
     {
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         let ctx = draft_context(&app, &b.doc, b.lore).await;
         let spec = draft::draft(&cfg, &b.prompt, &ctx)
             .await
@@ -2304,7 +2320,9 @@ async fn draft_world_spec(
         body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
     #[cfg(feature = "bridge")]
     {
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         let ctx = draft_context(&app, &b.doc, b.lore).await;
         let spec = draft::draft_world(&cfg, &b.prompt, &ctx)
             .await
@@ -2376,7 +2394,9 @@ async fn refine_floor(
             )
         };
         let _ = cell;
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         let ctx = draft_context(&app, &Some(id.clone()), b.lore).await;
         let spec = draft::refine(&cfg, &current, &b.pins, &b.instruction, &ctx)
             .await
@@ -2430,7 +2450,9 @@ async fn ask_maps(
                 "ask in 1-1000 characters".into(),
             )));
         }
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         let turn = {
             let store = app.store.read().await;
             ask::user_turn(&ask::digest(&store), q)
@@ -2460,11 +2482,14 @@ struct EntitiesQuery {
 /// `GET /api/world/entities?q=` — the world's entities (nd-world), filtered by name,
 /// so a room can be linked to one. At most 50 matches.
 async fn world_entities(
+    State(app): State<App>,
     axum::extract::Query(q): axum::extract::Query<EntitiesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     #[cfg(feature = "bridge")]
     {
-        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         if cfg.direct.is_some() {
             return Err(ApiError(CoreError::Invalid(
                 "entities live in nd-world; a standalone model has none".into(),
@@ -2505,15 +2530,157 @@ async fn world_entities(
     }
 }
 
-/// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
+impl AppState {
+    /// The AI config for this call: the saved settings merged under the
+    /// environment (env wins per field - plan 22's settings work).
+    fn resolve_ai(&self) -> Result<draft::Config, String> {
+        let stored = self.ai.lock().expect("ai settings").clone();
+        draft::Config::from_env_and(&stored)
+    }
+}
+
+/// `GET /api/ai-settings` — the saved AI model config, redacted (the key is
+/// only ever "set"/"not set").
+async fn get_ai_settings(State(app): State<App>) -> Json<serde_json::Value> {
+    let stored = app.ai.lock().expect("ai settings").clone();
+    let view = ai_settings::view(&stored);
+    Json(serde_json::json!({ "settings": view }))
+}
+
+/// `POST /api/ai-settings` — save the AI model config (Unsloth, Ollama, ...
+/// any OpenAI-compatible endpoint). Fields left out keep their saved value.
+/// Takes effect immediately: the next draft/refine/ask uses it.
+#[derive(Deserialize, Default)]
+struct AiSettingsBody {
+    direct_url: Option<String>,
+    direct_model: Option<String>,
+    key: Option<String>,
+}
+
+async fn post_ai_settings(
+    State(app): State<App>,
+    body: Result<Json<AiSettingsBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let mut stored = app.ai.lock().expect("ai settings").clone();
+    if let Some(u) = b.direct_url {
+        let u = u.trim().to_string();
+        if !u.is_empty() && !u.starts_with("http://") && !u.starts_with("https://") {
+            return Err(ApiError(CoreError::Invalid(
+                "the model address must start with http:// or https://".into(),
+            )));
+        }
+        stored.direct_url = (!u.is_empty()).then_some(u);
+    }
+    if let Some(m) = b.direct_model {
+        let m = m.trim().to_string();
+        stored.direct_model = (!m.is_empty()).then_some(m);
+    }
+    if let Some(k) = b.key {
+        let k = k.trim().to_string();
+        stored.key = (!k.is_empty()).then_some(k);
+    }
+    ai_settings::save(app.data_dir.as_deref(), &stored)
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    *app.ai.lock().expect("ai settings") = stored.clone();
+    let view = ai_settings::view(&stored);
+    Ok(Json(
+        serde_json::json!({ "ok": true, "settings": view, "status": ai_status_value(&app) }),
+    ))
+}
+
+/// `GET /api/ai-models` — the endpoint's own model list (`GET {base}/models`,
+/// the OpenAI-compatible shape Unsloth Studio, Ollama and friends serve), so
+/// the settings dialog offers a dropdown instead of a typed guess.
+async fn ai_models(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
+    let url = {
+        let stored = app.ai.lock().expect("ai settings").clone();
+        ai_settings::resolve_direct(
+            std::env::var("ND_CARTO_LLM_URL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            std::env::var("ND_CARTO_LLM_MODEL")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            &stored,
+        )
+        .map(|(u, _)| u)
+        .ok_or_else(|| ApiError(CoreError::NotFound("no direct model configured".into())))?
+    };
+    let client = ndcart_bridge::plain_client();
+    let base = url.trim_end_matches('/');
+    let models_url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    };
+    let key = {
+        let stored = app.ai.lock().expect("ai settings").clone();
+        ai_settings::resolve_key(
+            std::env::var("ND_CARTO_LLM_KEY")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            &stored,
+        )
+    };
+    let mut req = client.get(&models_url);
+    if let Some(k) = &key {
+        req = req.bearer_auth(k);
+    }
+    let resp = req.send().await.map_err(|e| {
+        ApiError(CoreError::Invalid(format!(
+            "cannot reach {models_url}: {e}"
+        )))
+    })?;
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| ApiError(CoreError::Invalid(format!("bad model list: {e}"))))?;
+    let list: Vec<String> = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Json(serde_json::json!({ "models": list })))
+}
+
+/// `POST /api/ai-test` — send one tiny request to the configured model and
+/// report what came back, so the settings dialog can prove the connection.
+async fn ai_test(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
+    let cfg = app
+        .resolve_ai()
+        .map_err(|m| ApiError(CoreError::NotFound(m)))?;
+    let backend = draft::Backend::connect(&cfg)
+        .await
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    match backend
+        .chat(
+            "You are a connection test.",
+            "Reply with the single word OK.",
+        )
+        .await
+    {
+        Ok(reply) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "reply": reply.chars().take(120).collect::<String>(),
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({ "ok": false, "error": e }))),
+    }
+}
+
+/// `GET /api/ai/status`/// `GET /api/ai/status`/// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
 /// `{mode: "nd-world" | "standalone" | "off", detail}`.
-async fn ai_status() -> Json<serde_json::Value> {
-    Json(ai_status_value())
+async fn ai_status(State(app): State<App>) -> Json<serde_json::Value> {
+    Json(ai_status_value(&app))
 }
 
 #[cfg(feature = "bridge")]
-fn ai_status_value() -> serde_json::Value {
-    match draft::Config::from_env() {
+fn ai_status_value(app: &App) -> serde_json::Value {
+    match app.resolve_ai() {
         Ok(c) => serde_json::json!({
             "mode": if c.direct.is_some() { "standalone" } else { "nd-world" },
             "detail": c.describe(),
@@ -2523,7 +2690,7 @@ fn ai_status_value() -> serde_json::Value {
 }
 
 #[cfg(not(feature = "bridge"))]
-fn ai_status_value() -> serde_json::Value {
+fn ai_status_value(_app: &App) -> serde_json::Value {
     serde_json::json!({ "mode": "off", "detail": NO_BRIDGE })
 }
 
@@ -3293,6 +3460,12 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/underlay", post(set_underlay))
         .route("/api/docs/{id}/furnish", post(furnish_rooms))
         .route("/api/docs/{id}/reroll", post(reroll_room))
+        .route(
+            "/api/ai-settings",
+            get(get_ai_settings).post(post_ai_settings),
+        )
+        .route("/api/ai-models", get(ai_models))
+        .route("/api/ai-test", post(ai_test))
         .route("/api/search", get(search_maps))
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
@@ -3658,9 +3831,11 @@ async fn main() {
             }
             assets::init(data_dir.as_ref().map(|d| d.join("assets")));
             let app_data_dir = data_dir.clone();
+            let ai = ai_settings::load(data_dir.as_deref());
             let app: App = Arc::new(AppState {
                 store: tokio::sync::RwLock::new(store),
                 data_dir,
+                ai: Mutex::new(ai),
                 wall_cache: Mutex::new(HashMap::new()),
                 tile_cache: Mutex::new(HashMap::new()),
             });
@@ -3714,6 +3889,7 @@ mod tests {
         Arc::new(AppState {
             store: tokio::sync::RwLock::new(store::Store::default()),
             data_dir: None,
+            ai: Mutex::new(ai_settings::load(None)),
             wall_cache: Mutex::new(HashMap::new()),
             tile_cache: Mutex::new(HashMap::new()),
         })
@@ -6224,6 +6400,73 @@ mod tests {
             doc["floors"][0]["grid"]["cells"].as_array().unwrap().len(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn ai_settings_save_read_redact_and_take_effect() {
+        let app = test_app();
+        let router = build_router(app);
+        let post = |uri: String, body: String| async {
+            router
+                .clone()
+                .oneshot(
+                    Request::post(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+        let get = |uri: String| async {
+            router
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        };
+
+        // Initially: no direct model.
+        let text = body_string(get("/api/ai-settings".into()).await).await;
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["settings"]["direct_url"], serde_json::Value::Null);
+        assert_eq!(v["settings"]["key_set"], serde_json::json!(false));
+
+        // Save an Unsloth-style config; the key is never echoed back.
+        let save = serde_json::json!({
+            "direct_url": "http://127.0.0.1:3915/v1",
+            "direct_model": "unsloth/Qwen3-4B-GGUF",
+            "key": "sk-local-1"
+        });
+        let resp = post(
+            "/api/ai-settings".into(),
+            serde_json::to_string(&save).unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let text = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["settings"]["direct_url"],
+            serde_json::json!("http://127.0.0.1:3915/v1")
+        );
+        assert!(text.contains("\"key_set\":true"));
+        assert!(
+            !text.contains("sk-local-1"),
+            "the key never leaves the server"
+        );
+
+        // The status banner flips to standalone immediately.
+        let text = body_string(get("/api/ai/status".into()).await).await;
+        assert!(text.contains("standalone"), "{text}");
+
+        // A non-http URL is refused with the reason.
+        let resp = post(
+            "/api/ai-settings".into(),
+            serde_json::to_string(&serde_json::json!({"direct_url": "ftp://nope"})).unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

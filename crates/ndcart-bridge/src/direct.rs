@@ -20,6 +20,15 @@ pub struct DirectChat {
     gate: Arc<Semaphore>,
 }
 
+/// A plain reqwest client with the same timeout profile the chat client
+/// uses - for callers that only need a `GET` (the model list).
+pub fn plain_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("http client")
+}
+
 impl DirectChat {
     pub fn new(base_url: &str, model: &str, key: Option<String>) -> Result<Self, BridgeError> {
         if model.trim().is_empty() {

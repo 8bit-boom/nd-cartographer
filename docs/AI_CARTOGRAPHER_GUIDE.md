@@ -19,15 +19,41 @@ ND_CARTO_PASSWORD_FILE=/run/secrets/ndcart  ndcart serve --data-dir ~/ndcart-dat
 
 Optional: `ND_CARTO_WORLD=<slug>`, `ND_CARTO_MODEL=<name>`, `ND_CARTO_TOTP`.
 
-**A model you run yourself** (any OpenAI-compatible server, such as Ollama's `/v1`):
+**A model you run yourself** (any OpenAI-compatible server: **Unsloth Studio**,
+Ollama's `/v1`, llama.cpp's server, ...). Two ways to point the studio at it:
+
+*In the studio* — open **⚙ Settings**, fill in the endpoint, pick the model from
+the dropdown (it reads the endpoint's own model list), optionally an API key,
+then **Test connection** and **Save AI settings**. Saving takes effect
+immediately — no restart — and the settings live in
+`<data dir>/ai-settings.json`. The key is stored there but never sent anywhere
+except to the model endpoint itself, and never shown again in the UI.
+
+*In the environment* (CLI and CI keep working this way):
 
 ```bash
 ND_CARTO_LLM_URL=http://127.0.0.1:11434/v1  ND_CARTO_LLM_MODEL=llama3.1 ndcart serve ...
 ```
 
-Optional key: `ND_CARTO_LLM_KEY` or `ND_CARTO_LLM_KEY_FILE`. Requests go one at a
-time. A direct model writes specs but cannot make pictures or read the world's
-place names.
+Optional key: `ND_CARTO_LLM_KEY` or `ND_CARTO_LLM_KEY_FILE`. Environment
+variables win over saved settings per field. Requests go one at a time. A direct
+model writes specs but cannot make pictures or read the world's place names.
+
+**Unsloth Studio** (a local server for Unsloth fine-tuned GGUF models):
+
+1. Start Unsloth Studio and load a model (any instruct model works; bigger is
+   better at following the JSON spec shape).
+2. In the studio's ⚙ Settings set the endpoint to its OpenAI-compatible address
+   (for example `http://127.0.0.1:3915/v1`), press the model dropdown to load
+   the served models, pick one, **Test connection** (the model should reply
+   "OK"), then **Save**.
+3. Use ✨ **From a spec…** to draft, outline **Refine…** to edit a floor while
+   keeping the rooms you pinned, and ⚙ **Ask** to search your maps — all
+   against your local model.
+
+Small local models: the spec is strict JSON and the studio re-asks with the
+exact complaint twice before giving up, so 4B-class models usually work; if a
+draft keeps failing, try a model with stronger instruction following.
 
 The dialogs show which one is in use (🌐 nd-world, 🏠 your own model, ⛔ none).
 

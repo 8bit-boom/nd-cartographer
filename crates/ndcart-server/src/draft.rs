@@ -158,8 +158,11 @@ pub struct Config {
     pub world: Option<String>,
     pub email: Option<String>,
     pub model: Option<String>,
-    /// Standalone mode: `(base url, model)`; the key comes from `ND_CARTO_LLM_KEY[_FILE]`.
+    /// Standalone mode: `(base url, model)`; the key comes from
+    /// `ND_CARTO_LLM_KEY[_FILE]` or the saved AI settings (env wins).
     pub direct: Option<(String, String)>,
+    /// Bearer key for the direct endpoint (from the same two sources).
+    pub key: Option<String>,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -170,21 +173,30 @@ impl Config {
     /// The studio's own configuration, from the environment. A direct model
     /// (`ND_CARTO_LLM_URL` + `ND_CARTO_LLM_MODEL`) wins over nd-world.
     pub fn from_env() -> Result<Config, String> {
-        let direct = match (env("ND_CARTO_LLM_URL"), env("ND_CARTO_LLM_MODEL")) {
+        Self::from_env_and(&crate::ai_settings::StoredAiSettings::default())
+    }
+
+    /// The studio's configuration: environment variables keep the final word
+    /// per field; the saved AI settings (Unsloth, Ollama, ...) fill the rest.
+    pub fn from_env_and(stored: &crate::ai_settings::StoredAiSettings) -> Result<Config, String> {
+        let direct = match (
+            env("ND_CARTO_LLM_URL").or_else(|| stored.direct_url.clone()),
+            env("ND_CARTO_LLM_MODEL").or_else(|| stored.direct_model.clone()),
+        ) {
             (Some(u), Some(m)) => Some((u, m)),
             (Some(_), None) => {
-                return Err(
-                    "set ND_CARTO_LLM_MODEL (the model name) as well as ND_CARTO_LLM_URL".into(),
-                )
+                return Err("set the model name as well as the endpoint address".into())
             }
             _ => None,
         };
+        let key = env("ND_CARTO_LLM_KEY").or_else(|| stored.key.clone());
         let cfg = Config {
             server: env("ND_CARTO_SERVER"),
             world: env("ND_CARTO_WORLD"),
             email: env("ND_CARTO_EMAIL"),
             model: env("ND_CARTO_MODEL"),
             direct,
+            key,
         };
         if cfg.direct.is_none() && (cfg.server.is_none() || cfg.email.is_none()) {
             return Err("to draft with AI set ND_CARTO_SERVER and ND_CARTO_EMAIL (nd-world), or ND_CARTO_LLM_URL and ND_CARTO_LLM_MODEL (a model you run yourself)".into());
@@ -211,13 +223,9 @@ pub enum Backend {
 impl Backend {
     pub async fn connect(cfg: &Config) -> Result<Backend, String> {
         if let Some((url, model)) = &cfg.direct {
-            let key = env("ND_CARTO_LLM_KEY").or_else(|| {
-                env("ND_CARTO_LLM_KEY_FILE")
-                    .and_then(|f| std::fs::read_to_string(f).ok())
-                    .map(|k| k.trim().to_string())
-            });
             return Ok(Backend::Direct(
-                ndcart_bridge::DirectChat::new(url, model, key).map_err(|e| e.to_string())?,
+                ndcart_bridge::DirectChat::new(url, model, cfg.key.clone())
+                    .map_err(|e| e.to_string())?,
             ));
         }
         let (server, email) = (
@@ -513,12 +521,19 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     if direct.is_none() && (server.is_none() || email.is_none()) {
         return Err("use --server and --email (nd-world), or --llm-url and --llm-model (a model you run yourself)".into());
     }
+    let key = std::env::var("ND_CARTO_LLM_KEY").ok().or_else(|| {
+        std::env::var("ND_CARTO_LLM_KEY_FILE")
+            .ok()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .map(|k| k.trim().to_string())
+    });
     let cfg = Config {
         server,
         world,
         email,
         model,
         direct,
+        key,
     };
     let spec = draft(
         &cfg,

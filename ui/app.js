@@ -2220,8 +2220,79 @@ document.getElementById('ask-q').addEventListener('keydown', (e) => { if (e.key 
 document.getElementById('ask-close').onclick = () => askDialog.close();
 
 // ---------- settings and health ----------
+
+// The AI model section: saved settings, a model dropdown from the endpoint's
+// own /models, a one-shot connection test. Takes effect immediately - no
+// restart (the next draft/refine/ask reads the saved config).
+async function fillAiSettings() {
+  try {
+    const { settings } = await api('GET', '/api/ai-settings');
+    document.getElementById('ai-url').value = settings.direct_url || '';
+    document.getElementById('ai-model').value = settings.direct_model || '';
+    document.getElementById('ai-key').value = '';
+    document.getElementById('ai-key').placeholder = settings.key_set ? '(saved - leave empty to keep)' : 'leave empty if none';
+    const line = `source: ${settings.source}`;
+    const st = await api('GET', '/api/ai/status');
+    document.getElementById('ai-result').textContent = `${st.detail} · ${line}`;
+  } catch (e) { /* the dialog still opens for the health checks */ }
+}
+
+document.getElementById('ai-save').onclick = async () => {
+  const res = document.getElementById('ai-result');
+  const body = {};
+  const url = document.getElementById('ai-url').value.trim();
+  const model = document.getElementById('ai-model').value.trim();
+  const key = document.getElementById('ai-key').value.trim();
+  if (url) body.direct_url = url;
+  if (model) body.direct_model = model;
+  if (key) body.key = key;
+  try {
+    const out = await api('POST', '/api/ai-settings', body);
+    res.textContent = `Saved. ${out.status.detail}`;
+    await loadAiModels();
+  } catch (e) { res.textContent = `Not saved: ${e.message}`; }
+};
+
+async function loadAiModels() {
+  try {
+    const { models } = await api('GET', '/api/ai-models');
+    const list = document.getElementById('ai-model-list');
+    list.textContent = '';
+    for (const m of models) {
+      const o = document.createElement('option');
+      o.value = m;
+      list.appendChild(o);
+    }
+    return models;
+  } catch { return []; }
+}
+
+document.getElementById('ai-test').onclick = async () => {
+  const res = document.getElementById('ai-result');
+  res.textContent = 'Testing…';
+  try {
+    // Save first so the test uses what the fields show.
+    await saveAiQuiet();
+    const out = await api('POST', '/api/ai-test');
+    res.textContent = out.ok ? `Connected — model replied: ${out.reply}` : `Failed: ${out.error}`;
+  } catch (e) { res.textContent = `Failed: ${e.message}`; }
+};
+
+async function saveAiQuiet() {
+  const body = {};
+  const url = document.getElementById('ai-url').value.trim();
+  const model = document.getElementById('ai-model').value.trim();
+  const key = document.getElementById('ai-key').value.trim();
+  if (url) body.direct_url = url;
+  if (model) body.direct_model = model;
+  if (key) body.key = key;
+  await api('POST', '/api/ai-settings', body);
+}
+
 const settingsDialog = document.getElementById('settings-dialog');
 document.getElementById('btn-settings').onclick = async () => {
+  fillAiSettings();
+  loadAiModels();
   const list = document.getElementById('settings-list');
   list.textContent = 'Checking…';
   settingsDialog.showModal();

@@ -201,7 +201,23 @@
   <dialog id="settings-dialog">
     <h3>Settings and health</h3>
     <ul id="settings-list" class="checks" aria-live="polite"></ul>
-    <p class="dim">AI and nd-world are set in the environment the studio starts in (never typed here); see the README. The same checks run with <code>ndcart doctor</code>.</p>
+    <fieldset>
+      <legend>AI model (local Unsloth Studio, Ollama, ...)</legend>
+      <p class="dim">An OpenAI-compatible endpoint. Example for Unsloth Studio:
+        <code>http://127.0.0.1:3915/v1</code> — for Ollama: <code>http://127.0.0.1:11434/v1</code>.
+        Applies immediately to draft, refine and ask. nd-world credentials stay in the
+        environment as before.</p>
+      <label>Endpoint <input id="ai-url" placeholder="http://127.0.0.1:3915/v1" autocomplete="off"></label>
+      <label>Model <input id="ai-model" list="ai-model-list" placeholder="unsloth/Qwen3-4B-GGUF" autocomplete="off">
+        <datalist id="ai-model-list"></datalist></label>
+      <label>API key <input id="ai-key" type="password" placeholder="leave empty if none" autocomplete="off"></label>
+      <menu>
+        <button id="ai-test" type="button">Test connection</button>
+        <button id="ai-save" type="button" class="primary">Save AI settings</button>
+      </menu>
+      <p id="ai-result" class="hint" aria-live="polite"></p>
+    </fieldset>
+    <p class="dim">The same health checks run with <code>ndcart doctor</code>.</p>
     <menu><button id="settings-close" type="button">Close</button></menu>
   </dialog>
   <dialog id="ask-dialog">
