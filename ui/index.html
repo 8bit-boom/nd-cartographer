@@ -73,6 +73,7 @@
   <span id="floor-tabs"></span>
   <button id="fl-add" title="Add an empty floor">＋ Floor</button>
   <button id="fl-gen" title="Generate a dungeon, cave, building, ship deck or city district onto this floor">🎲 Generate…</button>
+  <button id="fl-spec" title="Read this floor back as a spec and lay it out again with a new seed (the rooms' graph stays, the arrangement changes)">♻ Re-layout…</button>
   <button id="fl-dup" title="Duplicate this floor (placed right after it)">⧉ Copy</button>
   <button id="fl-rename" title="Rename this floor">✎ Rename</button>
   <button id="fl-left" title="Move this floor earlier">◀</button>
@@ -80,6 +81,11 @@
   <button id="fl-remove" title="Remove this floor (undoable)">🗑 Remove</button>
   <button id="fl-undo" title="Undo the last floor change (add / rename / move / remove)">↩ Floors</button>
   <label class="dim" title="Show the floor below faintly underneath, so stairs line up"><input type="checkbox" id="fl-onion"> onion skin</label>
+  <span id="era-bar" hidden>
+    <select id="era-select" title="The era this floor shows and exports (night, ruined...)" aria-label="Era"></select>
+    <button id="era-edit" title="Edit this era: lights, hidden props and labels, colour grade">✎ Era</button>
+    <button id="era-new" title="Add a new era">＋ Era</button>
+  </span>
 </div>
 <main>
   <nav id="outliner" aria-label="Map outline">
@@ -225,6 +231,26 @@
       <menu>
         <button value="cancel" type="button" id="gn-cancel">Cancel</button>
         <button value="ok" id="gn-ok" class="primary">Generate</button>
+      </menu>
+    </form>
+  </dialog>
+  <dialog id="era-dialog">
+    <form method="dialog" id="era-form">
+      <h3>Era <span id="era-title" class="dim"></span></h3>
+      <label>Name <input id="era-name" maxlength="40"></label>
+      <fieldset><legend>Lights</legend><div id="era-lights" class="hint"></div></fieldset>
+      <fieldset><legend>Hidden props and labels</legend><div id="era-hidden" class="hint"></div></fieldset>
+      <fieldset><legend>Colour grade</legend>
+        <label>Tint <input type="color" id="era-tint" value="#0a1030"> amount
+          <input type="range" id="era-tint-amt" min="0" max="1" step="0.05" value="0.3"></label>
+        <label>Brightness <input type="range" id="era-bright" min="0.2" max="2" step="0.05" value="1"></label>
+        <label>Contrast <input type="range" id="era-contrast" min="0.2" max="2" step="0.05" value="1"></label>
+        <label>Saturation <input type="range" id="era-sat" min="0" max="2" step="0.05" value="1"></label>
+      </fieldset>
+      <menu>
+        <button value="cancel" type="button" id="era-close">Close</button>
+        <button value="del" type="button" id="era-del" class="danger">Delete era</button>
+        <button value="ok" id="era-ok" class="primary">Save era</button>
       </menu>
     </form>
   </dialog>

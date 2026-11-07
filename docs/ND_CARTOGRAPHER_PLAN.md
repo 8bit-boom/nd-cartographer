@@ -1131,7 +1131,7 @@ what it needs. Nothing here is scheduled; the strong candidates carry a
 
 ### B. Scale and time
 
-5. **Era/variant layers** [+] — day/night/pre-fire/ruined as *named layer
+5. **Era/variant layers** [+] **(built 2026-11-07: floors carry named eras — light on/off overrides, hidden props and labels, and a colour grade (tint/brightness/contrast/saturation); the viewport, exports and `--era NAME` publishing all follow the active era, and an era lands as its own nd-world map with its own captured slug)** — day/night/pre-fire/ruined as *named layer
    sets* over one document, each publishable as its own map (the P2
    variant-publishing idea, generalized): same walls, different world.
    Publishing a night variant is the tabletop's favourite trick.
@@ -1187,7 +1187,7 @@ what it needs. Nothing here is scheduled; the strong candidates carry a
     notes ("where was the flooded cistern?") with zoom-to-result; local
     through nd-world's model or a small standalone model. Search today is
     keyword-only (§20).
-19. **Spec round-trip** [+] — extract a MapSpec *from* a painted map
+19. **Spec round-trip** [+] **(built 2026-11-07: ♻ Re-layout reads a painted floor back as a MapSpec — rooms with sizes, kinds and lamps, door/opening links, stairs — and feeds the existing propose flow, so a map can be laid out again with a new seed; over-30-square rooms are clamped with a warning)** — extract a MapSpec *from* a painted map
     (painted rooms become pinned constraints), so a map stays
     re-layoutable: move a wing, re-plan the corridors, keep the rest.
     This turns the AI workflow from "draft once" into a continuous tool.

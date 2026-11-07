@@ -403,6 +403,141 @@ document.getElementById('at-ok').onclick = async () => {
   renderAtlasList();
 };
 
+
+// ---------- eras (night, ruined... — plan 21.5) ----------
+
+// The era bar lives in the floor bar; switching an era is one journal op
+// (SetActiveEra), so it is undoable and bumps the rev (tiles re-bake).
+function buildEraBar() {
+  const bar = document.getElementById('era-bar');
+  const sel = document.getElementById('era-select');
+  const floor = curFloor();
+  bar.hidden = !(floor.eras || []).length;
+  sel.textContent = '';
+  const base = document.createElement('option');
+  base.value = '';
+  base.textContent = 'Everyday';
+  base.selected = !floor.active_era;
+  sel.appendChild(base);
+  for (const e of floor.eras || []) {
+    const o = document.createElement('option');
+    o.value = e.id;
+    o.textContent = e.name;
+    o.selected = floor.active_era === e.id;
+    sel.appendChild(o);
+  }
+}
+
+document.getElementById('era-select').onchange = async (e) => {
+  await postOps([{ t: 'set_active_era', id: e.target.value || null }]);
+};
+
+document.getElementById('era-new').onclick = async () => {
+  const name = window.prompt('Name the era', 'Night');
+  if (name === null || !name.trim()) return;
+  const era = {
+    id: newId('era'),
+    name: name.trim().slice(0, 40),
+    lights: {},
+    hidden: [],
+    grade: { tint: '#0a1030', tint_amount: 0.3, saturation: 1, contrast: 1, brightness: 0.85 },
+  };
+  await postOps([{ t: 'batch', ops: [
+    { t: 'put_era', era },
+    { t: 'set_active_era', id: era.id },
+  ] }]);
+};
+
+let eraEditId = null;
+
+document.getElementById('era-edit').onclick = () => {
+  const floor = curFloor();
+  eraEditId = floor.active_era || (floor.eras || [])[0]?.id;
+  if (!eraEditId) { statusEl.textContent = 'No era to edit yet — add one first.'; return; }
+  openEraDialog(eraEditId);
+};
+
+function openEraDialog(eraId) {
+  const floor = curFloor();
+  const e = (floor.eras || []).find(x => x.id === eraId);
+  if (!e) return;
+  document.getElementById('era-title').textContent = `\u2014 ${e.name}`;
+  document.getElementById('era-name').value = e.name;
+
+  // Lights: a checkbox line each (checked = on in this era).
+  const lightsBox = document.getElementById('era-lights');
+  lightsBox.textContent = '';
+  for (const l of floor.lights || []) {
+    const row = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = (e.lights || {})[l.id] ?? l.on;
+    cb.dataset.light = l.id;
+    row.append(cb, ` ${l.label || l.id} (at ${l.x.toFixed(0)}, ${l.y.toFixed(0)})`);
+    lightsBox.appendChild(row);
+  }
+  if (!(floor.lights || []).length) lightsBox.textContent = 'No lights on this floor.';
+
+  // Props and labels: a checkbox line each (checked = hidden in this era).
+  const hideBox = document.getElementById('era-hidden');
+  hideBox.textContent = '';
+  const hideables = [
+    ...(floor.stamps || []).map(s => ({ id: s.id, what: 'prop' })),
+    ...(floor.labels || []).map(l => ({ id: l.id, what: 'label', text: l.text })),
+  ];
+  for (const item of hideables) {
+    const row = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = (e.hidden || []).includes(item.id);
+    cb.dataset.hide = item.id;
+    const what = item.what === 'label' ? `label "${String(item.text).slice(0, 30)}"` : 'prop';
+    row.append(cb, ` hide ${what} ${item.id}`);
+    hideBox.appendChild(row);
+  }
+  if (!hideables.length) hideBox.textContent = 'No props or labels to hide.';
+
+  const g = e.grade || {};
+  document.getElementById('era-tint').value = /^#[0-9a-f]{6}$/i.test(g.tint || '') ? g.tint : '#0a1030';
+  document.getElementById('era-tint-amt').value = g.tint_amount ?? 0.3;
+  document.getElementById('era-bright').value = g.brightness ?? 1;
+  document.getElementById('era-contrast').value = g.contrast ?? 1;
+  document.getElementById('era-sat').value = g.saturation ?? 1;
+  document.getElementById('era-dialog').showModal();
+}
+
+document.getElementById('era-close').onclick = () => document.getElementById('era-dialog').close();
+
+document.getElementById('era-del').onclick = async () => {
+  if (!eraEditId) return;
+  if (!window.confirm('Delete this era? (The everyday state is untouched.)')) return;
+  document.getElementById('era-dialog').close();
+  await postOps([{ t: 'remove_era', id: eraEditId }]);
+};
+
+document.getElementById('era-ok').onclick = async () => {
+  if (!eraEditId) return;
+  const floor = curFloor();
+  const e = (floor.eras || []).find(x => x.id === eraEditId);
+  if (!e) return;
+  const name = document.getElementById('era-name').value.trim().slice(0, 40) || e.name;
+  const lights = {};
+  for (const cb of document.querySelectorAll('#era-lights input[type=checkbox]')) {
+    lights[cb.dataset.light] = cb.checked;
+  }
+  const hidden = [...document.querySelectorAll('#era-hidden input[type=checkbox]:checked')]
+    .map(cb => cb.dataset.hide);
+  const grade = {
+    tint: document.getElementById('era-tint').value,
+    tint_amount: Number(document.getElementById('era-tint-amt').value),
+    brightness: Number(document.getElementById('era-bright').value),
+    contrast: Number(document.getElementById('era-contrast').value),
+    saturation: Number(document.getElementById('era-sat').value),
+  };
+  document.getElementById('era-dialog').close();
+  await postOps([{ t: 'put_era', era: { id: e.id, name, lights, hidden, grade } }]);
+};
+
 // ---------- projects ----------
 
 async function loadDocList() {
@@ -506,6 +641,7 @@ async function refresh() {
   buildFloorBar();
   setExportLinks();
   buildOutline();
+  buildEraBar();
   updateNavBack();
   refreshProblems();
   loadMiniImage();
@@ -2316,6 +2452,25 @@ setInterval(async () => {
 
 // ---------- generate onto a floor ----------
 const genDialog = document.getElementById('gen-dialog');
+document.getElementById('fl-spec').onclick = async () => {
+  try {
+    const { spec, warnings } = await api(
+      'GET',
+      `/api/docs/${state.docId}/floor-spec?floor=${state.floorId}`,
+    );
+    document.querySelector('input[name=spec-mode][value=battle]').checked = true;
+    document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
+    specDialog.showModal();
+    const msg = document.getElementById('spec-msg');
+    msg.textContent = warnings.length
+      ? `Read back with notes: ${warnings.join(' ')}`
+      : 'Read back from this floor. Nothing has been changed yet.';
+    await runSpec(Math.floor(Math.random() * 1e6));
+  } catch (e) {
+    statusEl.textContent = e.message;
+  }
+};
+
 document.getElementById('fl-gen').onclick = () => {
   document.getElementById('gn-seed').value = Math.floor(Math.random() * 1e6);
   genDialog.showModal();

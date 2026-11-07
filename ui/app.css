@@ -261,3 +261,11 @@ dialog#new-dialog::backdrop { background: rgba(0,0,0,0.55); }
 .checks li { padding: 4px 0; display: flex; gap: 8px; align-items: baseline; }
 .checks .lv { font-weight: 700; width: 3.2em; }
 .checks .ok .lv { color: #3fb950; } .checks .warn .lv { color: #d29922; } .checks .fail .lv { color: #f85149; }
+
+/* Eras (plan 21.5): the bar lives in the floor bar; the dialog lists lights
+   and hidden objects as checkbox lines. */
+#era-bar { display: inline-flex; gap: 4px; align-items: center; }
+#era-dialog fieldset { max-height: 180px; overflow-y: auto; }
+#era-dialog label { display: block; margin: 4px 0; }
+#era-dialog .hint { margin: 2px 0; }
+button.danger { border-color: #a33; }
