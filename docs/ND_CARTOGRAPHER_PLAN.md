@@ -1220,9 +1220,13 @@ prompts as JSON; automatic picture generation per prompt remains open),
 `POST /api/combat/templates` - both tested and in API_REFERENCE - and
 the studio gained stock-room rolling and the encounter-template
 publish), 1 (partly: an all-projects link graph in the Atlas dialog).
-**Still open from this list:** 2's write half (by design), 8, 9, 10, 13
-(the heavy rendering/verification items), 17 (the MCP surface), and the
-atlas zoom-through viewport (1's second half).
+**Still open from this list (all built or closed as of the second
+2026-11-07 batch):** 8 (relief + AO), 9 (sunlight), 10 (animated water
+on the table screen), 13 (Roll20 sidecar, unverified live), 17 (the MCP
+surface), and the atlas dialog gained the all-projects link graph.
+Remaining by choice: 2's write half (nd-world owns the text), the atlas
+zoom-through viewport, and per-prompt picture generation in the theme
+pack (20).
 
 **Built in the 2026-11-07 second batch (the heavy ones):** 8 (relief +
 wall AO - `SetRelief` op, a luminance-height re-light and a widening AO
