@@ -74,6 +74,7 @@
   <button id="fl-add" title="Add an empty floor">＋ Floor</button>
   <button id="fl-gen" title="Generate a dungeon, cave, building, ship deck or city district onto this floor">🎲 Generate…</button>
   <button id="fl-spec" title="Read this floor back as a spec and lay it out again with a new seed (the rooms' graph stays, the arrangement changes)">♻ Re-layout…</button>
+  <button id="fl-stats" title="The pacing dashboard: rooms, squares, doors, lights and their reach, props, encounters, lore coverage">📊 Stats</button>
   <button id="fl-dup" title="Duplicate this floor (placed right after it)">⧉ Copy</button>
   <button id="fl-rename" title="Rename this floor">✎ Rename</button>
   <button id="fl-left" title="Move this floor earlier">◀</button>
@@ -101,6 +102,7 @@
       <button id="bk-refine" title="Ask the AI to revise the floor, keeping the selected rooms exactly (result is a new floor to preview)">Refine…</button>
       <button id="bk-link" title="Tie the one selected room to a thing in your nd-world (a location, an NPC…)">Link…</button>
       <button id="bk-encounter" title="Who waits in the one selected room? Stays studio-side (GM information — never published)">⚔ Encounter</button>
+      <button id="bk-lore" title="Read the linked room's lore from your nd-world (what the GM sees there)">📖 Lore</button>
       <button id="bk-furnish" title="Put props in the selected rooms, chosen from what each room is">Furnish</button>
       <button id="bk-reroll" title="Replace the one selected room's generated props; pinned and hand-placed props stay">🎲 Reroll</button>
       <button id="bk-delete" title="Delete the selected rooms (undoable)">Delete</button>
@@ -253,6 +255,25 @@
         <button value="del" type="button" id="era-del" class="danger">Delete era</button>
         <button value="ok" id="era-ok" class="primary">Save era</button>
       </menu>
+    </form>
+  </dialog>
+  <dialog id="lore-dialog">
+    <form method="dialog">
+      <h3><span id="lore-icon"></span> <span id="lore-name"></span></h3>
+      <p class="dim" id="lore-kind"></p>
+      <p id="lore-summary"></p>
+      <div id="lore-body" class="hint"></div>
+      <menu>
+        <button value="cancel" type="button" id="lore-close">Close</button>
+        <a id="lore-open" class="primary" target="_blank" rel="noopener" style="text-decoration:none;padding:5px 12px;border:1px solid var(--line);border-radius:6px;display:inline-block">Open in nd-world</a>
+      </menu>
+    </form>
+  </dialog>
+  <dialog id="stats-dialog">
+    <form method="dialog">
+      <h3>Pacing <span class="dim" id="stats-floor"></span></h3>
+      <div id="stats-body"></div>
+      <menu><button value="cancel" id="stats-close" class="primary">Close</button></menu>
     </form>
   </dialog>
   <dialog id="atlas-dialog">

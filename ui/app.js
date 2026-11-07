@@ -538,6 +538,80 @@ document.getElementById('era-ok').onclick = async () => {
   await postOps([{ t: 'put_era', era: { id: e.id, name, lights, hidden, grade } }]);
 };
 
+
+// ---------- lore sync (plan 21.2) + pacing stats (21.6) ----------
+
+// The lore of the room linked to nd-world: what the GM sees there, shown
+// beside the map (read-only; nd-world owns the text).
+async function openLoreFor(space) {
+  const link = linkOf(space);
+  if (!link) { statusEl.textContent = 'That room is not linked to the world yet (Link…)'; return; }
+  try {
+    const { preview, server } = await api('GET', `/api/world/entities/${link.entity_id}/preview`);
+    document.getElementById('lore-icon').textContent = preview.kind_icon || '';
+    document.getElementById('lore-name').textContent = preview.name || link.name;
+    document.getElementById('lore-kind').textContent =
+      (preview.kind || '') + (preview.subtype ? ` · ${preview.subtype}` : '') +
+      (preview.tags?.length ? ` · ${preview.tags.join(', ')}` : '');
+    document.getElementById('lore-summary').textContent = preview.summary || '';
+    // Body markdown is rendered nd-world side (body_html); keep it as HTML
+    // from our own server's proxy of nd-world's renderer.
+    const body = document.getElementById('lore-body');
+    body.textContent = '';
+    if (preview.body_html) {
+      const div = document.createElement('div');
+      // body_html comes from our own proxy of nd-world's markdown renderer
+      // for the linked entity - the same text nd-world shows the GM.
+      div.innerHTML = preview.body_html;
+      body.appendChild(div);
+    }
+    const open = document.getElementById('lore-open');
+    if (server) {
+      open.hidden = false;
+      open.href = `${server.replace(/\/$/, '')}/entity/${link.entity_id}`;
+    } else {
+      open.hidden = true;
+    }
+    document.getElementById('lore-dialog').showModal();
+  } catch (e) {
+    statusEl.textContent = `Lore: ${e.message}`;
+  }
+}
+
+document.getElementById('bk-lore').onclick = async () => {
+  if (state.sel.size !== 1) { statusEl.textContent = 'Select exactly one room to read its lore.'; return; }
+  await openLoreFor([...state.sel][0]);
+};
+document.getElementById('lore-close').onclick = () => document.getElementById('lore-dialog').close();
+
+document.getElementById('fl-stats').onclick = async () => {
+  try {
+    const s = await api('GET', `/api/docs/${state.docId}/stats?floor=${state.floorId}`);
+    document.getElementById('stats-floor').textContent = `— ${s.name}`;
+    const body = document.getElementById('stats-body');
+    const rows = [];
+    rows.push(`<tr><th colspan="2">Rooms</th></tr>`);
+    for (const r of s.rooms) {
+      rows.push(`<tr><td>${r.name}${r.encounter ? ' ⚔' : ''}</td><td class="num">${r.squares} squares · ${r.props} props${r.encounter ? ' · encounter' : ''}</td></tr>`);
+    }
+    if (!s.rooms.length) rows.push('<tr><td colspan="2" class="hint">No rooms yet.</td></tr>');
+    rows.push(`<tr><th colspan="2">Structure</th></tr>`);
+    rows.push(`<tr><td>Painted squares</td><td class="num">${s.floors_total_squares}</td></tr>`);
+    rows.push(`<tr><td>Corridors / areas</td><td class="num">${s.corridors} / ${s.areas}</td></tr>`);
+    rows.push(`<tr><td>Doors / windows / secrets</td><td class="num">${s.doors} / ${s.windows} / ${s.secrets}</td></tr>`);
+    rows.push(`<tr><td>Lights (on) reaching squares</td><td class="num">${s.lights} (${s.lights_on}) · ${s.lit_squares}</td></tr>`);
+    rows.push(`<tr><td>Props (generated / pinned)</td><td class="num">${s.props} (${s.props_generated} / ${s.props_pinned})</td></tr>`);
+    rows.push(`<tr><td>Labels (GM-only)</td><td class="num">${s.labels} (${s.labels_gm_only})</td></tr>`);
+    rows.push(`<tr><td>Encounters</td><td class="num">${s.encounters}</td></tr>`);
+    rows.push(`<tr><td>Rooms with no world link</td><td class="num">${s.rooms_unlinked}</td></tr>`);
+    body.innerHTML = `<table>${rows.join('')}</table>`;
+    document.getElementById('stats-dialog').showModal();
+  } catch (e) {
+    statusEl.textContent = `Stats: ${e.message}`;
+  }
+};
+document.getElementById('stats-close').onclick = () => document.getElementById('stats-dialog').close();
+
 // ---------- projects ----------
 
 async function loadDocList() {

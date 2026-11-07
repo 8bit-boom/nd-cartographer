@@ -392,6 +392,25 @@ impl Bridge {
             .collect())
     }
 
+    /// One entity's lore preview (`GET /api/entity/{id}/preview`): name,
+    /// kind, summary, body (markdown), tags, image - the two-way lore sync's
+    /// read half (plan 21.2). The viewer's own access rules apply nd-world
+    /// side; the studio renders what it gets.
+    pub async fn entity_preview(&self, id: i64) -> Result<serde_json::Value, BridgeError> {
+        let resp = self
+            .send(self.req(Method::GET, &format!("/api/entity/{id}/preview")))
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("entity preview answer: {e}")))
+    }
+
     /// The names of the world's locations (`GET /api/entities/picker`, kind
     /// "location"), so generated names can agree with existing lore.
     pub async fn location_names(&self) -> Result<Vec<String>, BridgeError> {

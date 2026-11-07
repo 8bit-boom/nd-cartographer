@@ -1001,6 +1001,46 @@ fn yes_bool() -> bool {
     true
 }
 
+/// `GET /api/world/entities/{id}/preview` - the two-way lore sync's read
+/// half (plan 21.2): the linked entity's lore as nd-world shows the GM.
+/// Also returns the configured server so the UI can deep-link to the full
+/// page there.
+async fn world_entity_preview(
+    State(app): State<App>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _ = app;
+    #[cfg(feature = "bridge")]
+    {
+        let cfg = draft::Config::from_env().map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        if cfg.direct.is_some() {
+            return Err(ApiError(CoreError::Invalid(
+                "lore lives in nd-world; a standalone model has none".into(),
+            )));
+        }
+        let server = cfg.server.clone().unwrap_or_default();
+        let backend = draft::Backend::connect(&cfg)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        let draft::Backend::World(bridge, _) = &backend else {
+            return Err(ApiError(CoreError::Invalid(
+                "lore lives in nd-world".into(),
+            )));
+        };
+        let preview = bridge
+            .entity_preview(id)
+            .await
+            .map_err(|e| ApiError(CoreError::Invalid(e.to_string())))?;
+        Ok(Json(
+            serde_json::json!({ "preview": preview, "server": server }),
+        ))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
+}
+
 /// `POST /api/docs/{id}/reroll` `{floor?, room, seed?}` - plan 22.2: replace
 /// exactly the generated props of one room. Pinned and hand-placed props
 /// stay; the room's generated stamps are removed and furnished again in the
@@ -2012,6 +2052,33 @@ async fn floor_spec(
     Ok(Json(
         serde_json::json!({ "spec": full, "warnings": warnings }),
     ))
+}
+
+/// `GET /api/docs/{id}/stats?floor=ID` - the pacing dashboard's numbers
+/// (plan 21.6): rooms/squares/kinds, doors and secrets, lights and their
+/// coverage, props by provenance, GM labels, encounters, lore coverage.
+async fn doc_stats(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Json<ndcart_core::stats::FloorStats>, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let floor = doc
+        .floors
+        .get(idx)
+        .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+    Ok(Json(ndcart_core::stats::floor_stats(
+        floor,
+        doc.manifest.cell_size,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -3193,6 +3260,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/export/png", get(export_png))
         .route("/api/docs/{id}/lint", get(lint_doc))
         .route("/api/docs/{id}/floor-spec", get(floor_spec))
+        .route("/api/docs/{id}/stats", get(doc_stats))
         .route("/api/materials", get(list_materials))
         .route("/api/assets", post(put_asset))
         .route("/api/assets/{id}", get(get_asset))
@@ -3239,6 +3307,10 @@ fn build_router(app: App) -> Router {
         .route("/api/draft", post(draft_spec))
         .route("/api/ai/status", get(ai_status))
         .route("/api/world/entities", get(world_entities))
+        .route(
+            "/api/world/entities/{id}/preview",
+            get(world_entity_preview),
+        )
         .route("/api/ask", post(ask_maps))
         .route("/api/doctor", get(doctor_checks))
         .route("/api/docs/{id}/refine", post(refine_floor))

@@ -24,6 +24,7 @@ pub mod overlay;
 pub mod prefab;
 pub mod scatter;
 pub mod stamp;
+pub mod stats;
 pub mod stroke;
 pub mod structure;
 pub mod terrain;

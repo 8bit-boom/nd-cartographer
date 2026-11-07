@@ -269,3 +269,9 @@ dialog#new-dialog::backdrop { background: rgba(0,0,0,0.55); }
 #era-dialog label { display: block; margin: 4px 0; }
 #era-dialog .hint { margin: 2px 0; }
 button.danger { border-color: #a33; }
+
+/* Lore sync (plan 21.2) and pacing stats (21.6). */
+#lore-body { max-height: 260px; overflow-y: auto; }
+#stats-body table { border-collapse: collapse; width: 100%; }
+#stats-body td, #stats-body th { padding: 3px 8px; text-align: left; border-bottom: 1px solid var(--line); }
+#stats-body td.num { text-align: right; }
