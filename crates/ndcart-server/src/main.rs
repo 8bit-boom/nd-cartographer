@@ -2426,6 +2426,66 @@ async fn export_svg(
         .into_response())
 }
 
+/// `GET /api/docs/{id}/export/roll20?floor=ID` — a Roll20 wall-data sidecar
+/// (plan 21.13): the floor's wall segments as polylines in page pixels at
+/// Roll20's default 70 px per square, plus the expected picture scale.
+/// **Unverified live** — Roll20 imports walls through API scripts, and the
+/// exact script shape varies; this emits the widely-used polyline array.
+async fn export_roll20(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    const ROLL20_PX_PER_SQUARE: f64 = 70.0;
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let floor = ndcart_core::for_audience(&doc.floors[idx], pick_audience(&q)?);
+    let cell = doc.manifest.cell_size;
+    let walls = tiles::derive_walls(&floor, cell);
+    let (cols, rows) = tiles::grid_extent(&floor);
+    let s = ROLL20_PX_PER_SQUARE;
+    let walls_out: Vec<_> = walls
+        .iter()
+        .filter(|w| w.pts.len() == 2)
+        .map(|w| {
+            serde_json::json!({
+                "polyline": [
+                    [ (w.pts[0][0] / cell * s).round(), (w.pts[0][1] / cell * s).round() ],
+                    [ (w.pts[1][0] / cell * s).round(), (w.pts[1][1] / cell * s).round() ],
+                ],
+                "kind": match w.kind {
+                    ndcart_core::WallKind::Wall => "wall",
+                    ndcart_core::WallKind::Door => "door",
+                    ndcart_core::WallKind::Window => "window",
+                    ndcart_core::WallKind::Secret => "secret",
+                },
+                "state": w.state.map(|x| match x {
+                    ndcart_core::WallState::Open => "open",
+                    ndcart_core::WallState::Closed => "closed",
+                }),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "page": {
+            "width_px": (f64::from(cols) * s).round(),
+            "height_px": (f64::from(rows) * s).round(),
+            "scale_number": 5.0,
+            "scale_units": "ft",
+            "grid_type": "square",
+        },
+        "walls": walls_out,
+        "note": "unverified live: import via your Roll20 API script of choice",
+    })))
+}
+
 /// `GET /api/docs/{id}/stats?floor=ID` — the pacing dashboard's numbers
 /// (plan §21.6): rooms/squares/kinds, doors and secrets, lights and their
 /// coverage, props by provenance, GM labels, encounters, lore coverage.
@@ -2464,6 +2524,8 @@ struct PreviewQuery {
     /// Darkness on (default): only lit areas show clearly.
     darkness: Option<bool>,
     ppc: Option<i64>,
+    /// Animation phase for drifting materials (water): 0..3 frames cycle.
+    frame: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -3452,8 +3514,9 @@ async fn preview(
         )));
     }
     let (ppc, dark) = (q.ppc.unwrap_or(16), q.darkness.unwrap_or(true));
+    let phase = q.frame.unwrap_or(0.0).clamp(0.0, 6.0);
     let (png, ..) = tokio::task::spawn_blocking(move || {
-        tiles::bake_preview(&floor, cell_size, ppc, [x, y], radius, dark)
+        tiles::bake_preview_frame(&floor, cell_size, ppc, [x, y], radius, dark, phase)
     })
     .await
     .map_err(|e| ApiError(CoreError::Invalid(format!("preview failed: {e}"))))?
@@ -3603,6 +3666,7 @@ async fn export_png(
             quality,
             tiles::MAX_EXPORT_PX,
             era.as_ref(),
+            0.0,
         )
     })
     .await
@@ -3842,7 +3906,7 @@ async fn get_tile(
     let era = era_id.as_deref().and_then(|id| floor.era(id)).cloned();
     let bytes = tokio::task::spawn_blocking(move || {
         let onion = ghost.as_ref().map(|(f, w)| (f, w.as_slice()));
-        tiles::bake_tile_era(&floor, &walls, cell_size, z, x, y, onion, era.as_ref())
+        tiles::bake_tile_era(&floor, &walls, cell_size, z, x, y, onion, era.as_ref(), 0.0)
     })
     .await
     .map_err(|e| CoreError::Invalid(format!("tile bake failed: {e}")))?;
@@ -3881,6 +3945,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/floor-spec", get(floor_spec))
         .route("/api/docs/{id}/stats", get(doc_stats))
         .route("/api/docs/{id}/export.svg", get(export_svg))
+        .route("/api/docs/{id}/export/roll20", get(export_roll20))
         .route("/api/docs/{id}/events", get(doc_events))
         .route("/api/materials", get(list_materials))
         .route("/api/assets", post(put_asset))

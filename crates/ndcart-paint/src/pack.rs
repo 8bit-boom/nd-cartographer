@@ -127,6 +127,11 @@ fn frac(x: f32) -> f32 {
 
 impl Material {
     /// The colour at world position `(u, v)` (in cells). Deterministic.
+    /// Materials that drift when the renderer animates them (plan 21.10).
+    pub fn animated(&self) -> bool {
+        matches!(self.pattern, Pattern::Water)
+    }
+
     pub fn sample(&self, u: f32, v: f32, seed: u32) -> Rgb {
         // Per-material salt so two materials with the same seed do not share noise.
         let seed = seed

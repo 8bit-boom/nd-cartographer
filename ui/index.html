@@ -76,6 +76,7 @@
   <button id="fl-add" title="Add an empty floor">＋ Floor</button>
   <button id="fl-gen" title="Generate a dungeon, cave, building, ship deck or city district onto this floor">🎲 Generate…</button>
   <button id="fl-spec" title="Read this floor back as a spec and lay it out again with a new seed (the rooms' graph stays, the arrangement changes)">♻ Re-layout…</button>
+  <button id="fl-light" title="Bake light into the picture: 2.5D relief + wall AO, and sunlight with wall shadows">☀ Light…</button>
   <button id="fl-stats" title="The pacing dashboard: rooms, squares, doors, lights and their reach, props, encounters, lore coverage">📊 Stats</button>
   <button id="fl-dup" title="Duplicate this floor (placed right after it)">⧉ Copy</button>
   <button id="fl-rename" title="Rename this floor">✎ Rename</button>
@@ -274,6 +275,26 @@
         <button value="cancel" type="button" id="era-close">Close</button>
         <button value="del" type="button" id="era-del" class="danger">Delete era</button>
         <button value="ok" id="era-ok" class="primary">Save era</button>
+      </menu>
+    </form>
+  </dialog>
+  <dialog id="light-dialog">
+    <form method="dialog" id="light-form">
+      <h3>Light & relief (baked into exports)</h3>
+      <fieldset><legend>2.5D relief + wall AO (plan 21.8)</legend>
+        <label>Strength <input type="range" id="rf-str" min="0" max="1" step="0.05" value="0.5"></label>
+        <label>Light azimuth <input type="range" id="rf-azi" min="0" max="360" step="5" value="315"></label>
+        <label class="dim"><input type="checkbox" id="rf-on"> enable</label>
+      </fieldset>
+      <fieldset><legend>Sunlight (plan 21.9)</legend>
+        <label>Sun azimuth <input type="range" id="sn-azi" min="0" max="360" step="5" value="135"></label>
+        <label>Elevation <input type="range" id="sn-elev" min="10" max="80" step="5" value="35"></label>
+        <label>Strength <input type="range" id="sn-str" min="0" max="1" step="0.05" value="0.5"></label>
+        <label class="dim"><input type="checkbox" id="sn-on"> enable</label>
+      </fieldset>
+      <menu>
+        <button value="cancel" type="button" id="light-close">Close</button>
+        <button value="ok" id="light-ok" class="primary">Apply (one undo step)</button>
       </menu>
     </form>
   </dialog>

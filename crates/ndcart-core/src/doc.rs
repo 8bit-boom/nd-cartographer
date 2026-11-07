@@ -487,6 +487,70 @@ impl ImportedWall {
     }
 }
 
+/// 2.5D relief shading (plan 21.8): the baked picture is re-lit from a
+/// luminance-height field (normal shading) with ambient occlusion near
+/// walls. Strength 0..=1; azimuth is the light's compass direction.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Relief {
+    #[serde(default = "half")]
+    pub strength: f32,
+    #[serde(default = "northwest")]
+    pub azimuth_deg: f32,
+}
+
+fn half() -> f32 {
+    0.5
+}
+fn northwest() -> f32 {
+    315.0
+}
+
+impl Relief {
+    pub fn validate(&self) -> CoreResult<()> {
+        let ok = |v: f32, lo: f32, hi: f32| v.is_finite() && (lo..=hi).contains(&v);
+        if !ok(self.strength, 0.0, 1.0) || !ok(self.azimuth_deg, 0.0, 360.0) {
+            return Err(CoreError::Invalid(
+                "relief strength must be 0..=1, azimuth 0..=360".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Sunlight baked into the picture (plan 21.9): each wall casts a shadow
+/// quad along the sun's azimuth; the whole picture warms a little.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Sun {
+    #[serde(default = "southeast")]
+    pub azimuth_deg: f32,
+    /// Sun height: 10 (long shadows) .. 80 (nearly overhead).
+    #[serde(default = "mid_elev")]
+    pub elevation_deg: f32,
+    #[serde(default = "half")]
+    pub strength: f32,
+}
+
+fn southeast() -> f32 {
+    135.0
+}
+fn mid_elev() -> f32 {
+    35.0
+}
+
+impl Sun {
+    pub fn validate(&self) -> CoreResult<()> {
+        let ok = |v: f32, lo: f32, hi: f32| v.is_finite() && (lo..=hi).contains(&v);
+        if !ok(self.azimuth_deg, 0.0, 360.0)
+            || !ok(self.elevation_deg, 10.0, 80.0)
+            || !ok(self.strength, 0.0, 1.0)
+        {
+            return Err(CoreError::Invalid(
+                "sun azimuth 0..=360, elevation 10..=80, strength 0..=1".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct FloorDoc {
     pub id: String,
@@ -504,12 +568,19 @@ pub struct FloorDoc {
     /// Who waits in each room (see [`Encounter`]); at most one per room.
     #[serde(default)]
     pub encounters: Vec<Encounter>,
+
     /// Named variants of this floor (night, ruined...); `active_era` is what
     /// the studio shows and exports.
     #[serde(default)]
     pub eras: Vec<Era>,
     #[serde(default)]
     pub active_era: Option<String>,
+    /// 2.5D relief shading + wall AO (plan 21.8); None = flat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relief: Option<Relief>,
+    /// Baked sunlight (plan 21.9); None = no shadows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sun: Option<Sun>,
     /// Paint strokes in z-order (later draws over earlier). Cosmetic: they
     /// shape the baked picture, never walls or rooms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -575,6 +646,8 @@ impl FloorDoc {
             lights: Vec::new(),
             eras: Vec::new(),
             active_era: None,
+            relief: None,
+            sun: None,
             labels: Vec::new(),
             zones: Vec::new(),
             entity_links: Vec::new(),

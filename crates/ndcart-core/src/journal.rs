@@ -66,6 +66,14 @@ pub enum Op {
     SetActiveEra {
         id: Option<String>,
     },
+    /// 2.5D relief shading on/off (plan 21.8).
+    SetRelief {
+        relief: Option<crate::doc::Relief>,
+    },
+    /// Baked sunlight on/off (plan 21.9).
+    SetSun {
+        sun: Option<crate::doc::Sun>,
+    },
     UpsertZone {
         zone: crate::zone::Zone,
     },
@@ -262,6 +270,12 @@ impl Op {
                     .ok_or_else(|| CoreError::NotFound(format!("link on room {space}")))?;
                 Ok(Op::LinkEntity { link: link.clone() })
             }
+            Op::SetRelief { .. } => Ok(Op::SetRelief {
+                relief: floor.relief.clone(),
+            }),
+            Op::SetSun { .. } => Ok(Op::SetSun {
+                sun: floor.sun.clone(),
+            }),
             Op::PutEncounter { encounter } => {
                 match floor.encounters.iter().find(|e| e.space == encounter.space) {
                     Some(prev) => Ok(Op::PutEncounter {
@@ -503,6 +517,18 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
                     .ok_or_else(|| CoreError::NotFound(format!("era {id}")))?;
             }
             floor.active_era = id.clone();
+        }
+        Op::SetRelief { relief } => {
+            if let Some(r) = relief {
+                r.validate()?;
+            }
+            floor.relief = relief.clone();
+        }
+        Op::SetSun { sun } => {
+            if let Some(s) = sun {
+                s.validate()?;
+            }
+            floor.sun = sun.clone();
         }
         Op::UpsertZone { zone } => floor.upsert_zone(zone.clone())?,
         Op::RemoveZone { id } => floor.remove_zone(id)?,
@@ -1624,6 +1650,55 @@ mod tests {
         });
         f.put_overlay(again, None).unwrap();
         assert_eq!(f.markers[3].label, "moved");
+    }
+
+    #[test]
+    fn relief_and_sun_are_journaled_and_undoes_exactly() {
+        use crate::doc::{Relief, Sun};
+        use crate::grid::{default_space, SpaceKind};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.grid
+            .upsert_space(default_space("a", "Hall", SpaceKind::Room))
+            .unwrap();
+        let mut j = Journal::default();
+        j.push(
+            &mut f,
+            &Op::SetRelief {
+                relief: Some(Relief {
+                    strength: 0.6,
+                    azimuth_deg: 300.0,
+                }),
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut f,
+            &Op::SetSun {
+                sun: Some(Sun {
+                    azimuth_deg: 135.0,
+                    elevation_deg: 35.0,
+                    strength: 0.7,
+                }),
+            },
+        )
+        .unwrap();
+        assert!(f.relief.is_some() && f.sun.is_some());
+        j.undo_last(&mut f).unwrap();
+        assert!(f.sun.is_none(), "undo removes the sun");
+        j.undo_last(&mut f).unwrap();
+        assert!(f.relief.is_none());
+        // Out-of-range values are refused.
+        assert!(j
+            .push(
+                &mut f,
+                &Op::SetRelief {
+                    relief: Some(Relief {
+                        strength: 5.0,
+                        azimuth_deg: 0.0
+                    })
+                }
+            )
+            .is_err());
     }
 
     #[test]

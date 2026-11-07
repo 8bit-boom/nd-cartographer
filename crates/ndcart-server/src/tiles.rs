@@ -80,6 +80,7 @@ pub fn bake_tile_era(
     ty: i64,
     onion: Option<(&FloorDoc, &[Wall])>,
     era: Option<&ndcart_core::doc::Era>,
+    phase: f32,
 ) -> Vec<u8> {
     let ppc = PPC0 << z.min(MAX_Z);
     let t = i64::from(TILE);
@@ -93,6 +94,7 @@ pub fn bake_tile_era(
         onion,
         VOID,
         &|id| (view.hidden)(id),
+        phase,
     );
     if let Some(g) = view.grade {
         if !g.is_neutral() {
@@ -138,7 +140,9 @@ pub fn bake_full_era(
     max_px: i64,
     era: Option<&ndcart_core::doc::Era>,
 ) -> Result<(Vec<u8>, u32, u32), String> {
-    bake_full_limit_era(floor, walls, cell_size, ppc, format, quality, max_px, era)
+    bake_full_limit_era(
+        floor, walls, cell_size, ppc, format, quality, max_px, era, 0.0,
+    )
 }
 
 /// Like [`bake_full_as`] with a chosen pixel budget (the file export allows far
@@ -153,6 +157,7 @@ pub fn bake_full_limit_era(
     quality: u8,
     max_px: i64,
     era: Option<&ndcart_core::doc::Era>,
+    phase: f32,
 ) -> Result<(Vec<u8>, u32, u32), String> {
     let (cols, rows) = grid_extent(floor);
     let (w, h) = (i64::from(cols) * ppc, i64::from(rows) * ppc);
@@ -162,7 +167,9 @@ pub fn bake_full_limit_era(
         ));
     }
     let view = floor.with_era(era);
-    let pm = render_pixmap_era(&view, walls, cell_size, ppc, 0, 0, w as u32, h as u32);
+    let pm = render_pixmap_era(
+        &view, walls, cell_size, ppc, 0, 0, w as u32, h as u32, phase,
+    );
     let bytes = encode(&pm, format, quality)?;
     Ok((bytes, w as u32, h as u32))
 }
@@ -178,7 +185,9 @@ fn bake_full_limit(
     quality: u8,
     max_px: i64,
 ) -> Result<(Vec<u8>, u32, u32), String> {
-    bake_full_limit_era(floor, walls, cell_size, ppc, format, quality, max_px, None)
+    bake_full_limit_era(
+        floor, walls, cell_size, ppc, format, quality, max_px, None, 0.0,
+    )
 }
 
 #[cfg(test)]
@@ -192,7 +201,7 @@ fn bake_tile_onion(
     ty: i64,
     onion: Option<(&FloorDoc, &[Wall])>,
 ) -> Vec<u8> {
-    bake_tile_era(floor, walls, cell_size, z, tx, ty, onion, None)
+    bake_tile_era(floor, walls, cell_size, z, tx, ty, onion, None, 0.0)
 }
 
 /// PNG convenience for tests.
@@ -324,6 +333,10 @@ enum Surface {
 }
 
 impl Surface {
+    fn animated(&self) -> bool {
+        matches!(self, Surface::Mat(m) if m.animated())
+    }
+
     fn sample(&self, u: f32, v: f32) -> [u8; 3] {
         match self {
             Surface::Mat(m) => m.sample(u, v, PAINT_SEED),
@@ -973,7 +986,7 @@ fn draw_overlay(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: 
                     pixmap.fill_path(
                         &d,
                         &paint_of(ndcart_paint::shade(rgb, 0.8), 1.0),
-                        FillRule::Winding,
+                        tiny_skia::FillRule::Winding,
                         shift,
                         None,
                     );
@@ -1535,6 +1548,7 @@ fn apply_strokes(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0:
 /// (secrets already stripped by the caller), under fog. Everything outside the
 /// viewer's line of sight is black; with `darkness` on, what the viewer can
 /// see but no lamp reaches is only dimly shown. Lamps are blocked by walls too.
+#[cfg(test)]
 pub fn bake_preview(
     floor: &FloorDoc,
     cell_size: f64,
@@ -1542,6 +1556,21 @@ pub fn bake_preview(
     viewer: [f64; 2],
     radius: f64,
     darkness: bool,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    bake_preview_frame(floor, cell_size, ppc, viewer, radius, darkness, 0.0)
+}
+
+/// [`bake_preview`] at an animation phase (plan 21.10): water drifts, so the
+/// table screen can cycle a few frames instead of showing one frozen pool.
+#[allow(clippy::too_many_arguments)]
+pub fn bake_preview_frame(
+    floor: &FloorDoc,
+    cell_size: f64,
+    ppc: i64,
+    viewer: [f64; 2],
+    radius: f64,
+    darkness: bool,
+    phase: f32,
 ) -> Result<(Vec<u8>, u32, u32), String> {
     use tiny_skia::{BlendMode, FillRule, Mask, Paint, PathBuilder, Transform};
     let walls = derive_walls(floor, cell_size);
@@ -1552,7 +1581,17 @@ pub fn bake_preview(
             "preview {w}x{h}px is outside the limits (ppc 1-64)"
         ));
     }
-    let mut base = render_pixmap(floor, &walls, cell_size, ppc, 0, 0, w as u32, h as u32);
+    let mut base = render_pixmap_hidden(
+        floor,
+        &walls,
+        cell_size,
+        ppc,
+        (0, 0, w as u32, h as u32),
+        None,
+        VOID,
+        &|_| false,
+        phase,
+    );
     let segs = ndcart_core::visibility::blockers(&walls, cell_size);
     let s = ppc as f32;
     let poly = |pts: &[[f64; 2]]| {
@@ -1622,6 +1661,95 @@ fn visible_or_empty(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// 2.5D relief (plan 21.8): the picture's luminance is the height field; a
+/// light from `azimuth` shades each pixel by the height gradient. Straight
+/// per-pixel maths; a flat field is unchanged.
+fn apply_relief(pm: &mut tiny_skia::Pixmap, relief: &ndcart_core::doc::Relief) {
+    let (w, h) = (pm.width() as usize, pm.height() as usize);
+    if w < 3 || h < 3 {
+        return;
+    }
+    let rad = relief.azimuth_deg.to_radians();
+    // Light direction on screen (from the compass azimuth, y down).
+    let (lx, ly) = (rad.sin(), -rad.cos());
+    let src = pm.clone();
+    let data = pm.data_mut();
+    let lum = |d: &[u8], x: usize, y: usize| -> f32 {
+        let i = (y * w + x) * 4;
+        0.2126 * f32::from(d[i]) + 0.7152 * f32::from(d[i + 1]) + 0.0722 * f32::from(d[i + 2])
+    };
+    let s = src.data();
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let hl = lum(s, x - 1, y);
+            let hr = lum(s, x + 1, y);
+            let hu = lum(s, x, y - 1);
+            let hd = lum(s, x, y + 1);
+            // Height gradient (screen-space normal components).
+            let gx = (hr - hl) / 510.0;
+            let gy = (hd - hu) / 510.0;
+            // dot(normal, light) approximated as -dot(gradient, light dir).
+            let shade = 1.0 + relief.strength * (gx * lx + gy * ly) * 8.0;
+            let i = (y * w + x) * 4;
+            for cch in 0..3 {
+                let v = f32::from(s[i + cch]) * shade;
+                data[i + cch] = (v.round().clamp(0.0, 255.0)) as u8;
+            }
+        }
+    }
+}
+
+/// Ambient occlusion near walls: each wall segment strokes into the picture
+/// with widening, low-alpha passes - a cheap distance falloff (plan 21.8).
+fn apply_wall_ao(
+    pm: &mut tiny_skia::Pixmap,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    x0: i64,
+    y0: i64,
+    relief: &ndcart_core::doc::Relief,
+) {
+    let k = ppc as f32 / cell_size.max(1.0) as f32;
+    let alpha = (relief.strength * 90.0) as u8;
+    for (width, a) in [(3.0, alpha), (10.0, alpha / 2), (22.0, alpha / 4)] {
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(4, 6, 10, a);
+        paint.anti_alias = true;
+        let stroke = tiny_skia::Stroke {
+            width: (width * k).max(2.0),
+            ..Default::default()
+        };
+        for w in walls {
+            if w.pts.len() != 2 {
+                continue;
+            }
+            let mut pb = tiny_skia::PathBuilder::new();
+            pb.move_to(
+                w.pts[0][0] as f32 * k - x0 as f32,
+                w.pts[0][1] as f32 * k - y0 as f32,
+            );
+            pb.line_to(
+                w.pts[1][0] as f32 * k - x0 as f32,
+                w.pts[1][1] as f32 * k - y0 as f32,
+            );
+            if let Some(path) = pb.finish() {
+                pm.stroke_path(
+                    &path,
+                    &paint,
+                    &tiny_skia::Stroke {
+                        width: stroke.width,
+                        ..Default::default()
+                    },
+                    tiny_skia::Transform::identity(),
+                    None,
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_pixmap(
     floor: &FloorDoc,
     walls: &[Wall],
@@ -1646,6 +1774,7 @@ fn render_pixmap_era(
     y0: i64,
     w: u32,
     h: u32,
+    phase: f32,
 ) -> tiny_skia::Pixmap {
     let mut pm = render_pixmap_hidden(
         view.floor,
@@ -1656,6 +1785,7 @@ fn render_pixmap_era(
         None,
         VOID,
         &|id| (view.hidden)(id),
+        phase,
     );
     if let Some(g) = view.grade {
         if !g.is_neutral() {
@@ -1755,6 +1885,7 @@ fn render_pixmap_on(
         onion,
         ground,
         &|_| false,
+        0.0,
     )
 }
 
@@ -1770,6 +1901,7 @@ fn render_pixmap_hidden(
     onion: Option<(&FloorDoc, &[Wall])>,
     ground: [u8; 4],
     hidden: &dyn Fn(&str) -> bool,
+    phase: f32,
 ) -> tiny_skia::Pixmap {
     let tile_px_w = i64::from(w);
     let tile_px_h = i64::from(h);
@@ -1826,6 +1958,8 @@ fn render_pixmap_hidden(
                 .and_then(|id| surfaces.get(id).cloned())
                 .filter(|n| !own.same_as(n))
         };
+        // Animated materials (water) drift their noise input by the phase
+        // (plan 21.10); other materials sample exactly as before.
         let (west, east) = (nb(cell.west()), nb(cell.east()));
         let (north, south) = (nb(cell.north()), nb(cell.south()));
         let (wx, wy) = (cx * ppc, cy * ppc);
@@ -1844,7 +1978,12 @@ fn render_pixmap_hidden(
                 let v = (y0 + py) as f32 + 0.5;
                 let (u, v) = (u / ppc as f32, v / ppc as f32);
                 let (fx, fy) = (u - cell.x as f32, v - cell.y as f32);
-                let mut c = own.sample(u, v);
+                let (su, sv) = if own.animated() {
+                    (u + phase * 0.35, v + phase * 0.22)
+                } else {
+                    (u, v)
+                };
+                let mut c = own.sample(su, sv);
                 // Horizontal edge pair, then vertical; near a corner both apply.
                 let (hn, hd, hs) = if fx < 0.5 {
                     (west.as_ref(), fx, Side::Far)
@@ -1872,6 +2011,55 @@ fn render_pixmap_hidden(
     }
 
     apply_strokes(&mut pixmap, floor, ppc, x0, y0);
+
+    // Sunlight (plan 21.9): each wall casts a shadow quad along the sun's
+    // azimuth before the props go down, so props sit on the shadows. Closed
+    // doors cast; open ones do not.
+    if let Some(sun) = &floor.sun {
+        if sun.strength > 0.0 && sun.elevation_deg > 5.0 {
+            let k = ppc as f32 / cell_size.max(1.0) as f32;
+            let rad = sun.azimuth_deg.to_radians();
+            // Azimuth points AT the sun, so the shadow falls away from it.
+            let (dx, dy) = (-rad.sin(), rad.cos());
+            let len =
+                sun.elevation_deg.to_radians().tan().recip() * cell_size.max(1.0) as f32 * 0.8;
+            let alpha = (sun.strength * 0.5).clamp(0.05, 0.5);
+            let mut sp = tiny_skia::Paint::default();
+            sp.set_color_rgba8(6, 8, 14, (alpha * 255.0) as u8);
+            sp.anti_alias = true;
+            for w in walls {
+                if w.pts.len() != 2 {
+                    continue;
+                }
+                if w.kind == ndcart_core::WallKind::Door
+                    && w.state == Some(ndcart_core::WallState::Open)
+                {
+                    continue;
+                }
+                let ax = w.pts[0][0] as f32 * k - x0 as f32;
+                let ay = w.pts[0][1] as f32 * k - y0 as f32;
+                let bx = w.pts[1][0] as f32 * k - x0 as f32;
+                let by = w.pts[1][1] as f32 * k - y0 as f32;
+                let (ox, oy) = (dx * len, dy * len);
+                let mut pb = tiny_skia::PathBuilder::new();
+                pb.move_to(ax, ay);
+                pb.line_to(bx, by);
+                pb.line_to(bx + ox, by + oy);
+                pb.line_to(ax + ox, ay + oy);
+                pb.close();
+                if let Some(path) = pb.finish() {
+                    pixmap.fill_path(
+                        &path,
+                        &sp,
+                        tiny_skia::FillRule::Winding,
+                        tiny_skia::Transform::identity(),
+                        None,
+                    );
+                }
+            }
+        }
+    }
+
     apply_stamps_hidden(&mut pixmap, floor, ppc, x0, y0, hidden);
     draw_overlay(&mut pixmap, floor, ppc, x0, y0);
     draw_map_grid(&mut pixmap, floor, ppc, x0, y0);
@@ -1917,6 +2105,15 @@ fn render_pixmap_hidden(
                 tiny_skia::Transform::identity(),
                 None,
             );
+        }
+    }
+
+    // 2.5D relief + wall AO (plan 21.8): a luminance-height re-light with
+    // ambient occlusion near walls, both scaled by the relief strength.
+    if let Some(relief) = &floor.relief {
+        if relief.strength > 0.0 {
+            apply_relief(&mut pixmap, relief);
+            apply_wall_ao(&mut pixmap, walls, cell_size, ppc, x0, y0, relief);
         }
     }
 
@@ -2785,6 +2982,56 @@ mod tests {
     }
 
     #[test]
+    fn relief_and_sunlight_change_the_bake() {
+        let mut f = FloorDoc::new("f".into(), "Ground".into());
+        f.grid
+            .upsert_space(ndcart_core::Space {
+                id: "s".into(),
+                name: "Hall".into(),
+                color: "#8a8a8a".into(),
+                kind: SpaceKind::Room,
+                material: None,
+            })
+            .unwrap();
+        f.grid
+            .paint(
+                &[
+                    CellKey::new(0, 0),
+                    CellKey::new(1, 0),
+                    CellKey::new(2, 0),
+                    CellKey::new(3, 0),
+                ],
+                Some("s"),
+            )
+            .unwrap();
+        let walls = derive_walls(&f, 32.0);
+        let plain = render_pixmap(&f, &walls, 32.0, 16, 0, 0, 128, 16);
+
+        let relief_f = {
+            let mut f2 = f.clone();
+            f2.relief = Some(ndcart_core::doc::Relief {
+                strength: 0.8,
+                azimuth_deg: 315.0,
+            });
+            f2
+        };
+        let reliefed = render_pixmap(&relief_f, &walls, 32.0, 16, 0, 0, 128, 16);
+        assert_ne!(plain.data(), reliefed.data(), "relief shades the picture");
+
+        let sun_f = {
+            let mut f2 = f.clone();
+            f2.sun = Some(ndcart_core::doc::Sun {
+                azimuth_deg: 135.0,
+                elevation_deg: 35.0,
+                strength: 0.7,
+            });
+            f2
+        };
+        let sunned = render_pixmap(&sun_f, &walls, 32.0, 16, 0, 0, 128, 16);
+        assert_ne!(plain.data(), sunned.data(), "sunlight shadows the picture");
+    }
+
+    #[test]
     fn an_era_hides_props_and_grades_the_picture() {
         use ndcart_core::doc::{Era, Grade};
         let mut f = FloorDoc::new("f".into(), "Ground".into());
@@ -2826,7 +3073,7 @@ mod tests {
                 brightness: 1.0,
             },
         };
-        let night = bake_tile_era(&f, &walls, 32.0, 0, 0, 0, None, Some(&era));
+        let night = bake_tile_era(&f, &walls, 32.0, 0, 0, 0, None, Some(&era), 0.0);
         // Decode the PNG and compare the centre pixel: fully tinted = blue.
         let (raw, w, h) = crate::convert::decode_rgba(&night).unwrap();
         let px = |x: usize, y: usize| {

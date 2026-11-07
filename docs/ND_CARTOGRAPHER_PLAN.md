@@ -1224,6 +1224,18 @@ publish), 1 (partly: an all-projects link graph in the Atlas dialog).
 (the heavy rendering/verification items), 17 (the MCP surface), and the
 atlas zoom-through viewport (1's second half).
 
+**Built in the 2026-11-07 second batch (the heavy ones):** 8 (relief +
+wall AO - `SetRelief` op, a luminance-height re-light and a widening AO
+stroke pass applied after walls in the baker), 9 (`SetSun` op - wall
+shadow quads along the sun's azimuth, open doors cast nothing, all
+through the same bake so tiles/exports/preview agree), 10 (animated
+water - a `frame` param on the table preview cycles drifting noise
+frames; the everyday map stays a still), 13 (`/export/roll20` - a
+wall-data sidecar at 70 px a square with kind/state; **unverified
+live**: Roll20 imports walls through API scripts whose shape varies).
+UI: a Light dialog (relief + sun sliders, one undo step); the table
+screen cycles water frames. Tests: relief/sun ops round trip, both
+bakes differ from flat.
 ## 22. From the field research (November 2026 blueprint)
 
 An independent comparative study of 16 map-making tools ("TTRPG Map Makers

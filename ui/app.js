@@ -2813,6 +2813,46 @@ setInterval(async () => {
 
 // ---------- generate onto a floor ----------
 const genDialog = document.getElementById('gen-dialog');
+
+// Light & relief (plans 21.8/21.9): both are one journal op each, so the
+// whole bake change is a single undo step. The ops ride /ops like every edit.
+document.getElementById('fl-light').onclick = () => {
+  const floor = curFloor();
+  const rf = floor.relief || { strength: 0.5, azimuth_deg: 315 };
+  const sn = floor.sun || { azimuth_deg: 135, elevation_deg: 35, strength: 0.5 };
+  document.getElementById('rf-str').value = rf.strength;
+  document.getElementById('rf-azi').value = rf.azimuth_deg;
+  document.getElementById('rf-on').checked = !!floor.relief;
+  document.getElementById('sn-azi').value = sn.azimuth_deg;
+  document.getElementById('sn-elev').value = sn.elevation_deg;
+  document.getElementById('sn-str').value = sn.strength;
+  document.getElementById('sn-on').checked = !!floor.sun;
+  document.getElementById('light-dialog').showModal();
+};
+document.getElementById('light-close').onclick = () => document.getElementById('light-dialog').close();
+document.getElementById('light-ok').onclick = async () => {
+  const d = document.getElementById('light-dialog');
+  d.close();
+  const rfOn = document.getElementById('rf-on').checked;
+  const snOn = document.getElementById('sn-on').checked;
+  const ops = [{
+    t: 'batch',
+    ops: [
+      { t: 'set_relief', relief: rfOn ? {
+          strength: Number(document.getElementById('rf-str').value),
+          azimuth_deg: Number(document.getElementById('rf-azi').value),
+        } : null },
+      { t: 'set_sun', sun: snOn ? {
+          azimuth_deg: Number(document.getElementById('sn-azi').value),
+          elevation_deg: Number(document.getElementById('sn-elev').value),
+          strength: Number(document.getElementById('sn-str').value),
+        } : null },
+    ],
+  }];
+  await postOps(ops);
+  statusEl.textContent = 'Light baked into the picture (undo reverts it).';
+};
+
 document.getElementById('fl-spec').onclick = async () => {
   try {
     const { spec, warnings } = await api(

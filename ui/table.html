@@ -57,10 +57,13 @@ img.addEventListener('click', async (e) => {
   } catch { /* the tick loop reports connection trouble */ }
 });
 
-function urlFor(st) {
-  const q = new URLSearchParams({ floor: st.floor, x: st.x, y: st.y, radius: st.radius, darkness: st.darkness, ppc: 24 });
+function urlFor(st, frame) {
+  const q = new URLSearchParams({ floor: st.floor, x: st.x, y: st.y, radius: st.radius, darkness: st.darkness, ppc: 24, frame });
   return `/api/docs/${DOC}/preview?${q}`;
 }
+// Three drifting water frames cycle while the spot stands still (plan 21.10).
+const FRAMES = [0, 1, 2];
+let frameIdx = 0;
 
 async function tick() {
   try {
@@ -77,7 +80,13 @@ async function tick() {
       if (key !== shown) {
         const next = new Image();
         next.onload = () => { img.src = next.src; img.style.display = 'block'; msg.style.display = 'none'; shown = key; };
-        next.src = urlFor(t.state) + `&rev=${t.rev}`;
+        next.src = urlFor(t.state, FRAMES[0]) + `&rev=${t.rev}`;
+      } else if (lastState) {
+        // Same spot: cycle the water frames.
+        frameIdx = (frameIdx + 1) % FRAMES.length;
+        const next = new Image();
+        next.onload = () => { img.src = next.src; };
+        next.src = urlFor(t.state, FRAMES[frameIdx]) + `&rev=${t.rev}`;
       }
     }
   } catch {
