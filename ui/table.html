@@ -23,6 +23,40 @@ const DOC = '__DOC__';
 const img = document.getElementById('map');
 const msg = document.getElementById('msg');
 let shown = '';
+let lastState = null;
+const CAN_POST = new URLSearchParams(location.search).has('token');
+
+// Tablet companion (plan 21.15): with the token in the URL, tapping the map
+// moves the viewer spot there - tap-to-reveal on a second device. The tap
+// offset from the picture's centre converts to cells via the displayed
+// pixels-per-cell (object-fit: contain maths on the real drawn box).
+img.addEventListener('click', async (e) => {
+  if (!CAN_POST || !lastState || !img.naturalWidth) return;
+  const r = img.getBoundingClientRect();
+  // The drawn (contain-fitted) box inside the element:
+  const scale = Math.min(r.width / img.naturalWidth, r.height / img.naturalHeight);
+  const drawW = img.naturalWidth * scale, drawH = img.naturalHeight * scale;
+  const cx = r.left + (r.width - drawW) / 2 + drawW / 2;
+  const cy = r.top + (r.height - drawH) / 2 + drawH / 2;
+  const span = 2 * lastState.radius + 1;                 // cells across the picture
+  const cellPx = Math.max(drawW / span, drawH / span);   // whichever axis fits
+  const dxCells = (e.clientX - cx) / cellPx;
+  const dyCells = (e.clientY - cy) / cellPx;
+  try {
+    await fetch(`/api/docs/${DOC}/table`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        floor: lastState.floor,
+        x: +(lastState.x + dxCells).toFixed(2),
+        y: +(lastState.y + dyCells).toFixed(2),
+        radius: lastState.radius,
+        darkness: lastState.darkness,
+        on: true,
+      }),
+    });
+  } catch { /* the tick loop reports connection trouble */ }
+});
 
 function urlFor(st) {
   const q = new URLSearchParams({ floor: st.floor, x: st.x, y: st.y, radius: st.radius, darkness: st.darkness, ppc: 24 });
@@ -34,6 +68,7 @@ async function tick() {
     const res = await fetch(`/api/docs/${DOC}/table`, { cache: 'no-store' });
     if (!res.ok) throw new Error(String(res.status));
     const t = await res.json();
+    lastState = t.on ? t.state : null;
     document.title = t.name ? `${t.name} - table view` : 'Table view';
     if (!t.on) {
       img.style.display = 'none'; msg.style.display = ''; msg.textContent = 'Waiting for the GM…'; shown = '';

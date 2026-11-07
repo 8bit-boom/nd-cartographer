@@ -354,13 +354,14 @@ async function openAtlasDialog(markerId) {
   };
   mSel.onchange = sync;
   sync();
-  renderAtlasList();
+  await renderAtlasList();
   atlasDialog.showModal();
 }
 
-function renderAtlasList() {
+async function renderAtlasList() {
   const ul = document.getElementById('at-list');
   ul.textContent = '';
+  // This floor's links first...
   for (const m of curFloor().markers || []) {
     if (!m.link_schematic) continue;
     const li = document.createElement('li');
@@ -372,6 +373,35 @@ function renderAtlasList() {
     go.onclick = () => { atlasDialog.close(); openLink(m.link_schematic); };
     li.appendChild(go);
     ul.appendChild(li);
+  }
+  // ...then the whole atlas graph (plan 21.1): every project and the links
+  // its world-map markers carry, so the chain is visible from anywhere.
+  const { docs } = await atlasDocs();
+  const graph = [];
+  for (const d of docs) {
+    if (d.id === state.docId) continue;
+    try {
+      const full = await api('GET', `/api/docs/${d.id}`);
+      for (const f of full.floors) {
+        for (const m of f.markers || []) {
+          if (m.link_schematic) {
+            graph.push(`${d.name} → ${m.label || m.id} → ${m.link_schematic}`);
+          }
+        }
+      }
+    } catch { /* a project that will not open right now */ }
+  }
+  if (graph.length) {
+    const head = document.createElement('li');
+    head.className = 'hint';
+    head.textContent = 'Elsewhere in the atlas:';
+    ul.appendChild(head);
+    for (const line of graph) {
+      const li = document.createElement('li');
+      li.className = 'hint';
+      li.textContent = line;
+      ul.appendChild(li);
+    }
   }
 }
 
@@ -391,7 +421,7 @@ document.getElementById('at-ok').onclick = async () => {
     const targetId = document.getElementById('at-target').value;
     if (!targetId) {
       await postOps([{ t: 'put_overlay', item: { ...m, kind: 'marker', link_schematic: null } }]);
-      renderAtlasList();
+      await renderAtlasList();
       return;
     }
     const docs = await atlasDocs();
@@ -401,7 +431,7 @@ document.getElementById('at-ok').onclick = async () => {
     link = d?.slug || d?.id;
   }
   await postOps([{ t: 'put_overlay', item: { ...m, kind: 'marker', link_schematic: link } }]);
-  renderAtlasList();
+  await renderAtlasList();
 };
 
 
@@ -579,6 +609,24 @@ async function openLoreFor(space) {
   }
 }
 
+document.getElementById('bk-stock').onclick = async () => {
+  if (state.sel.size !== 1) { statusEl.textContent = 'Select exactly one room to stock.'; return; }
+  try {
+    const { tables } = await api('GET', '/api/world/tables');
+    if (!tables.length) { statusEl.textContent = 'Your nd-world has no tables yet.'; return; }
+    const list = tables.map((t, i) => `${i + 1}) ${t.name} (${t.entries.length} entries)`).join('
+');
+    const pick = Number(window.prompt(`Stock from which table?
+${list}`, '1'));
+    const tbl = tables[pick - 1];
+    if (!tbl) return;
+    const out = await api('POST', `/api/docs/${state.docId}/stock-room`,
+      { floor: state.floorId, room: [...state.sel][0], table_name: tbl.name });
+    buildOutline();
+    statusEl.textContent = `Rolled "${out.rolled}" from ${tbl.name} into the room's encounter.`;
+  } catch (e) { statusEl.textContent = e.message; }
+};
+
 document.getElementById('bk-lore').onclick = async () => {
   if (state.sel.size !== 1) { statusEl.textContent = 'Select exactly one room to read its lore.'; return; }
   await openLoreFor([...state.sel][0]);
@@ -612,6 +660,26 @@ document.getElementById('fl-stats').onclick = async () => {
   }
 };
 document.getElementById('stats-close').onclick = () => document.getElementById('stats-dialog').close();
+
+
+// Theme pack (plan 21.20): the AI drafts a pack plan; the GM generates the
+// pictures with the art pipeline and assembles the pack from the plan file.
+document.getElementById('btn-theme').onclick = async () => {
+  const theme = window.prompt('Describe the pack theme', 'swamped orc warcamp');
+  if (theme === null || !theme.trim()) return;
+  statusEl.textContent = 'Drafting the pack plan...';
+  try {
+    const { plan } = await api('POST', `/api/docs/${state.docId}/theme-pack`, { theme: theme.trim() });
+    const blob = new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${(plan.name || 'pack').replace(/[^a-z0-9]+/gi, '-').toLowerCase()}.pack-plan.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    const mats = (plan.materials || []).length, props = (plan.props || []).length;
+    statusEl.textContent = `Pack plan drafted: ${mats} material prompt(s), ${props} prop prompt(s) - downloaded as JSON. Generate the pictures with the Make art dialog; ${plan.style || ''}`;
+  } catch (e) { statusEl.textContent = e.message; }
+};
 
 // ---------- projects ----------
 

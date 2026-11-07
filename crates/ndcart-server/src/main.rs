@@ -3055,6 +3055,44 @@ async fn doc_events(
     Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default())
 }
 
+/// `POST /api/docs/{id}/theme-pack` `{theme}` — plan 21.20: the model turns a
+/// theme into a pack PLAN: 4-6 material prompts, 8-12 prop prompts with
+/// names/tags/placement, and a palette. Returns the plan; the GM generates
+/// the pictures with the existing art pipeline and drops them into the pack.
+async fn theme_pack(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let theme = b
+        .get("theme")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.chars().count() <= 200)
+        .ok_or_else(|| ApiError(CoreError::Invalid("body needs {theme: 1-200 chars}".into())))?
+        .to_string();
+    let cfg = app
+        .resolve_ai()
+        .map_err(|m| ApiError(CoreError::NotFound(m)))?;
+    let backend = draft::Backend::connect(&cfg)
+        .await
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    let system = "You design tabletop art packs. Reply with ONE JSON object and nothing else: {\"name\": string (1-60 chars), \"style\": string (1-120 chars, the shared look), \"palette\": [4-8 \"#rrggbb\"], \"materials\": [4-6 {\"name\", \"prompt\", \"tags\": [1-4 words]}], \"props\": [6-12 {\"name\", \"prompt\", \"tags\": [1-4 words], \"placement\": \"floor\"|\"wall\"}]} Prompts are image-generator prompts (subject, angle \"top-down\", style). Keep the style consistent.";
+    let reply = backend
+        .chat(system, &format!("Theme: {theme}"))
+        .await
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    let plan = draft::extract_json(&reply)
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .ok_or_else(|| {
+            ApiError(CoreError::Invalid(
+                "the model's answer was not the expected JSON; try again".into(),
+            ))
+        })?;
+    Ok(Json(serde_json::json!({ "plan": plan })))
+}
+
 /// `GET /api/ai/status`/// `GET /api/ai/status`/// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
 /// `{mode: "nd-world" | "standalone" | "off", detail}`.
 async fn ai_status(State(app): State<App>) -> Json<serde_json::Value> {
@@ -3260,6 +3298,10 @@ struct TableBody {
     radius: f64,
     #[serde(default = "yes_bool")]
     darkness: bool,
+    /// The tablet companion sends `on: true` to turn the screen on with the
+    /// tap; absent leaves the on/off state as the GM set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    on: Option<bool>,
 }
 fn d_radius() -> f64 {
     12.0
@@ -3851,6 +3893,7 @@ fn build_router(app: App) -> Router {
         )
         .route("/api/ai-models", get(ai_models))
         .route("/api/ai-test", post(ai_test))
+        .route("/api/docs/{id}/theme-pack", post(theme_pack))
         .route("/api/search", get(search_maps))
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))

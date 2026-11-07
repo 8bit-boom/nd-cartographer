@@ -1205,6 +1205,25 @@ can become a fight, every publish target exists. Then 5, 19, 17. Items 15,
 
 ---
 
+
+
+**Built in the 2026-11-07 batch (annotating the list above):** 16 (watch
+mode - SSE change feed at `/api/docs/{id}/events`, viewport subscription,
+poll kept as fallback; the M0 change-feed leftover is closed), 7 (the
+Measure tool - segment/total length and closed-polygon area in cells and
+map units), 11 (`/export.svg`), 14 (`ndcart bundle` .ndmapz with
+PACKS.txt licences), 15 (`/table/<project>` tap-to-move on a tokened
+tablet), 18 (ask answers carry `SEE:` citations that become Go buttons),
+20 (the pack-PLAN half - the Theme pack button drafts material/prop
+prompts as JSON; automatic picture generation per prompt remains open),
+4 (Tier-1: nd-world gained `GET /api/tables.json` and
+`POST /api/combat/templates` - both tested and in API_REFERENCE - and
+the studio gained stock-room rolling and the encounter-template
+publish), 1 (partly: an all-projects link graph in the Atlas dialog).
+**Still open from this list:** 2's write half (by design), 8, 9, 10, 13
+(the heavy rendering/verification items), 17 (the MCP surface), and the
+atlas zoom-through viewport (1's second half).
+
 ## 22. From the field research (November 2026 blueprint)
 
 An independent comparative study of 16 map-making tools ("TTRPG Map Makers
