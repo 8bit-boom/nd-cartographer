@@ -48,6 +48,13 @@ pub enum Op {
     UnlinkEntity {
         space: String,
     },
+    /// Shift a room and its marks by whole cells (bulk move, plan 21's
+    /// bulk-ops leftover). Walls derive, so moving the cells moves them.
+    MoveRoom {
+        space: String,
+        dx: i32,
+        dy: i32,
+    },
     /// Who waits in a room, or a change to them.
     PutEncounter {
         encounter: crate::doc::Encounter,
@@ -275,6 +282,11 @@ impl Op {
             }),
             Op::SetSun { .. } => Ok(Op::SetSun {
                 sun: floor.sun.clone(),
+            }),
+            Op::MoveRoom { space, dx, dy } => Ok(Op::MoveRoom {
+                space: space.clone(),
+                dx: -*dx,
+                dy: -*dy,
             }),
             Op::PutEncounter { encounter } => {
                 match floor.encounters.iter().find(|e| e.space == encounter.space) {
@@ -506,6 +518,7 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::RemoveLight { id } => floor.remove_light(id)?,
         Op::LinkEntity { link } => floor.link_entity(link.clone())?,
         Op::UnlinkEntity { space } => floor.unlink_entity(space)?,
+        Op::MoveRoom { space, dx, dy } => floor.move_room(space, *dx, *dy)?,
         Op::PutEncounter { encounter } => floor.put_encounter(encounter.clone())?,
         Op::RemoveEncounter { space } => floor.remove_encounter(space)?,
         Op::PutEra { era } => floor.put_era(era.clone())?,
@@ -1650,6 +1663,75 @@ mod tests {
         });
         f.put_overlay(again, None).unwrap();
         assert_eq!(f.markers[3].label, "moved");
+    }
+
+    #[test]
+    fn move_room_shifts_cells_and_marks_and_undoes() {
+        use crate::grid::SpaceKind;
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        let mut j = Journal::default();
+        j.push(
+            &mut f,
+            &Op::UpsertSpace {
+                space: crate::grid::Space {
+                    id: "a".into(),
+                    name: "Hall".into(),
+                    color: "#7f5539".into(),
+                    kind: SpaceKind::Room,
+                    material: None,
+                },
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut f,
+            &Op::PaintCells {
+                cells: vec![CellKey::new(0, 0), CellKey::new(1, 0)],
+                space: Some("a".into()),
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut f,
+            &Op::SetMark {
+                edge: EdgeKey {
+                    cell: CellKey::new(0, 0),
+                    edge: crate::grid::Edge::North,
+                },
+                mark: Some(Mark::new(crate::grid::MarkKind::Door)),
+            },
+        )
+        .unwrap();
+        let before = f.clone();
+
+        j.push(
+            &mut f,
+            &Op::MoveRoom {
+                space: "a".into(),
+                dx: 5,
+                dy: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            f.grid.cell_space(CellKey::new(5, 3)),
+            Some("a"),
+            "cell moved"
+        );
+        assert_eq!(
+            f.grid.cell_space(CellKey::new(0, 0)),
+            None,
+            "old cell cleared"
+        );
+        assert_eq!(
+            f.grid
+                .mark_between(CellKey::new(5, 3), crate::grid::Edge::North),
+            Some(Mark::new(crate::grid::MarkKind::Door)),
+            "the door moved with the room"
+        );
+
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(f, before, "undo restores exactly");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! document) holds a manifest + floor docs (grid, lights, labels).
 
 use crate::error::{CoreError, CoreResult};
-use crate::grid::RoomGrid;
+use crate::grid::{CellKey, Mark, RoomGrid};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -48,6 +48,9 @@ fn grade_tint() -> String {
 }
 fn one_f() -> f32 {
     1.0
+}
+fn schema_v1() -> u32 {
+    1
 }
 
 impl Default for Grade {
@@ -152,6 +155,11 @@ pub struct Manifest {
     pub id: String,
     pub name: String,
     pub kind: DocKind,
+    /// The document schema version this manifest was written for (plan:
+    /// explicit versioning). 1 = everything up to and including this field's
+    /// introduction; the loader upgrades older documents on open.
+    #[serde(default = "schema_v1")]
+    pub schema_version: u32,
     /// Pixels per cell for the battle lattice (region docs may ignore it).
     pub cell_size: f64,
     pub created_at: String,
@@ -1175,6 +1183,61 @@ impl FloorDoc {
             }
             self.encounters.push(e);
         }
+        Ok(())
+    }
+
+    /// Shift a room's painted cells and its edge marks by whole cells
+    /// (bulk move). Lights, labels and props are the GM's to move separately
+    /// (they are individually placed objects, not part of the room shape).
+    pub fn move_room(&mut self, space: &str, dx: i32, dy: i32) -> CoreResult<()> {
+        if !self.grid.spaces.contains_key(space) {
+            return Err(CoreError::NotFound(format!("room {space}")));
+        }
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        let cells: Vec<CellKey> = self
+            .grid
+            .cells()
+            .filter(|(_c, s)| *s == space)
+            .map(|(c, _)| c)
+            .collect();
+        if cells.is_empty() {
+            return Err(CoreError::Invalid(
+                "that room has no painted squares".into(),
+            ));
+        }
+        // Marks: every stored edge whose owner cell is one of the room's.
+        let mine: std::collections::BTreeMap<crate::grid::EdgeKey, Mark> = self
+            .grid
+            .marks
+            .iter()
+            .filter(|(k, _)| cells.contains(&k.cell))
+            .map(|(k, m)| (*k, *m))
+            .collect();
+        // Clear the old marks, paint the cells to the new spots, re-mark.
+        for (k, m) in &mine {
+            let _ = m;
+            self.grid.set_mark(*k, None)?;
+        }
+        let moved: Vec<CellKey> = cells
+            .iter()
+            .map(|c| CellKey::new(c.x + dx, c.y + dy))
+            .collect();
+        let old: Vec<CellKey> = cells.clone();
+        self.grid.paint(&old, None)?;
+        self.grid.paint(&moved, Some(space))?;
+        for (k, m) in &mine {
+            self.grid.set_mark(
+                crate::grid::EdgeKey {
+                    cell: CellKey::new(k.cell.x + dx, k.cell.y + dy),
+                    edge: k.edge,
+                },
+                Some(*m),
+            )?;
+        }
+        // The encounter follows the room (it belongs to the space id, which
+        // is unchanged), so nothing to move there.
         Ok(())
     }
 

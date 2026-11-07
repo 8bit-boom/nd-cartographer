@@ -29,6 +29,42 @@ pub struct Prefab {
     /// what cell size its source project used.
     pub lights: Vec<PrefabLight>,
     pub labels: Vec<PrefabLabel>,
+    /// Props whose centre cell falls inside the captured rooms, positions
+    /// relative to the box top-left (plan: prefabs carry props).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stamps: Vec<PrefabStamp>,
+    /// Freehand brush strokes whose points all fall inside, stored relative.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strokes: Vec<PrefabStroke>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct PrefabStamp {
+    pub dx: f64,
+    pub dy: f64,
+    pub asset: String,
+    pub scale: f32,
+    pub rotation: f32,
+    pub flip: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<String>,
+    pub shadow: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct PrefabStroke {
+    pub points: Vec<PrefabStrokePoint>,
+    pub material: Option<String>,
+    pub color: String,
+    pub size: f32,
+    pub opacity: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct PrefabStrokePoint {
+    pub dx: f32,
+    pub dy: f32,
+    pub pressure: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -145,6 +181,52 @@ pub fn capture(
             gm_only: l.gm_only,
         })
         .collect();
+    // Props: centre cell inside the captured rooms. Positions are relative
+    // to the box top-left in cells, so a prefab does not care what cell size
+    // its source used.
+    let stamps = floor
+        .stamps
+        .iter()
+        .filter(|s| on_cell(f64::from(s.x), f64::from(s.y), 1.0))
+        .map(|s| PrefabStamp {
+            dx: f64::from(s.x) - x0 as f64,
+            dy: f64::from(s.y) - y0 as f64,
+            asset: s.asset.clone(),
+            scale: s.scale,
+            rotation: s.rotation,
+            flip: s.flip,
+            tint: s.tint.clone(),
+            shadow: s.shadow,
+        })
+        .collect();
+    // Strokes: only fully-inside ones (a half-copied stroke is worse than
+    // none); points shift like everything else.
+    let strokes = floor
+        .strokes
+        .iter()
+        .filter(|st| {
+            !st.points.is_empty()
+                && st
+                    .points
+                    .iter()
+                    .all(|pt| on_cell(f64::from(pt.x), f64::from(pt.y), 1.0))
+        })
+        .map(|st| PrefabStroke {
+            points: st
+                .points
+                .iter()
+                .map(|pt| PrefabStrokePoint {
+                    dx: pt.x - x0 as f32,
+                    dy: pt.y - y0 as f32,
+                    pressure: pt.pressure,
+                })
+                .collect(),
+            material: st.material.clone(),
+            color: st.color.clone(),
+            size: st.size,
+            opacity: st.opacity,
+        })
+        .collect();
     Ok(Prefab {
         id: new_id("pf"),
         name: name.to_string(),
@@ -155,6 +237,8 @@ pub fn capture(
         marks,
         lights,
         labels,
+        stamps,
+        strokes,
     })
 }
 
@@ -256,6 +340,63 @@ pub fn place(p: &Prefab, x: i32, y: i32, quarter_turns: u8, cell_size: f64) -> C
         label.bold = l.bold;
         label.gm_only = l.gm_only;
         ops.push(Op::UpsertLabel { label });
+    }
+    // Props: re-placed with fresh ids; a quarter turn rotates the offset and
+    // adds PI to the rotation so the prop faces the way it was drawn.
+    for s in &p.stamps {
+        let (tx, ty) = turn_pt(s.dx, s.dy);
+        ops.push(Op::AddStamp {
+            stamp: crate::stamp::Stamp {
+                id: new_id("gp"),
+                asset: s.asset.clone(),
+                x: (x as f64 + tx) as f32,
+                y: (y as f64 + ty) as f32,
+                scale: s.scale,
+                rotation: s.rotation
+                    + if q % 2 == 1 {
+                        std::f32::consts::FRAC_PI_2
+                    } else {
+                        0.0
+                    },
+                flip: s.flip != (q % 2 == 1),
+                tint: s.tint.clone(),
+                shadow: s.shadow,
+                gen: None,
+            },
+            index: None,
+        });
+    }
+    // Strokes: points shift; quarter turns rotate about the box centre.
+    for st in &p.strokes {
+        ops.push(Op::AddStroke {
+            stroke: crate::stroke::Stroke {
+                id: new_id("gs"),
+                kind: crate::stroke::StrokeKind::Paint,
+                brush: crate::stroke::BrushKind::Round,
+                material: st.material.clone(),
+                color: st.color.clone(),
+                size: st.size,
+                opacity: st.opacity,
+                hardness: 0.8,
+                density: 1.0,
+                roughness: 0.0,
+                points: st
+                    .points
+                    .iter()
+                    .map(|pt| {
+                        let (tx, ty) = turn_pt(f64::from(pt.dx), f64::from(pt.dy));
+                        crate::stroke::StrokePoint {
+                            x: (x as f64 + tx) as f32,
+                            y: (y as f64 + ty) as f32,
+                            pressure: pt.pressure,
+                            tilt: 0.0,
+                        }
+                    })
+                    .collect(),
+                seed: 1,
+            },
+            index: None,
+        });
     }
     Ok(vec![Op::Batch { ops }])
 }
@@ -393,5 +534,116 @@ mod tests {
                 assert_eq!((x, y, cw, ch), (dx, dy, w, h));
             }
         }
+    }
+    #[test]
+    fn prefabs_carry_props_and_strokes() {
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        let mut j = Journal::default();
+        let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+            {"t":"upsert_space","space":{"id":"a","name":"Barracks","color":"#7f5539","kind":"room"}},
+            {"t":"paint_cells","cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1},{"x":1,"y":1}],"space":"a"},
+            {"t":"add_stamp","stamp":{"id":"sp1","asset":"bed","x":0.5,"y":0.5,"scale":1.0,"rotation":0.0,"flip":false,"tint":null,"shadow":true}},
+            {"t":"add_stamp","stamp":{"id":"sp_out","asset":"crate","x":9.5,"y":9.5,"scale":1.0,"rotation":0.0,"flip":false,"tint":null,"shadow":true}}
+        ]))
+        .unwrap();
+        for op in ops {
+            j.push(&mut f, &op).unwrap();
+        }
+        // A stroke fully inside, and one straddling the boundary.
+        let inside = crate::stroke::Stroke {
+            id: "st_in".into(),
+            kind: crate::stroke::StrokeKind::Paint,
+            brush: crate::stroke::BrushKind::Round,
+            material: None,
+            color: "#ff0000".into(),
+            size: 2.0,
+            opacity: 0.8,
+            hardness: 0.8,
+            density: 1.0,
+            roughness: 0.0,
+            seed: 1,
+            points: vec![
+                crate::stroke::StrokePoint {
+                    x: 0.5,
+                    y: 0.5,
+                    pressure: 1.0,
+                    tilt: 0.0,
+                },
+                crate::stroke::StrokePoint {
+                    x: 1.2,
+                    y: 0.6,
+                    pressure: 0.8,
+                    tilt: 0.0,
+                },
+            ],
+        };
+        let straddle = crate::stroke::Stroke {
+            id: "st_out".into(),
+            kind: crate::stroke::StrokeKind::Paint,
+            brush: crate::stroke::BrushKind::Round,
+            material: None,
+            color: "#00ff00".into(),
+            size: 2.0,
+            opacity: 0.8,
+            hardness: 0.8,
+            density: 1.0,
+            roughness: 0.0,
+            seed: 1,
+            points: vec![
+                crate::stroke::StrokePoint {
+                    x: 0.5,
+                    y: 0.5,
+                    pressure: 1.0,
+                    tilt: 0.0,
+                },
+                crate::stroke::StrokePoint {
+                    x: 8.2,
+                    y: 8.6,
+                    pressure: 0.8,
+                    tilt: 0.0,
+                },
+            ],
+        };
+        j.push(
+            &mut f,
+            &Op::AddStroke {
+                stroke: inside,
+                index: None,
+            },
+        )
+        .unwrap();
+        j.push(
+            &mut f,
+            &Op::AddStroke {
+                stroke: straddle,
+                index: None,
+            },
+        )
+        .unwrap();
+
+        let p = capture(&f, "Barracks kit", &["a".into()], 32.0).unwrap();
+        assert_eq!(p.stamps.len(), 1, "the outside prop stays out");
+        assert_eq!(p.stamps[0].asset, "bed");
+        assert_eq!(p.strokes.len(), 1, "the straddling stroke stays out");
+        assert_eq!(p.strokes[0].points.len(), 2);
+
+        // Placement: the prop and the stroke land, fresh ids.
+        let ops = place(&p, 10, 10, 0, 32.0).unwrap();
+        let mut stamps_in = 0;
+        let mut strokes_in = 0;
+        if let Op::Batch { ops } = &ops[0] {
+            for o in ops {
+                match o {
+                    Op::AddStamp { stamp, .. } => {
+                        stamps_in += 1;
+                        assert!(stamp.id.starts_with("gp"), "fresh id");
+                    }
+                    Op::AddStroke { .. } => strokes_in += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(stamps_in, 1);
+        assert_eq!(strokes_in, 1);
     }
 }

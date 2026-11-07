@@ -129,6 +129,7 @@ impl StoredDoc {
             id: id.clone(),
             name: name.to_string(),
             kind,
+            schema_version: 1,
             cell_size: 32.0,
             created_at: now.clone(),
             updated_at: now,

@@ -3100,6 +3100,15 @@ OK removes it.`);
     id: newId('enc'), space, creatures: list, note: String(note).slice(0, 500),
   } }]);
 };
+document.getElementById('bk-move').onclick = async () => {
+  if (!state.sel.size) { statusEl.textContent = 'Select rooms to move.'; return; }
+  const d = window.prompt('Move selected rooms by dx,dy cells (e.g. "6,0")', '0,0');
+  if (d === null || !d.trim()) return;
+  const [dx, dy] = d.split(',').map(v => parseInt(v.trim(), 10));
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) { statusEl.textContent = 'Give two numbers like "6,0".'; return; }
+  await postOps([{ t: 'batch', ops: [...state.sel].map(s => ({ t: 'move_room', space: s, dx, dy })) }]);
+  statusEl.textContent = `Moved ${state.sel.size} room(s) by ${dx},${dy}. Lights/props stay - move them with the stamp tool.`;
+};
 document.getElementById('bk-refine').onclick = async () => {
   const instruction = window.prompt(`What should change? (${state.sel.size} room(s) selected stay exactly as they are)`, 'Add a barracks next to the entrance');
   if (instruction === null || !instruction.trim()) return;

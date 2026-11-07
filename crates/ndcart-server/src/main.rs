@@ -966,13 +966,58 @@ async fn scatter_props(
     };
     let idx = floors_by_id(&doc.floors, &floor_id)?;
     let taken = doc.floors[idx].stamps.len();
+    // Terrain-aware rejection (the M2 leftover): when the floor has terrain,
+    // props are not placed under water or on steep slopes. A 3x3 height
+    // window around each candidate gives the local slope.
+    let keep: Option<(ndcart_core::terrain::HeightGrid, u16, f32)> =
+        doc.floors[idx].terrain.as_ref().map(|terr| {
+            let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
+            let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
+            for p in &b.points {
+                min_x = min_x.min(p[0]);
+                min_y = min_y.min(p[1]);
+                max_x = max_x.max(p[0]);
+                max_y = max_y.max(p[1]);
+            }
+            let sea = terr.sea_level();
+            let grid = terr.extract(
+                min_x.floor() as i32 - 2,
+                min_y.floor() as i32 - 2,
+                (max_x - min_x).ceil() as i32 + 5,
+                (max_y - min_y).ceil() as i32 + 5,
+            );
+            (grid, sea, 0.35) // slope threshold: rise/run per cell
+        });
+    let keep_fn = |x: f32, y: f32| -> bool {
+        match &keep {
+            None => true,
+            Some((grid, sea, slope_max)) => {
+                let gx = x - grid.x0 as f32;
+                let gy = y - grid.y0 as f32;
+                if gx < 1.0 || gy < 1.0 || gx > grid.w as f32 - 2.0 || gy > grid.h as f32 - 2.0 {
+                    return false;
+                }
+                let ix = gx as i32 + 1;
+                let iy = gy as i32 + 1;
+                let h = grid.at(ix, iy);
+                if h < f32::from(*sea) + 40.0 {
+                    return false; // under water or the shoreline band
+                }
+                let dx = (grid.at(ix + 1, iy) - grid.at(ix - 1, iy)).abs();
+                let dy = (grid.at(ix, iy + 1) - grid.at(ix, iy - 1)).abs();
+                dx.max(dy) / 65535.0 <= *slope_max
+            }
+        }
+    };
     let ops = match &b.biome {
         Some(name) => {
             let biome = ndcart_core::scatter::biome(name)
                 .ok_or_else(|| CoreError::Invalid(format!("unknown biome {name}")))?;
-            ndcart_core::scatter::scatter_biome(&b.points, biome, b.density, b.seed, taken)?
+            ndcart_core::scatter::scatter_biome_where(
+                &b.points, biome, b.density, b.seed, taken, true, &keep_fn,
+            )?
         }
-        None => ndcart_core::scatter::scatter(
+        None => ndcart_core::scatter::scatter_where(
             &ndcart_core::scatter::ScatterParams {
                 polygon: b.points.clone(),
                 assets: b.assets.clone(),
@@ -982,6 +1027,7 @@ async fn scatter_props(
                 scale_max: 1.2,
             },
             taken,
+            &keep_fn,
         )?,
     };
     doc.apply_ops(&floor_id, &ops)?;
