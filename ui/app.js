@@ -681,6 +681,42 @@ document.getElementById('btn-theme').onclick = async () => {
   } catch (e) { statusEl.textContent = e.message; }
 };
 
+
+// History browser (honest-limits closure): the journal summarized, jump
+// back = revert (one undoable batch, nothing lost).
+document.getElementById('fl-history').onclick = async () => {
+  try {
+    const h = await api('GET', `/api/docs/${state.docId}/history?floor=${state.floorId}`);
+    document.getElementById('history-floor').textContent = `- ${curFloor().name}`;
+    const body = document.getElementById('history-body');
+    body.textContent = '';
+    const ul = document.createElement('ul');
+    ul.style.listStyle = 'none';
+    ul.style.padding = '0';
+    for (const e of h.entries.slice().reverse()) {
+      const li = document.createElement('li');
+      li.textContent = `#${e.index}${e.undo ? ' (undo)' : ''}: ${e.summary}`;
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = 'Revert here';
+      b.onclick = async () => {
+        try {
+          await api('POST', `/api/docs/${state.docId}/revert`, { floor: state.floorId, index: e.index });
+          tileCache.clear();
+          await refresh();
+          statusEl.textContent = `Reverted to #${e.index} (one undo step brings you back).`;
+        } catch (err) { statusEl.textContent = err.message; }
+      };
+      li.appendChild(b);
+      ul.appendChild(li);
+    }
+    if (!h.entries.length) body.textContent = 'Nothing journaled yet.';
+    body.appendChild(ul);
+    document.getElementById('history-dialog').showModal();
+  } catch (e) { statusEl.textContent = e.message; }
+};
+document.getElementById('history-close').onclick = () => document.getElementById('history-dialog').close();
+
 // ---------- projects ----------
 
 async function loadDocList() {
@@ -3127,6 +3163,15 @@ document.getElementById('bk-move').onclick = async () => {
   if (!Number.isFinite(dx) || !Number.isFinite(dy)) { statusEl.textContent = 'Give two numbers like "6,0".'; return; }
   await postOps([{ t: 'batch', ops: [...state.sel].map(s => ({ t: 'move_room', space: s, dx, dy })) }]);
   statusEl.textContent = `Moved ${state.sel.size} room(s) by ${dx},${dy}. Lights/props stay - move them with the stamp tool.`;
+};
+document.getElementById('bk-resize').onclick = async () => {
+  if (!state.sel.size) { statusEl.textContent = 'Select rooms to resize.'; return; }
+  const d = window.prompt('Scale selected rooms by fx,fy (whole factors 1-10, about each room's top-left; e.g. "2,2")', '2,2');
+  if (d === null || !d.trim()) return;
+  const [fx, fy] = d.split(',').map(v => parseInt(v.trim(), 10));
+  if (!(fx >= 1 && fx <= 10 && fy >= 1 && fy <= 10)) { statusEl.textContent = 'Factors must be 1-10.'; return; }
+  await postOps([{ t: 'batch', ops: [...state.sel].map(s => ({ t: 'resize_room', space: s, fx, fy })) }]);
+  statusEl.textContent = `Resized ${state.sel.size} room(s) by ${fx}x${fy}.`;
 };
 document.getElementById('bk-refine').onclick = async () => {
   const instruction = window.prompt(`What should change? (${state.sel.size} room(s) selected stay exactly as they are)`, 'Add a barracks next to the entrance');

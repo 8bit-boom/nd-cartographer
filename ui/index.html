@@ -76,6 +76,7 @@
   <button id="fl-add" title="Add an empty floor">＋ Floor</button>
   <button id="fl-gen" title="Generate a dungeon, cave, building, ship deck or city district onto this floor">🎲 Generate…</button>
   <button id="fl-spec" title="Read this floor back as a spec and lay it out again with a new seed (the rooms' graph stays, the arrangement changes)">♻ Re-layout…</button>
+  <button id="fl-history" title="The history browser: everything that happened on this floor, with jump-back (one undo step)">🕘 History</button>
   <button id="fl-light" title="Bake light into the picture: 2.5D relief + wall AO, and sunlight with wall shadows">☀ Light…</button>
   <button id="fl-stats" title="The pacing dashboard: rooms, squares, doors, lights and their reach, props, encounters, lore coverage">📊 Stats</button>
   <button id="fl-dup" title="Duplicate this floor (placed right after it)">⧉ Copy</button>
@@ -108,6 +109,7 @@
       <button id="bk-encounter" title="Who waits in the one selected room? Stays studio-side (GM information — never published)">⚔ Encounter</button>
       <button id="bk-lore" title="Read the linked room's lore from your nd-world (what the GM sees there)">📖 Lore</button>
       <button id="bk-stock" title="Roll a table from your nd-world into the one selected room's encounter">📦 Stock…</button>
+      <button id="bk-resize" title="Scale the selected rooms by whole factors about their top-left (walls derive)">Resize…</button>
       <button id="bk-move" title="Shift the selected rooms by whole cells (walls derive; lights and props stay)">Move…</button>
       <button id="bk-furnish" title="Put props in the selected rooms, chosen from what each room is">Furnish</button>
       <button id="bk-reroll" title="Replace the one selected room's generated props; pinned and hand-placed props stay">🎲 Reroll</button>
@@ -278,6 +280,13 @@
         <button value="del" type="button" id="era-del" class="danger">Delete era</button>
         <button value="ok" id="era-ok" class="primary">Save era</button>
       </menu>
+    </form>
+  </dialog>
+  <dialog id="history-dialog">
+    <form method="dialog">
+      <h3>History <span class="dim" id="history-floor"></span></h3>
+      <div id="history-body" class="hint"></div>
+      <menu><button value="cancel" id="history-close" class="primary">Close</button></menu>
     </form>
   </dialog>
   <dialog id="light-dialog">

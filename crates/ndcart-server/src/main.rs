@@ -2532,6 +2532,95 @@ async fn export_roll20(
     })))
 }
 
+/// `GET /api/docs/{id}/history?floor=ID` - the history browser's data
+/// (honest-limits closure): the journal summarized one line per entry
+/// (oldest first) with its index, so the GM sees everything that happened
+/// beyond checkpoints. Summaries come from the op's serde tag plus a small
+/// human hint (room name, cell count) where cheap.
+async fn doc_history(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let floor_id = doc.floors[idx].id.clone();
+    let entries: Vec<serde_json::Value> = doc
+        .journal
+        .entries()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.is_for(&floor_id))
+        .map(|(i, e)| {
+            serde_json::json!({
+                "index": i,
+                "summary": ndcart_core::journal::op_summary(&e.op),
+                "undo": e.undoes.is_some(),
+            })
+        })
+        .collect();
+    Ok(Json(
+        serde_json::json!({ "floor": floor_id, "entries": entries }),
+    ))
+}
+
+/// `POST /api/docs/{id}/revert` `{floor, index}` - the history browser's
+/// jump: the floor's state at `index` is rebuilt by replaying the journal
+/// prefix, and the difference is applied as ONE undoable batch (nothing is
+/// lost; undo returns to now).
+async fn revert_to(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let index = b
+        .get("index")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| ApiError(CoreError::Invalid("body needs {floor, index}".into())))?
+        as usize;
+    let floor_id = b.get("floor").and_then(|v| v.as_str()).map(str::to_string);
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let fid = match &floor_id {
+        Some(f) => f.clone(),
+        None => doc.floors[0].id.clone(),
+    };
+    let idx = floors_by_id(&doc.floors, &fid)?;
+    let journal = &doc.journal;
+    if index > journal.len() {
+        return Err(ApiError(CoreError::Invalid(format!(
+            "index {index} is beyond the journal ({} entries)",
+            journal.len()
+        ))));
+    }
+    let mut at_index = ndcart_core::FloorDoc::new(fid.clone(), doc.floors[idx].name.clone());
+    for e in journal.entries().iter().take(index) {
+        if e.is_for(&fid) {
+            ndcart_core::journal::apply_op(&mut at_index, &e.op)?;
+        }
+    }
+    let ops = ndcart_core::journal::grid_replace_ops(&doc.floors[idx], &at_index)?;
+    doc.apply_ops(&fid, &[ndcart_core::Op::Batch { ops }])?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), doc);
+    drop(store);
+    app.wall_cache.lock().expect("tile cache").clear();
+    Ok(Json(
+        serde_json::json!({ "ok": true, "rev": rev, "restored_to": index }),
+    ))
+}
+
 /// `GET /api/docs/{id}/stats?floor=ID` — the pacing dashboard's numbers
 /// (plan §21.6): rooms/squares/kinds, doors and secrets, lights and their
 /// coverage, props by provenance, GM labels, encounters, lore coverage.
@@ -3990,6 +4079,8 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/lint", get(lint_doc))
         .route("/api/docs/{id}/floor-spec", get(floor_spec))
         .route("/api/docs/{id}/stats", get(doc_stats))
+        .route("/api/docs/{id}/history", get(doc_history))
+        .route("/api/docs/{id}/revert", post(revert_to))
         .route("/api/docs/{id}/export.svg", get(export_svg))
         .route("/api/docs/{id}/export/roll20", get(export_roll20))
         .route("/api/docs/{id}/events", get(doc_events))

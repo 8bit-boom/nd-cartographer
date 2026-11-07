@@ -55,6 +55,14 @@ pub enum Op {
         dx: i32,
         dy: i32,
     },
+    /// Scale a room's painted cells about its top-left by whole factors
+    /// (bulk resize: a 4x2 room at fx=2,fy=2 becomes 8x4 with each old cell
+    /// a fx*fy block). Marks scale their owner cell the same way.
+    ResizeRoom {
+        space: String,
+        fx: u32,
+        fy: u32,
+    },
     /// Who waits in a room, or a change to them.
     PutEncounter {
         encounter: crate::doc::Encounter,
@@ -288,6 +296,11 @@ impl Op {
                 dx: -*dx,
                 dy: -*dy,
             }),
+            Op::ResizeRoom { space, fx, fy } => Ok(Op::ResizeRoom {
+                space: space.clone(),
+                fx: *fx,
+                fy: *fy,
+            }),
             Op::PutEncounter { encounter } => {
                 match floor.encounters.iter().find(|e| e.space == encounter.space) {
                     Some(prev) => Ok(Op::PutEncounter {
@@ -519,6 +532,7 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::LinkEntity { link } => floor.link_entity(link.clone())?,
         Op::UnlinkEntity { space } => floor.unlink_entity(space)?,
         Op::MoveRoom { space, dx, dy } => floor.move_room(space, *dx, *dy)?,
+        Op::ResizeRoom { space, fx, fy } => floor.resize_room(space, *fx, *fy)?,
         Op::PutEncounter { encounter } => floor.put_encounter(encounter.clone())?,
         Op::RemoveEncounter { space } => floor.remove_encounter(space)?,
         Op::PutEra { era } => floor.put_era(era.clone())?,
@@ -764,6 +778,95 @@ pub fn new_label() -> String {
     new_id("lb")
 }
 
+/// History-browser helper (honest-limits closure): a short human line for
+/// one op. Uses the serde tag plus cheap hints, so it survives new variants
+/// without maintenance.
+pub fn op_summary(op: &Op) -> String {
+    let tag = serde_json::to_value(op)
+        .ok()
+        .and_then(|v| v.get("t").and_then(|t| t.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "edit".to_string());
+    match op {
+        Op::PaintCells { cells, space } => format!(
+            "{tag}: {} cell(s){}",
+            cells.len(),
+            space
+                .as_deref()
+                .map(|s| format!(" -> {s}"))
+                .unwrap_or_default()
+        ),
+        Op::UpsertSpace { space } => format!("{tag}: {}", space.name),
+        Op::AddStamp { stamp, .. } => format!("{tag}: {} at {},{}", stamp.asset, stamp.x, stamp.y),
+        Op::AddStroke { stroke, .. } => format!("{tag}: {} point(s)", stroke.points.len()),
+        Op::AddLight { light } => format!("{tag}: at {},{}", light.x, light.y),
+        Op::UpsertLabel { label } => format!("{tag}: {}", label.text),
+        Op::PutEra { era } => format!("{tag}: {}", era.name),
+        Op::MoveRoom { space, dx, dy } => format!("{tag}: {space} by {dx},{dy}"),
+        Op::ResizeRoom { space, fx, fy } => format!("{tag}: {space} x{fx},y{fy}"),
+        Op::Batch { ops } => format!("{tag}: {} ops", ops.len()),
+        _ => tag,
+    }
+}
+
+/// History-browser helper (honest-limits closure): ops that turn `current`'s
+/// grid into `target`'s — spaces upserted/removed, cells cleared and
+/// repainted, marks replaced. One batch's worth; the caller wraps it.
+pub fn grid_replace_ops(
+    current: &crate::doc::FloorDoc,
+    target: &crate::doc::FloorDoc,
+) -> CoreResult<Vec<Op>> {
+    let mut ops = Vec::new();
+    // Spaces: upsert everything in target; remove current's strays.
+    for (id, space) in &target.grid.spaces {
+        ops.push(Op::UpsertSpace {
+            space: space.clone(),
+        });
+        let _ = id;
+    }
+    let removed: Vec<String> = current
+        .grid
+        .spaces
+        .keys()
+        .filter(|id| !target.grid.spaces.contains_key(*id))
+        .cloned()
+        .collect();
+    for id in removed {
+        ops.push(Op::RemoveSpace { id });
+    }
+    // Cells: clear every current painted cell, paint target's cells grouped
+    // by space.
+    let current_cells: Vec<CellKey> = current.grid.cells().map(|(c, _)| c).collect();
+    if !current_cells.is_empty() {
+        ops.push(Op::PaintCells {
+            cells: current_cells,
+            space: None,
+        });
+    }
+    let mut by_space: std::collections::BTreeMap<String, Vec<CellKey>> = Default::default();
+    for (c, s) in target.grid.cells() {
+        by_space.entry(s.to_string()).or_default().push(c);
+    }
+    for (space, cells) in by_space {
+        ops.push(Op::PaintCells {
+            cells,
+            space: Some(space),
+        });
+    }
+    // Marks: clear current's, set target's.
+    for k in current.grid.marks.keys() {
+        ops.push(Op::SetMark {
+            edge: *k,
+            mark: None,
+        });
+    }
+    for (k, m) in &target.grid.marks {
+        ops.push(Op::SetMark {
+            edge: *k,
+            mark: Some(*m),
+        });
+    }
+    Ok(ops)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

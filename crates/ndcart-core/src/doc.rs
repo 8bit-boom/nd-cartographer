@@ -1186,6 +1186,77 @@ impl FloorDoc {
         Ok(())
     }
 
+    /// Scale a room's painted cells about its top-left by whole factors
+    /// (bulk resize). fx/fy 0 or >10 are refused; marks move to their owner
+    /// cell's scaled top-left. Walls derive from the new cells.
+    pub fn resize_room(&mut self, space: &str, fx: u32, fy: u32) -> CoreResult<()> {
+        if !self.grid.spaces.contains_key(space) {
+            return Err(CoreError::NotFound(format!("room {space}")));
+        }
+        if fx == 0 || fy == 0 || fx > 10 || fy > 10 {
+            return Err(CoreError::Invalid("resize factors must be 1..=10".into()));
+        }
+        if fx == 1 && fy == 1 {
+            return Ok(());
+        }
+        let cells: Vec<CellKey> = self
+            .grid
+            .cells()
+            .filter(|(_c, s)| *s == space)
+            .map(|(c, _)| c)
+            .collect();
+        if cells.is_empty() {
+            return Err(CoreError::Invalid(
+                "that room has no painted squares".into(),
+            ));
+        }
+        let (x0, y0) = (
+            cells.iter().map(|c| c.x).min().unwrap(),
+            cells.iter().map(|c| c.y).min().unwrap(),
+        );
+        let mine: std::collections::BTreeMap<crate::grid::EdgeKey, Mark> = self
+            .grid
+            .marks
+            .iter()
+            .filter(|(k, _)| cells.contains(&k.cell))
+            .map(|(k, m)| (*k, *m))
+            .collect();
+        for k in mine.keys() {
+            self.grid.set_mark(*k, None)?;
+        }
+        let old: Vec<CellKey> = cells.clone();
+        self.grid.paint(&old, None)?;
+        let mut scaled: Vec<CellKey> = Vec::new();
+        for c in &cells {
+            let (rx, ry) = ((c.x - x0) as u32, (c.y - y0) as u32);
+            for dy in 0..fy {
+                for dx in 0..fx {
+                    scaled.push(CellKey::new(
+                        x0 + (rx * fx + dx) as i32,
+                        y0 + (ry * fy + dy) as i32,
+                    ));
+                }
+            }
+        }
+        for c in &scaled {
+            if !c.in_bounds() {
+                return Err(CoreError::OutOfBounds(format!("resized cell {c:?}")));
+            }
+        }
+        self.grid.paint(&scaled, Some(space))?;
+        for (k, m) in &mine {
+            let (rx, ry) = ((k.cell.x - x0).max(0) as u32, (k.cell.y - y0).max(0) as u32);
+            self.grid.set_mark(
+                crate::grid::EdgeKey {
+                    cell: CellKey::new(x0 + (rx * fx) as i32, y0 + (ry * fy) as i32),
+                    edge: k.edge,
+                },
+                Some(*m),
+            )?;
+        }
+        Ok(())
+    }
+
     /// Shift a room's painted cells and its edge marks by whole cells
     /// (bulk move). Lights, labels and props are the GM's to move separately
     /// (they are individually placed objects, not part of the room shape).
