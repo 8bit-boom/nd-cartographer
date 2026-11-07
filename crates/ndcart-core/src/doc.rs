@@ -23,6 +23,111 @@ impl DocKind {
     }
 }
 
+/// A colour grade applied over the finished picture (an era's "night" look).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Grade {
+    /// `#rrggbb` mixed over the whole picture.
+    #[serde(default = "grade_tint")]
+    pub tint: String,
+    /// ...by this much (0..=1).
+    #[serde(default)]
+    pub tint_amount: f32,
+    /// 0..=2, 1 = unchanged.
+    #[serde(default = "one_f")]
+    pub saturation: f32,
+    /// 0.2..=2, 1 = unchanged.
+    #[serde(default = "one_f")]
+    pub contrast: f32,
+    /// 0.2..=2, 1 = unchanged.
+    #[serde(default = "one_f")]
+    pub brightness: f32,
+}
+
+fn grade_tint() -> String {
+    "#000000".into()
+}
+fn one_f() -> f32 {
+    1.0
+}
+
+impl Default for Grade {
+    fn default() -> Self {
+        Grade {
+            tint: grade_tint(),
+            tint_amount: 0.0,
+            saturation: 1.0,
+            contrast: 1.0,
+            brightness: 1.0,
+        }
+    }
+}
+
+impl Grade {
+    pub fn is_neutral(&self) -> bool {
+        *self == Grade::default()
+    }
+
+    pub fn validate(&self) -> CoreResult<()> {
+        let b = self.tint.as_bytes();
+        let hex = |s: &[u8]| s.len() == 6 && s.iter().all(|c| c.is_ascii_hexdigit());
+        if !(b.len() == 7 && b[0] == b'#' && hex(&b[1..])) {
+            return Err(CoreError::Invalid("grade tint must be #rrggbb".into()));
+        }
+        let ok = |v: f32, lo: f32, hi: f32| v.is_finite() && (lo..=hi).contains(&v);
+        if !ok(self.tint_amount, 0.0, 1.0)
+            || !ok(self.saturation, 0.0, 2.0)
+            || !ok(self.contrast, 0.2, 2.0)
+            || !ok(self.brightness, 0.2, 2.0)
+        {
+            return Err(CoreError::Invalid(
+                "grade amounts out of range (tint 0..=1, saturation 0..=2, contrast/brightness 0.2..=2)"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A named variant of a floor: night, pre-fire, ruined — the same walls, a
+/// different world (plan 21.5). An era overrides light states, hides props
+/// and labels, and applies a colour grade; publishing with the era bakes and
+/// sends all three, landing as its own map in nd-world.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct Era {
+    pub id: String,
+    /// 1..=40 chars, shown in the era bar.
+    pub name: String,
+    /// Light on/off overrides by light id (absent = the light's own state).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lights: std::collections::BTreeMap<String, bool>,
+    /// Prop and label ids hidden in this era.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hidden: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub grade: Grade,
+}
+
+pub const MAX_ERAS: usize = 12;
+
+impl Era {
+    pub fn validate(&self) -> CoreResult<()> {
+        if self.id.is_empty() || self.id.len() > 40 {
+            return Err(CoreError::Invalid("era id must be 1..=40 chars".into()));
+        }
+        let n = self.name.trim();
+        if n.is_empty() || n.chars().count() > 40 {
+            return Err(CoreError::Invalid("era name must be 1..=40 chars".into()));
+        }
+        if self.lights.len() > 200 {
+            return Err(CoreError::CapExceeded("at most 200 light overrides".into()));
+        }
+        if self.hidden.len() > 2_000 {
+            return Err(CoreError::CapExceeded("at most 2000 hidden objects".into()));
+        }
+        self.grade.validate()
+    }
+}
+
 /// Where this document was last published (plan §9: slug capture, so a
 /// re-publish updates the same map in place). Pinned to one server + world.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -35,6 +140,11 @@ pub struct NdWorldLink {
     /// concept, so every floor is its own map). `slug` stays the first/only one.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub floor_slugs: std::collections::BTreeMap<String, String>,
+    /// Slug of each era variant published on its own (plan 21.5); the base
+    /// `slug` stays the everyday map, so re-publishing it never targets a
+    /// night variant by accident.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub era_slugs: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -394,6 +504,12 @@ pub struct FloorDoc {
     /// Who waits in each room (see [`Encounter`]); at most one per room.
     #[serde(default)]
     pub encounters: Vec<Encounter>,
+    /// Named variants of this floor (night, ruined...); `active_era` is what
+    /// the studio shows and exports.
+    #[serde(default)]
+    pub eras: Vec<Era>,
+    #[serde(default)]
+    pub active_era: Option<String>,
     /// Paint strokes in z-order (later draws over earlier). Cosmetic: they
     /// shape the baked picture, never walls or rooms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -457,6 +573,8 @@ impl FloorDoc {
             name,
             grid: RoomGrid::default(),
             lights: Vec::new(),
+            eras: Vec::new(),
+            active_era: None,
             labels: Vec::new(),
             zones: Vec::new(),
             entity_links: Vec::new(),
@@ -996,6 +1114,62 @@ impl FloorDoc {
         Ok(())
     }
 
+    pub fn era(&self, id: &str) -> Option<&Era> {
+        self.eras.iter().find(|e| e.id == id)
+    }
+
+    pub fn put_era(&mut self, era: Era) -> CoreResult<()> {
+        era.validate()?;
+        if let Some(x) = self.eras.iter_mut().find(|x| x.id == era.id) {
+            *x = era;
+        } else {
+            if self.eras.len() >= MAX_ERAS {
+                return Err(CoreError::CapExceeded(format!(
+                    "at most {MAX_ERAS} eras per floor"
+                )));
+            }
+            self.eras.push(era);
+        }
+        Ok(())
+    }
+
+    pub fn remove_era(&mut self, id: &str) -> CoreResult<()> {
+        let before = self.eras.len();
+        self.eras.retain(|e| e.id != id);
+        if self.eras.len() == before {
+            return Err(CoreError::NotFound(format!("era {id}")));
+        }
+        if self.active_era.as_deref() == Some(id) {
+            self.active_era = None;
+        }
+        Ok(())
+    }
+
+    /// What the renderer and the publisher work from: the floor's own state
+    /// with the given era's overrides applied (a view - the document keeps
+    /// the everyday state).
+    pub fn with_era<'a>(&'a self, era: Option<&'a Era>) -> EraView<'a> {
+        match era {
+            None => EraView {
+                floor: self,
+                lights_on: Box::new(|id| self.lights.iter().find(|l| l.id == id).map(|l| l.on)),
+                hidden: Box::new(|_| false),
+                grade: None,
+            },
+            Some(e) => EraView {
+                floor: self,
+                lights_on: Box::new(move |id| {
+                    e.lights
+                        .get(id)
+                        .copied()
+                        .or_else(|| self.lights.iter().find(|l| l.id == id).map(|l| l.on))
+                }),
+                hidden: Box::new(move |id| e.hidden.contains(id)),
+                grade: Some(&e.grade),
+            },
+        }
+    }
+
     pub fn upsert_zone(&mut self, zone: crate::zone::Zone) -> CoreResult<()> {
         zone.validate()?;
         if let Some(z) = self.zones.iter_mut().find(|z| z.id == zone.id) {
@@ -1043,6 +1217,53 @@ impl FloorDoc {
             self.strokes.len(),
             self.stamps.len()
         )
+    }
+}
+
+/// The floor as an era sees it: light states, hidden objects, grade. Views
+/// borrow - applying an era never rewrites the document.
+pub type LightsOn<'a> = Box<dyn Fn(&str) -> Option<bool> + 'a>;
+pub type IsHidden<'a> = Box<dyn Fn(&str) -> bool + 'a>;
+
+pub struct EraView<'a> {
+    pub floor: &'a FloorDoc,
+    pub lights_on: LightsOn<'a>,
+    pub hidden: IsHidden<'a>,
+    pub grade: Option<&'a Grade>,
+}
+
+impl<'a> EraView<'a> {
+    /// The lights of this view, with their effective on state.
+    pub fn lights(&self) -> Vec<Light> {
+        self.floor
+            .lights
+            .iter()
+            .map(|l| {
+                let mut l = l.clone();
+                if let Some(on) = (self.lights_on)(&l.id) {
+                    l.on = on;
+                }
+                l
+            })
+            .collect()
+    }
+
+    pub fn labels(&self) -> Vec<Label> {
+        self.floor
+            .labels
+            .iter()
+            .filter(|l| !(self.hidden)(&l.id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn stamps(&self) -> Vec<crate::stamp::Stamp> {
+        self.floor
+            .stamps
+            .iter()
+            .filter(|s| !(self.hidden)(&s.id))
+            .cloned()
+            .collect()
     }
 }
 

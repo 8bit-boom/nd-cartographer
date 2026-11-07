@@ -68,8 +68,10 @@ pub fn bake_tile(
     render_region(floor, walls, cell_size, ppc, tx * t, ty * t, TILE, TILE)
 }
 
-/// A tile with the floor `onion` shown faintly underneath it.
-pub fn bake_tile_onion(
+/// A tile through a floor era (plan 21.5): hidden props and labels skipped,
+/// the era's colour grade laid over the picture.
+#[allow(clippy::too_many_arguments)]
+pub fn bake_tile_era(
     floor: &FloorDoc,
     walls: &[Wall],
     cell_size: f64,
@@ -77,22 +79,27 @@ pub fn bake_tile_onion(
     tx: i64,
     ty: i64,
     onion: Option<(&FloorDoc, &[Wall])>,
+    era: Option<&ndcart_core::doc::Era>,
 ) -> Vec<u8> {
     let ppc = PPC0 << z.min(MAX_Z);
     let t = i64::from(TILE);
-    render_pixmap_onion(
-        floor,
+    let view = floor.with_era(era);
+    let mut pm = render_pixmap_hidden(
+        view.floor,
         walls,
         cell_size,
         ppc,
-        tx * t,
-        ty * t,
-        TILE,
-        TILE,
+        (tx * t, ty * t, TILE, TILE),
         onion,
-    )
-    .encode_png()
-    .expect("png encode")
+        VOID,
+        &|id| (view.hidden)(id),
+    );
+    if let Some(g) = view.grade {
+        if !g.is_neutral() {
+            grade_pixmap(&mut pm, g);
+        }
+    }
+    pm.encode_png().expect("png encode")
 }
 
 /// The whole floor as one image at `ppc` pixels per cell (cols x rows is the
@@ -106,12 +113,22 @@ pub fn bake_full_as(
     format: ImageFormat,
     quality: u8,
 ) -> Result<(Vec<u8>, u32, u32), String> {
-    bake_full_limit(floor, walls, cell_size, ppc, format, quality, MAX_FULL_PX)
+    bake_full_era(
+        floor,
+        walls,
+        cell_size,
+        ppc,
+        format,
+        quality,
+        MAX_FULL_PX,
+        None,
+    )
 }
 
-/// Like [`bake_full_as`] with a chosen pixel budget (the file export allows far
-/// more than nd-world's import does; memory is about four bytes a pixel).
-pub fn bake_full_limit(
+/// [`bake_full_as`] with a floor era applied (plan 21.5): the era's hidden
+/// props and labels are skipped and its colour grade is laid over the picture.
+#[allow(clippy::too_many_arguments)]
+pub fn bake_full_era(
     floor: &FloorDoc,
     walls: &[Wall],
     cell_size: f64,
@@ -119,6 +136,23 @@ pub fn bake_full_limit(
     format: ImageFormat,
     quality: u8,
     max_px: i64,
+    era: Option<&ndcart_core::doc::Era>,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    bake_full_limit_era(floor, walls, cell_size, ppc, format, quality, max_px, era)
+}
+
+/// Like [`bake_full_as`] with a chosen pixel budget (the file export allows far
+/// more than nd-world's import does; memory is about four bytes a pixel).
+#[allow(clippy::too_many_arguments)]
+pub fn bake_full_limit_era(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    format: ImageFormat,
+    quality: u8,
+    max_px: i64,
+    era: Option<&ndcart_core::doc::Era>,
 ) -> Result<(Vec<u8>, u32, u32), String> {
     let (cols, rows) = grid_extent(floor);
     let (w, h) = (i64::from(cols) * ppc, i64::from(rows) * ppc);
@@ -127,9 +161,38 @@ pub fn bake_full_limit(
             "image {w}x{h}px is outside the limits (side <= {MAX_SIDE_PX}, area <= {max_px})"
         ));
     }
-    let pm = render_pixmap(floor, walls, cell_size, ppc, 0, 0, w as u32, h as u32);
+    let view = floor.with_era(era);
+    let pm = render_pixmap_era(&view, walls, cell_size, ppc, 0, 0, w as u32, h as u32);
     let bytes = encode(&pm, format, quality)?;
     Ok((bytes, w as u32, h as u32))
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn bake_full_limit(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    format: ImageFormat,
+    quality: u8,
+    max_px: i64,
+) -> Result<(Vec<u8>, u32, u32), String> {
+    bake_full_limit_era(floor, walls, cell_size, ppc, format, quality, max_px, None)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn bake_tile_onion(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    z: u32,
+    tx: i64,
+    ty: i64,
+    onion: Option<(&FloorDoc, &[Wall])>,
+) -> Vec<u8> {
+    bake_tile_era(floor, walls, cell_size, z, tx, ty, onion, None)
 }
 
 /// PNG convenience for tests.
@@ -529,13 +592,20 @@ const MAX_SPRITE_PIXELS: i64 = 16_000_000;
 /// not depend on which tile is being baked, then blitted at an integer pixel
 /// offset. That is what makes a tile pixel-identical to the same crop of the
 /// full render (a path's anti-aliasing would otherwise depend on its offset).
-fn apply_stamps(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
+fn apply_stamps_hidden(
+    pixmap: &mut tiny_skia::Pixmap,
+    floor: &FloorDoc,
+    ppc: i64,
+    x0: i64,
+    y0: i64,
+    hidden: &dyn Fn(&str) -> bool,
+) {
     if floor.stamps.is_empty() {
         return;
     }
     let scale = ppc as f32;
     let (w, h) = (i64::from(pixmap.width()), i64::from(pixmap.height()));
-    for st in &floor.stamps {
+    for st in floor.stamps.iter().filter(|st| !hidden(&st.id)) {
         let Some(def) = ndcart_paint::find_stamp(&st.asset) else {
             if st.asset.starts_with("stp_") {
                 apply_custom_stamp(pixmap, st, scale, x0, y0);
@@ -977,6 +1047,9 @@ struct TextItem {
     user: bool,
     /// Never wider than this many cells (a region's name stays inside the region).
     fit_width_cells: Option<f32>,
+    /// The label this came from, so an era can hide it. Generated names
+    /// (markers, regions, rivers) have none and always draw.
+    label_id: Option<String>,
 }
 
 fn polygon_centroid(pts: &[[f32; 2]]) -> ([f32; 2], f32) {
@@ -1013,6 +1086,7 @@ fn text_items(floor: &FloorDoc) -> Vec<TextItem> {
             continue;
         }
         v.push(TextItem {
+            label_id: Some(l.id.clone()),
             text: l.text.clone(),
             size_cells: l.size as f32,
             color: parse_hex(&l.color),
@@ -1040,6 +1114,7 @@ fn text_items(floor: &FloorDoc) -> Vec<TextItem> {
             continue;
         }
         v.push(TextItem {
+            label_id: None,
             text: m.label.clone(),
             size_cells: 0.5,
             color: [0x1b, 0x1b, 0x1b],
@@ -1064,6 +1139,7 @@ fn text_items(floor: &FloorDoc) -> Vec<TextItem> {
         }
         let (c, area) = polygon_centroid(&r.points);
         v.push(TextItem {
+            label_id: None,
             text: r.name.clone(),
             size_cells: (0.16 * area.sqrt()).clamp(0.5, 2.4),
             color: ndcart_paint::shade(parse_hex(&r.color), 0.55),
@@ -1094,6 +1170,7 @@ fn text_items(floor: &FloorDoc) -> Vec<TextItem> {
             continue;
         }
         v.push(TextItem {
+            label_id: None,
             text: r.name.clone(),
             size_cells: (r.width * 0.65).clamp(0.35, 0.9),
             color: [0x1d, 0x3f, 0x66],
@@ -1112,6 +1189,7 @@ fn text_items(floor: &FloorDoc) -> Vec<TextItem> {
             continue;
         }
         v.push(TextItem {
+            label_id: None,
             text: r.name.clone(),
             size_cells: 0.38,
             color: ndcart_paint::shade(parse_hex(&r.color), 0.7),
@@ -1133,8 +1211,18 @@ fn text_items(floor: &FloorDoc) -> Vec<TextItem> {
 /// yield to ones already placed) are decided the same way in every tile; each is
 /// drawn into its own sprite and blitted at an integer offset, so a tile equals
 /// the matching crop of the full render exactly. Text under 5 px is not drawn.
-fn draw_labels(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
-    let items = text_items(floor);
+fn draw_labels_hidden(
+    pixmap: &mut tiny_skia::Pixmap,
+    floor: &FloorDoc,
+    ppc: i64,
+    x0: i64,
+    y0: i64,
+    hidden: &dyn Fn(&str) -> bool,
+) {
+    let items: Vec<_> = text_items(floor)
+        .into_iter()
+        .filter(|it| it.label_id.as_deref().map(|id| !hidden(id)).unwrap_or(true))
+        .collect();
     if items.is_empty() {
         return;
     }
@@ -1547,6 +1635,84 @@ fn render_pixmap(
     render_pixmap_onion(floor, walls, cell_size, ppc, x0, y0, w, h, None)
 }
 
+/// [`render_pixmap`] through an era view (hidden objects, grade).
+#[allow(clippy::too_many_arguments)]
+fn render_pixmap_era(
+    view: &ndcart_core::doc::EraView,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    x0: i64,
+    y0: i64,
+    w: u32,
+    h: u32,
+) -> tiny_skia::Pixmap {
+    let mut pm = render_pixmap_hidden(
+        view.floor,
+        walls,
+        cell_size,
+        ppc,
+        (x0, y0, w, h),
+        None,
+        VOID,
+        &|id| (view.hidden)(id),
+    );
+    if let Some(g) = view.grade {
+        if !g.is_neutral() {
+            grade_pixmap(&mut pm, g);
+        }
+    }
+    pm
+}
+
+/// Lay an era's colour grade over the finished picture: tint mix, then
+/// brightness, contrast and saturation. Straight per-pixel maths; the tests
+/// pin it against hand-computed values.
+fn grade_pixmap(pm: &mut tiny_skia::Pixmap, g: &ndcart_core::doc::Grade) {
+    let tint = {
+        let h = g.tint.trim_start_matches('#');
+        [
+            u8::from_str_radix(&h[0..2], 16).unwrap_or(0),
+            u8::from_str_radix(&h[2..4], 16).unwrap_or(0),
+            u8::from_str_radix(&h[4..6], 16).unwrap_or(0),
+        ]
+    };
+    let a = g.tint_amount;
+    for px in pm.data_mut().as_chunks_mut::<4>().0 {
+        let mut c = [
+            f32::from(px[0]) / 255.0,
+            f32::from(px[1]) / 255.0,
+            f32::from(px[2]) / 255.0,
+        ];
+        // brightness (linear on the encoded value; a map is art, not video)
+        c = [
+            c[0] * g.brightness,
+            c[1] * g.brightness,
+            c[2] * g.brightness,
+        ];
+        // contrast around the midpoint
+        for v in &mut c {
+            *v = (*v - 0.5) * g.contrast + 0.5;
+        }
+        // saturation around luma
+        let luma = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+        c = [
+            luma + (c[0] - luma) * g.saturation,
+            luma + (c[1] - luma) * g.saturation,
+            luma + (c[2] - luma) * g.saturation,
+        ];
+        // tint mix
+        c = [
+            c[0] * (1.0 - a) + f32::from(tint[0]) / 255.0 * a,
+            c[1] * (1.0 - a) + f32::from(tint[1]) / 255.0 * a,
+            c[2] * (1.0 - a) + f32::from(tint[2]) / 255.0 * a,
+        ];
+        px[0] = (c[0] * 255.0).round().clamp(0.0, 255.0) as u8;
+        px[1] = (c[1] * 255.0).round().clamp(0.0, 255.0) as u8;
+        px[2] = (c[2] * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
 /// How strongly the neighbouring floor shows through (the "onion skin").
 const ONION_OPACITY: f32 = 0.3;
 
@@ -1579,6 +1745,31 @@ fn render_pixmap_on(
     (x0, y0, w, h): (i64, i64, u32, u32),
     onion: Option<(&FloorDoc, &[Wall])>,
     ground: [u8; 4],
+) -> tiny_skia::Pixmap {
+    render_pixmap_hidden(
+        floor,
+        walls,
+        cell_size,
+        ppc,
+        (x0, y0, w, h),
+        onion,
+        ground,
+        &|_| false,
+    )
+}
+
+/// The renderer proper; `hidden` marks prop and label ids an era has
+/// hidden (everything else is the everyday state).
+#[allow(clippy::too_many_arguments)]
+fn render_pixmap_hidden(
+    floor: &FloorDoc,
+    walls: &[Wall],
+    cell_size: f64,
+    ppc: i64,
+    (x0, y0, w, h): (i64, i64, u32, u32),
+    onion: Option<(&FloorDoc, &[Wall])>,
+    ground: [u8; 4],
+    hidden: &dyn Fn(&str) -> bool,
 ) -> tiny_skia::Pixmap {
     let tile_px_w = i64::from(w);
     let tile_px_h = i64::from(h);
@@ -1681,10 +1872,10 @@ fn render_pixmap_on(
     }
 
     apply_strokes(&mut pixmap, floor, ppc, x0, y0);
-    apply_stamps(&mut pixmap, floor, ppc, x0, y0);
+    apply_stamps_hidden(&mut pixmap, floor, ppc, x0, y0, hidden);
     draw_overlay(&mut pixmap, floor, ppc, x0, y0);
     draw_map_grid(&mut pixmap, floor, ppc, x0, y0);
-    draw_labels(&mut pixmap, floor, ppc, x0, y0);
+    draw_labels_hidden(&mut pixmap, floor, ppc, x0, y0, hidden);
 
     // Walls on top: stroke width grows with zoom, min 1px, so z0 reads.
     let mut wall_paint = tiny_skia::Paint {
@@ -2590,6 +2781,77 @@ mod tests {
             top[2] >= top[0],
             "the later (blue) chest is on top: {top:?}"
         );
+    }
+
+    #[test]
+    fn an_era_hides_props_and_grades_the_picture() {
+        use ndcart_core::doc::{Era, Grade};
+        let mut f = FloorDoc::new("f".into(), "Ground".into());
+        f.grid
+            .upsert_space(ndcart_core::Space {
+                id: "s".into(),
+                name: "Hall".into(),
+                color: "#ffffff".into(),
+                kind: ndcart_core::SpaceKind::Room,
+                material: None,
+            })
+            .unwrap();
+        f.grid.paint(&[CellKey::new(0, 0)], Some("s")).unwrap();
+        f.stamps.push(ndcart_core::Stamp {
+            id: "p1".into(),
+            asset: "crate".into(),
+            x: 0.5,
+            y: 0.5,
+            scale: 1.0,
+            rotation: 0.0,
+            flip: false,
+            shadow: true,
+            tint: None,
+        });
+        let walls = derive_walls(&f, 32.0);
+
+        // (The everyday bake draws the prop; the era bake below hides it.)
+        let era = Era {
+            id: "night".into(),
+            name: "Night".into(),
+            lights: Default::default(),
+            hidden: ["p1".to_string()].into_iter().collect(),
+            grade: Grade {
+                tint: "#0000ff".into(),
+                tint_amount: 1.0, // fully blue
+                saturation: 1.0,
+                contrast: 1.0,
+                brightness: 1.0,
+            },
+        };
+        let night = bake_tile_era(&f, &walls, 32.0, 0, 0, 0, None, Some(&era));
+        // Decode the PNG and compare the centre pixel: fully tinted = blue.
+        let (raw, w, h) = crate::convert::decode_rgba(&night).unwrap();
+        let px = |x: usize, y: usize| {
+            let i = (y * w as usize + x) * 4;
+            [raw[i], raw[i + 1], raw[i + 2]]
+        };
+        let centre = px(w as usize / 2, h as usize / 2);
+        assert!(
+            centre[2] > 200 && centre[0] < 60 && centre[1] < 60,
+            "full tint makes the tile blue, got {centre:?}"
+        );
+
+        // The grade pass itself: half-tint over white gives the mix.
+        let mut pm = tiny_skia::Pixmap::new(1, 1).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
+        grade_pixmap(
+            &mut pm,
+            &Grade {
+                tint: "#ff0000".into(),
+                tint_amount: 0.5,
+                saturation: 1.0,
+                contrast: 1.0,
+                brightness: 1.0,
+            },
+        );
+        let d = pm.data();
+        assert_eq!([d[0], d[1], d[2]], [255, 128, 128]);
     }
 
     #[test]

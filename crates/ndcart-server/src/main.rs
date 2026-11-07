@@ -104,6 +104,10 @@ struct FloorView {
     entity_links: Vec<ndcart_core::doc::EntityLink>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     encounters: Vec<ndcart_core::doc::Encounter>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    eras: Vec<ndcart_core::doc::Era>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_era: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     map_grid: Option<ndcart_core::MapGrid>,
 }
@@ -152,6 +156,8 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         zones: floor.zones.clone(),
         entity_links: floor.entity_links.clone(),
         encounters: floor.encounters.clone(),
+        eras: floor.eras.clone(),
+        active_era: floor.active_era.clone(),
         map_grid: floor.map_grid.clone(),
     }
 }
@@ -1841,6 +1847,39 @@ async fn lint_doc(
     })))
 }
 
+/// `GET /api/docs/{id}/floor-spec?floor=ID` - the spec round-trip (plan
+/// 21.19): read a painted floor back as a MapSpec the studio can lay out
+/// again with a new seed. Nothing is changed; the answer feeds the spec
+/// dialog's propose flow.
+async fn floor_spec(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let idx = match &q.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let floor = doc
+        .floors
+        .get(idx)
+        .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+    let (spec, warnings) =
+        ndcart_core::extract::extract_floor_spec(floor, &doc.floors, doc.manifest.cell_size)?;
+    let full = ndcart_core::mapspec::MapSpec {
+        name: doc.manifest.name.clone(),
+        floors: vec![spec],
+    };
+    Ok(Json(
+        serde_json::json!({ "spec": full, "warnings": warnings }),
+    ))
+}
+
 #[derive(Deserialize)]
 struct PreviewQuery {
     floor: Option<String>,
@@ -2727,9 +2766,15 @@ async fn export_png(
     };
     // A big export takes a while: bake off the async threads, without holding the project lock.
     let (ppc, quality) = (q.ppc.unwrap_or(32), q.quality.unwrap_or(80));
+    // Exports honour the active era: what the GM sees is what is exported.
+    let era = filtered
+        .active_era
+        .as_deref()
+        .and_then(|id| filtered.era(id))
+        .cloned();
     let (bytes, ..) = tokio::task::spawn_blocking(move || {
         let walls = tiles::derive_walls(&filtered, cell_size);
-        tiles::bake_full_limit(
+        tiles::bake_full_limit_era(
             &filtered,
             &walls,
             cell_size,
@@ -2737,6 +2782,7 @@ async fn export_png(
             fmt,
             quality,
             tiles::MAX_EXPORT_PX,
+            era.as_ref(),
         )
     })
     .await
@@ -2929,13 +2975,6 @@ async fn get_tile(
         (x, y)
     };
     let onion_id = q.onion.filter(|o| *o != floor_id);
-    let key = format!(
-        "{doc_id}/{floor_id}/{z}/{x}_{y}/{}",
-        onion_id.as_deref().unwrap_or("-")
-    );
-    if let Some(bytes) = app.tile_cache.lock().expect("tile cache").get(&key) {
-        return Ok(png_response(bytes));
-    }
     let store = app.store.read().await;
     let doc = store
         .docs
@@ -2945,6 +2984,18 @@ async fn get_tile(
     let cell_size = doc.manifest.cell_size;
     let rev = doc.rev;
     let floor = doc.floors[idx].clone();
+    // The floor's active era changes what a tile looks like; the era id (or
+    // its absence) is part of the cache key, and the op that set it bumped
+    // the rev, which busts the browser's copy.
+    let era_id = floor.active_era.clone();
+    let key = format!(
+        "{doc_id}/{floor_id}/{z}/{x}_{y}/{}/{}",
+        onion_id.as_deref().unwrap_or("-"),
+        era_id.as_deref().unwrap_or("-")
+    );
+    if let Some(bytes) = app.tile_cache.lock().expect("tile cache").get(&key) {
+        return Ok(png_response(bytes));
+    }
     let walls = {
         let mut cache = app.wall_cache.lock().expect("wall cache");
         cache
@@ -2968,9 +3019,10 @@ async fn get_tile(
         }
         None => None,
     };
+    let era = era_id.as_deref().and_then(|id| floor.era(id)).cloned();
     let bytes = tokio::task::spawn_blocking(move || {
         let onion = ghost.as_ref().map(|(f, w)| (f, w.as_slice()));
-        tiles::bake_tile_onion(&floor, &walls, cell_size, z, x, y, onion)
+        tiles::bake_tile_era(&floor, &walls, cell_size, z, x, y, onion, era.as_ref())
     })
     .await
     .map_err(|e| CoreError::Invalid(format!("tile bake failed: {e}")))?;
@@ -3006,6 +3058,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/export/uvtt", get(export_uvtt))
         .route("/api/docs/{id}/export/png", get(export_png))
         .route("/api/docs/{id}/lint", get(lint_doc))
+        .route("/api/docs/{id}/floor-spec", get(floor_spec))
         .route("/api/materials", get(list_materials))
         .route("/api/assets", post(put_asset))
         .route("/api/assets/{id}", get(get_asset))

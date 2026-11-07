@@ -42,6 +42,10 @@ pub struct Args {
     pub audience: Audience,
     /// World maps: on a re-publish leave the markers and regions in nd-world alone.
     pub keep_overlay: bool,
+    /// Publish a floor era (plan 21.5) as its own map: `--era Night` bakes
+    /// the era (hidden props, grade), sends its light states, and lands it
+    /// under its own slug without touching the everyday map's link.
+    pub era: Option<String>,
     /// Battle maps: skip the editable-elements step (publish C). Default on;
     /// the elements REPLACE nd-world's copy each publish, so edits made by
     /// hand in nd-world's schematic editor are overwritten unless this is set.
@@ -55,6 +59,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
     let mut audience = Audience::Gm;
     let mut keep_overlay = false;
     let mut no_elements = false;
+    let mut era = None;
     let mut all_floors = false;
     let mut publish_anyway = false;
     let (mut all_docs, mut report, mut keep_going) = (false, None, false);
@@ -75,6 +80,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
             "--data-dir" => data_dir = Some(PathBuf::from(val("--data-dir")?)),
             "--keep-overlay" => keep_overlay = true,
             "--no-elements" => no_elements = true,
+            "--era" => era = Some(val("--era")?),
             "--all-floors" => all_floors = true,
             "--publish-anyway" => publish_anyway = true,
             "--all-docs" => all_docs = true,
@@ -130,6 +136,7 @@ pub fn parse(args: Vec<String>) -> Result<Args, String> {
         audience,
         keep_overlay,
         no_elements,
+        era,
     })
 }
 
@@ -154,14 +161,16 @@ fn map_name(doc: &store::StoredDoc, floor_name: &str) -> String {
     }
 }
 
-/// Build what nd-world needs from a stored document. Pure (no network) so the
-/// picture, walls, lights and rooms are testable.
-pub fn build_map(
+/// [`build_map`] with a floor era: the picture is baked through the era
+/// (hidden props, grade) and the era's light states go out, so a night map
+/// really is dark in nd-world.
+pub fn build_map_era(
     doc: &store::StoredDoc,
     floor_id: Option<&str>,
     ppc: i64,
     format: tiles::ImageFormat,
     audience: Audience,
+    era: Option<&ndcart_core::doc::Era>,
 ) -> Result<PublishMap, String> {
     let floor = match floor_id {
         Some(id) => doc
@@ -178,10 +187,24 @@ pub fn build_map(
     let floor = &filtered;
     let cell_size = doc.manifest.cell_size;
     let walls = tiles::derive_walls(floor, cell_size);
-    let (image, w, h) = tiles::bake_full_as(floor, &walls, cell_size, ppc, format, 80)?;
+    let (image, w, h) = tiles::bake_full_era(
+        floor,
+        &walls,
+        cell_size,
+        ppc,
+        format,
+        80,
+        tiles::MAX_FULL_PX,
+        era,
+    )?;
     let ppc_f = ppc as f64;
+    let lights = match era {
+        Some(_) => floor.with_era(era).lights(),
+        None => floor.lights.clone(),
+    };
+    let era_suffix = era.map(|e| format!(" – {}", e.name)).unwrap_or_default();
     Ok(PublishMap {
-        name: map_name(doc, &floor_name),
+        name: format!("{}{era_suffix}", map_name(doc, &floor_name)),
         canvas_w: w,
         canvas_h: h,
         cell_px: ppc_f,
@@ -189,8 +212,7 @@ pub fn build_map(
         image_ext: format.ext().to_string(),
         // Walls and lights are in picture pixels: re-derive at the picture's scale.
         walls: tiles::derive_walls(floor, ppc_f),
-        lights: floor
-            .lights
+        lights: lights
             .iter()
             .map(|l| {
                 let mut l = l.clone();
@@ -201,7 +223,17 @@ pub fn build_map(
             })
             .collect(),
         rooms: Some(rooms::to_nd_world(&floor.grid, ppc_f)?),
-        elements: build_elements(floor, &walls, ppc_f, cell_size),
+        elements: {
+            let lights = match era {
+                Some(_) => floor.with_era(era).lights(),
+                None => floor.lights.clone(),
+            };
+            let labels = match era {
+                Some(_) => floor.with_era(era).labels(),
+                None => floor.labels.clone(),
+            };
+            build_elements(floor, &walls, ppc_f, cell_size, &lights, &labels)
+        },
     })
 }
 
@@ -218,6 +250,8 @@ pub fn build_elements(
     walls: &[ndcart_core::Wall],
     ppc: f64,
     cell_size: f64,
+    lights: &[ndcart_core::Light],
+    labels: &[ndcart_core::Label],
 ) -> Vec<serde_json::Value> {
     let k = ppc / cell_size;
     let r = |v: f64| (v * 100.0).round() / 100.0;
@@ -278,8 +312,9 @@ pub fn build_elements(
         }));
     }
 
-    // Lights: a small disc in the light's colour.
-    for l in &floor.lights {
+    // Lights: a small disc in the light's colour (the era's on states do not
+    // matter for the drawn disc, but which lights exist does).
+    for l in lights {
         let rad = (l.range * ppc * 0.4).clamp(3.0, 60.0);
         out.push(serde_json::json!({
             "id": format!("{}-lt-{}", floor.id, l.id),
@@ -297,8 +332,10 @@ pub fn build_elements(
     }
 
     // Labels: text at the stored spot. Labels live in cell coordinates
-    // (unlike lights, which are px at the document's cell size).
-    for lb in &floor.labels {
+    // (unlike lights, which are px at the document's cell size). The caller
+    // passes the audience- and era-filtered set, so a hidden label never
+    // becomes a player-visible element.
+    for lb in labels {
         out.push(serde_json::json!({
             "id": format!("{}-lb-{}", floor.id, lb.id),
             "type": "text",
@@ -314,11 +351,19 @@ pub fn build_elements(
     out
 }
 
-/// Build the map, stepping the resolution down (by a quarter each time, never
-/// below 8 px per square) until the picture fits under `cap_bytes`. Returns the
-/// map and the pixels-per-square it ended at. The lattice, walls, lights and
-/// rooms are all re-derived at the new scale, so they stay aligned.
-pub fn build_map_fitted(
+#[cfg(test)]
+fn build_map(
+    doc: &store::StoredDoc,
+    floor_id: Option<&str>,
+    ppc: i64,
+    format: tiles::ImageFormat,
+    audience: Audience,
+) -> Result<PublishMap, String> {
+    build_map_era(doc, floor_id, ppc, format, audience, None)
+}
+
+#[cfg(test)]
+fn build_map_fitted(
     doc: &store::StoredDoc,
     floor_id: Option<&str>,
     ppc: i64,
@@ -326,9 +371,22 @@ pub fn build_map_fitted(
     cap_bytes: usize,
     audience: Audience,
 ) -> Result<(PublishMap, i64), String> {
+    build_map_fitted_era(doc, floor_id, ppc, format, cap_bytes, audience, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_map_fitted_era(
+    doc: &store::StoredDoc,
+    floor_id: Option<&str>,
+    ppc: i64,
+    format: tiles::ImageFormat,
+    cap_bytes: usize,
+    audience: Audience,
+    era: Option<&ndcart_core::doc::Era>,
+) -> Result<(PublishMap, i64), String> {
     let mut ppc = ppc;
     loop {
-        let map = build_map(doc, floor_id, ppc, format, audience)?;
+        let map = build_map_era(doc, floor_id, ppc, format, audience, era)?;
         if map.image.len() <= cap_bytes {
             return Ok((map, ppc));
         }
@@ -444,6 +502,8 @@ struct Job {
     doc: String,
     floor: String,
     existing: Option<String>,
+    /// The era this job publishes, by id (None = the everyday map).
+    era: Option<String>,
     payload: Payload,
 }
 
@@ -520,13 +580,46 @@ fn prepare(st: &store::Store, id: &str, a: &Args) -> Result<Vec<Job>, String> {
             .nd_world
             .as_ref()
             .filter(|l| l.server == a.server && l.world == a.world);
-        // The legacy single slug belongs to the first floor.
-        let existing = link.and_then(|l| {
-            l.floor_slugs
-                .get(fid)
-                .cloned()
-                .or_else(|| (Some(fid) == first_floor.as_ref()).then(|| l.slug.clone()))
-        });
+        // An era publishes under its own slug; the everyday lookup only when
+        // no era is named.
+        let (era_id, era) = match &a.era {
+            Some(name) => {
+                let e = floor
+                    .eras
+                    .iter()
+                    .find(|e| e.name == *name || e.id == *name)
+                    .ok_or_else(|| {
+                        format!(
+                            "floor '{}' has no era '{}' (has: {})",
+                            floor.name,
+                            name,
+                            floor
+                                .eras
+                                .iter()
+                                .map(|e| e.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?;
+                (Some(e.id.clone()), Some(e))
+            }
+            None => (None, None),
+        };
+        let existing = if era_id.is_some() {
+            link.and_then(|l| {
+                era_id
+                    .as_deref()
+                    .and_then(|id| l.era_slugs.get(id).cloned())
+            })
+        } else {
+            // The legacy single slug belongs to the first floor.
+            link.and_then(|l| {
+                l.floor_slugs
+                    .get(fid)
+                    .cloned()
+                    .or_else(|| (Some(fid) == first_floor.as_ref()).then(|| l.slug.clone()))
+            })
+        };
         let (payload, used_ppc) = if is_region {
             let replace = !(a.keep_overlay && existing.is_some());
             let (m, p) =
@@ -536,7 +629,8 @@ fn prepare(st: &store::Store, id: &str, a: &Args) -> Result<Vec<Job>, String> {
             }
             (Payload::Region(m), p)
         } else {
-            let (mut m, p) = build_map_fitted(doc, Some(fid), a.ppc, a.format, cap, a.audience)?;
+            let (mut m, p) =
+                build_map_fitted_era(doc, Some(fid), a.ppc, a.format, cap, a.audience, era)?;
             if a.no_elements {
                 m.elements.clear();
             }
@@ -552,6 +646,7 @@ fn prepare(st: &store::Store, id: &str, a: &Args) -> Result<Vec<Job>, String> {
             doc: id.to_string(),
             floor: fid.clone(),
             existing,
+            era: era_id,
             payload,
         });
     }
@@ -673,15 +768,22 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                 .clone()
                 .filter(|l| l.server == a.server && l.world == a.world)
                 .unwrap_or(NdWorldLink {
+                    era_slugs: Default::default(),
                     server: a.server.clone(),
                     world: a.world.clone(),
                     slug: slug.clone(),
                     floor_slugs: Default::default(),
                 });
-            if Some(&job.floor) == first_floor.as_ref() {
-                link.slug = slug.clone();
+            if let Some(era_id) = &job.era {
+                // An era variant keeps its own slug; the everyday map's link
+                // is untouched, so re-publishing the base never targets it.
+                link.era_slugs.insert(era_id.clone(), slug.clone());
+            } else {
+                if Some(&job.floor) == first_floor.as_ref() {
+                    link.slug = slug.clone();
+                }
+                link.floor_slugs.insert(job.floor.clone(), slug.clone());
             }
-            link.floor_slugs.insert(job.floor.clone(), slug.clone());
             doc.manifest.nd_world = Some(link);
             store::save_doc(Some(&a.data_dir), doc);
             let url = format!(
@@ -840,6 +942,7 @@ pub async fn run_open(args: Vec<String>) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     crate::assets::init(Some(data.join("assets")));
     let link = NdWorldLink {
+        era_slugs: Default::default(),
         server,
         world,
         slug: slug.clone(),
@@ -867,7 +970,7 @@ mod tests {
         let d = doc();
         let floor = &d.floors[0];
         let walls = tiles::derive_walls(floor, 32.0);
-        let els = build_elements(floor, &walls, 32.0, 32.0);
+        let els = build_elements(floor, &walls, 32.0, 32.0, &floor.lights, &floor.labels);
 
         // One rect per space over its bounding box.
         let rect = els
@@ -897,7 +1000,7 @@ mod tests {
         );
 
         // Determinism: same floor, same order, same ids.
-        let again = build_elements(floor, &walls, 32.0, 32.0);
+        let again = build_elements(floor, &walls, 32.0, 32.0, &floor.lights, &floor.labels);
         assert_eq!(els, again);
     }
 
@@ -915,11 +1018,18 @@ mod tests {
 
         let gm_floor = ndcart_core::for_audience(&d.floors[0], Audience::Gm);
         let gm_walls = tiles::derive_walls(&gm_floor, 32.0);
-        let gm: Vec<_> = build_elements(&gm_floor, &gm_walls, 32.0, 32.0)
-            .iter()
-            .filter(|e| e["type"] == "line")
-            .map(|e| e["stroke"].clone())
-            .collect();
+        let gm: Vec<_> = build_elements(
+            &gm_floor,
+            &gm_walls,
+            32.0,
+            32.0,
+            &gm_floor.lights,
+            &gm_floor.labels,
+        )
+        .iter()
+        .filter(|e| e["type"] == "line")
+        .map(|e| e["stroke"].clone())
+        .collect();
         assert!(
             gm.contains(&serde_json::json!("#b06ad0")),
             "the GM sees the secret"
@@ -927,11 +1037,18 @@ mod tests {
 
         let pl_floor = ndcart_core::for_audience(&d.floors[0], Audience::Player);
         let pl_walls = tiles::derive_walls(&pl_floor, 32.0);
-        let pl: Vec<_> = build_elements(&pl_floor, &pl_walls, 32.0, 32.0)
-            .iter()
-            .filter(|e| e["type"] == "line")
-            .map(|e| e["stroke"].clone())
-            .collect();
+        let pl: Vec<_> = build_elements(
+            &pl_floor,
+            &pl_walls,
+            32.0,
+            32.0,
+            &pl_floor.lights,
+            &pl_floor.labels,
+        )
+        .iter()
+        .filter(|e| e["type"] == "line")
+        .map(|e| e["stroke"].clone())
+        .collect();
         assert!(
             !pl.contains(&serde_json::json!("#b06ad0")),
             "players see a plain wall"
@@ -1111,8 +1228,16 @@ mod tests {
         let d = doc();
         let big = build_map(&d, None, 64, tiles::ImageFormat::Png, Audience::Gm).unwrap();
         let cap = big.image.len() / 2;
-        let (m, ppc) =
-            build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, cap, Audience::Gm).unwrap();
+        let (m, ppc) = build_map_fitted_era(
+            &d,
+            None,
+            64,
+            tiles::ImageFormat::Png,
+            cap,
+            Audience::Gm,
+            None,
+        )
+        .unwrap();
         assert!((MIN_PPC..64).contains(&ppc), "{ppc}");
         assert!(m.image.len() <= cap);
         // Everything was re-derived at the new scale: canvas, cell, light, walls.
@@ -1125,9 +1250,17 @@ mod tests {
             }
         }
         // An impossible cap is refused with advice, not looped on.
-        let e = build_map_fitted(&d, None, 64, tiles::ImageFormat::Png, 10, Audience::Gm)
-            .err()
-            .unwrap();
+        let e = build_map_fitted_era(
+            &d,
+            None,
+            64,
+            tiles::ImageFormat::Png,
+            10,
+            Audience::Gm,
+            None,
+        )
+        .err()
+        .unwrap();
         assert!(e.contains("avif") && e.contains("max_upload_mb"), "{e}");
         // A roomy cap changes nothing.
         let (_, same) = build_map_fitted(

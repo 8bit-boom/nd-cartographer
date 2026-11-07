@@ -55,6 +55,17 @@ pub enum Op {
     RemoveEncounter {
         space: String,
     },
+    /// A floor variant (night, ruined...), or a change to one.
+    PutEra {
+        era: crate::doc::Era,
+    },
+    RemoveEra {
+        id: String,
+    },
+    /// Which era the studio shows and exports (None = the everyday state).
+    SetActiveEra {
+        id: Option<String>,
+    },
     UpsertZone {
         zone: crate::zone::Zone,
     },
@@ -271,6 +282,19 @@ impl Op {
                     encounter: e.clone(),
                 })
             }
+            Op::PutEra { era } => match floor.era(&era.id) {
+                Some(prev) => Ok(Op::PutEra { era: prev.clone() }),
+                None => Ok(Op::RemoveEra { id: era.id.clone() }),
+            },
+            Op::RemoveEra { id } => {
+                let era = floor
+                    .era(id)
+                    .ok_or_else(|| CoreError::NotFound(format!("era {id}")))?;
+                Ok(Op::PutEra { era: era.clone() })
+            }
+            Op::SetActiveEra { .. } => Ok(Op::SetActiveEra {
+                id: floor.active_era.clone(),
+            }),
             Op::UpsertZone { zone } => match floor.zones.iter().find(|z| z.id == zone.id) {
                 Some(prev) => Ok(Op::UpsertZone { zone: prev.clone() }),
                 None => Ok(Op::RemoveZone {
@@ -470,6 +494,16 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::UnlinkEntity { space } => floor.unlink_entity(space)?,
         Op::PutEncounter { encounter } => floor.put_encounter(encounter.clone())?,
         Op::RemoveEncounter { space } => floor.remove_encounter(space)?,
+        Op::PutEra { era } => floor.put_era(era.clone())?,
+        Op::RemoveEra { id } => floor.remove_era(id)?,
+        Op::SetActiveEra { id } => {
+            if let Some(id) = id {
+                floor
+                    .era(id)
+                    .ok_or_else(|| CoreError::NotFound(format!("era {id}")))?;
+            }
+            floor.active_era = id.clone();
+        }
         Op::UpsertZone { zone } => floor.upsert_zone(zone.clone())?,
         Op::RemoveZone { id } => floor.remove_zone(id)?,
         Op::UpsertLabel { label } => floor.upsert_label(label.clone())?,
@@ -1589,6 +1623,75 @@ mod tests {
         });
         f.put_overlay(again, None).unwrap();
         assert_eq!(f.markers[3].label, "moved");
+    }
+
+    #[test]
+    fn an_era_is_journaled_and_undoes_exactly() {
+        use crate::doc::{Era, Grade};
+        use crate::grid::{default_space, SpaceKind};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.grid
+            .upsert_space(default_space("a", "Hall", SpaceKind::Room))
+            .unwrap();
+        f.add_light(crate::doc::Light {
+            id: "l1".into(),
+            x: 8.0,
+            y: 8.0,
+            range: 4.0,
+            color: "#ffcc88".into(),
+            intensity: 0.8,
+            on: true,
+            label: None,
+        })
+        .unwrap();
+        let night = |on: bool| Era {
+            id: "night".into(),
+            name: "Night".into(),
+            lights: [("l1".to_string(), on)].into_iter().collect(),
+            hidden: Default::default(),
+            grade: Grade {
+                tint: "#0a1030".into(),
+                tint_amount: 0.4,
+                saturation: 0.7,
+                contrast: 1.1,
+                brightness: 0.8,
+            },
+        };
+        let mut j = Journal::default();
+        j.push(&mut f, &Op::PutEra { era: night(true) }).unwrap();
+        j.push(
+            &mut f,
+            &Op::SetActiveEra {
+                id: Some("night".into()),
+            },
+        )
+        .unwrap();
+        // The era view flips the lamp. (Views borrow the floor, so each read
+        // is scoped before the journal mutates it again.)
+        let on = {
+            let view = f.with_era(f.era("night"));
+            view.lights()[0].on
+        };
+        assert!(on);
+        j.push(&mut f, &Op::PutEra { era: night(false) }).unwrap();
+        let on = {
+            let view = f.with_era(f.era("night"));
+            view.lights()[0].on
+        };
+        assert!(!on, "the override landed");
+        // Undo the override: back to on; undo again: gone with the era active.
+        j.undo_last(&mut f).unwrap();
+        let on = {
+            let view = f.with_era(f.era("night"));
+            view.lights()[0].on
+        };
+        assert!(on);
+        j.undo_last(&mut f).unwrap();
+        assert_eq!(f.active_era.as_deref(), None, "undo also undid the switch");
+        assert!(
+            f.era("night").is_some(),
+            "the era itself needs a third undo"
+        );
     }
 
     #[test]
