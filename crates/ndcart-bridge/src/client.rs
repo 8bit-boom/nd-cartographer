@@ -392,6 +392,48 @@ impl Bridge {
             .collect())
     }
 
+    /// The world's random tables (plan 21.4): `GET /api/tables.json`, world-
+    /// scoped — furnishing and encounter stocking roll the world's own tables.
+    pub async fn tables(&self) -> Result<serde_json::Value, BridgeError> {
+        let resp = self.send(self.req(Method::GET, "/api/tables.json")).await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("tables answer: {e}")))
+    }
+
+    /// Create a reusable encounter template (plan 21.3, the nd-world tier-1
+    /// route): creatures as "name" or "name xN" lines. GM-only nd-world side.
+    pub async fn combat_template(
+        &self,
+        name: &str,
+        creatures: &[String],
+        ruleset: Option<&str>,
+    ) -> Result<serde_json::Value, BridgeError> {
+        let body = json!({
+            "name": name,
+            "creatures": creatures,
+            "ruleset": ruleset.unwrap_or(""),
+        });
+        let resp = self
+            .send(self.req(Method::POST, "/api/combat/templates").json(&body))
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("template answer: {e}")))
+    }
+
     /// One entity's lore preview (`GET /api/entity/{id}/preview`): name,
     /// kind, summary, body (markdown), tags, image - the two-way lore sync's
     /// read half (plan 21.2). The viewer's own access rules apply nd-world

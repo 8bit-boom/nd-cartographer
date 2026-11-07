@@ -1007,6 +1007,183 @@ fn yes_bool() -> bool {
     true
 }
 
+/// `GET /api/world/tables` — the world's random tables (plan 21.4), so a
+/// room's contents can be rolled from the world's own tables.
+async fn world_tables(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
+    #[cfg(feature = "bridge")]
+    {
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        if cfg.direct.is_some() {
+            return Err(ApiError(CoreError::Invalid(
+                "tables live in nd-world; a standalone model has none".into(),
+            )));
+        }
+        let backend = draft::Backend::connect(&cfg)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        let draft::Backend::World(bridge, _) = &backend else {
+            return Err(ApiError(CoreError::Invalid(
+                "tables live in nd-world".into(),
+            )));
+        };
+        let tables = bridge
+            .tables()
+            .await
+            .map_err(|e| ApiError(CoreError::Invalid(e.to_string())))?;
+        Ok(Json(tables))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
+}
+
+/// `POST /api/docs/{id}/stock-room` `{floor, room, table_name}` — roll the
+/// named world table (one weighted pick per click) into the room's encounter
+/// creatures. One undo step. Needs nd-world; the studio-side encounter is
+/// GM information and never publishes to players.
+async fn stock_room(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let room = b
+        .get("room")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError(CoreError::Invalid("body needs {room, table_name}".into())))?
+        .to_string();
+    let table_name = b
+        .get("table_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError(CoreError::Invalid("body needs {room, table_name}".into())))?
+        .to_string();
+    let floor_id = b.get("floor").and_then(|v| v.as_str()).map(str::to_string);
+
+    // The table comes from nd-world (its own roll semantics are a weighted
+    // pick; the studio rolls locally so repeated picks are visible).
+    #[cfg(feature = "bridge")]
+    let entries: Vec<String> = {
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        if cfg.direct.is_some() {
+            return Err(ApiError(CoreError::Invalid(
+                "tables live in nd-world; a standalone model has none".into(),
+            )));
+        }
+        let backend = draft::Backend::connect(&cfg)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        let draft::Backend::World(bridge, _) = &backend else {
+            return Err(ApiError(CoreError::Invalid(
+                "tables live in nd-world".into(),
+            )));
+        };
+        let tables = bridge
+            .tables()
+            .await
+            .map_err(|e| ApiError(CoreError::Invalid(e.to_string())))?;
+        let tbl = tables
+            .get("tables")
+            .and_then(|t| t.as_array())
+            .and_then(|a| {
+                a.iter()
+                    .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(&table_name))
+            })
+            .ok_or_else(|| ApiError(CoreError::NotFound(format!("table {table_name}"))))?
+            .clone();
+        tbl.get("entries")
+            .and_then(|e| e.as_array())
+            .map(|entries| {
+                let mut pool: Vec<String> = Vec::new();
+                for e in entries {
+                    let label = e
+                        .get("label")
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let weight =
+                        e.get("weight").and_then(|w| w.as_i64()).unwrap_or(1).max(1) as usize;
+                    for _ in 0..weight {
+                        pool.push(label.clone());
+                    }
+                }
+                pool
+            })
+            .ok_or_else(|| {
+                ApiError(CoreError::NotFound(format!(
+                    "table {table_name} has no entries"
+                )))
+            })?
+    };
+    #[cfg(not(feature = "bridge"))]
+    let entries: Vec<String> = Vec::new();
+    #[cfg(not(feature = "bridge"))]
+    let _ = table_name;
+
+    #[cfg(feature = "bridge")]
+    let pick = {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        entries
+            .get(rng.gen_range(0..entries.len()))
+            .cloned()
+            .unwrap_or_default()
+    };
+    #[cfg(not(feature = "bridge"))]
+    let pick = String::new();
+
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor = match &floor_id {
+        Some(f) => {
+            ndcart_core::doc::floors_by_id(&doc.floors, f)?;
+            f.clone()
+        }
+        None => doc.floors[0].id.clone(),
+    };
+    let idx = ndcart_core::doc::floors_by_id(&doc.floors, &floor)?;
+    if !doc.floors[idx].grid.spaces.contains_key(&room) {
+        return Err(ApiError(CoreError::NotFound(format!("room {room}"))));
+    }
+    let existing = doc.floors[idx]
+        .encounters
+        .iter()
+        .find(|e| e.space == room)
+        .cloned();
+    let mut creatures: Vec<String> = existing
+        .as_ref()
+        .map(|e| e.creatures.clone())
+        .unwrap_or_default();
+    if !pick.is_empty() {
+        creatures.push(pick.clone());
+    }
+    creatures.truncate(ndcart_core::doc::MAX_CREATURE_LINES);
+    let (enc_id, note) = existing
+        .as_ref()
+        .map(|x| (x.id.clone(), x.note.clone()))
+        .unwrap_or_else(|| (ndcart_core::ids::new_id("enc"), String::new()));
+    let e = ndcart_core::doc::Encounter {
+        id: enc_id,
+        space: room.clone(),
+        creatures,
+        note,
+    };
+    doc.apply_ops(&floor, &[ndcart_core::Op::PutEncounter { encounter: e }])?;
+    let rev = doc.rev;
+    store::save_doc(app.data_dir.as_deref(), doc);
+    drop(store);
+    Ok(Json(
+        serde_json::json!({ "ok": true, "rolled": pick, "rev": rev }),
+    ))
+}
+
 /// `GET /api/world/entities/{id}/preview` - the two-way lore sync's read
 /// half (plan 21.2): the linked entity's lore as nd-world shows the GM.
 /// Also returns the configured server so the UI can deep-link to the full

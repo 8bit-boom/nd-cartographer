@@ -30,6 +30,7 @@ tiny-skia = "0.11"
 # Pack manifest v2 (plan 22.1): reading and writing ndpack.toml.
 toml = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+rand = "0.8"
 futures-core = "0.3"
 futures-util = "0.3"
 ab_glyph = "0.2"
