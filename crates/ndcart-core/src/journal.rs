@@ -776,6 +776,7 @@ mod tests {
             color: "#112233".into(),
             kind: SpaceKind::Room,
             material: None,
+        tint: None,
         }
     }
 
@@ -1679,6 +1680,7 @@ mod tests {
                     color: "#7f5539".into(),
                     kind: SpaceKind::Room,
                     material: None,
+        tint: None,
                 },
             },
         )

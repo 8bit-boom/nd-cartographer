@@ -115,6 +115,11 @@ pub struct Space {
     /// `color`; an id the pack does not know falls back to `color` too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
+    /// `#rrggbb` multiplied into the material's colours (per-room recolor,
+    /// plan's honest-limits "tinting of materials"). None = untinted. The
+    /// flat-colour fallback ignores it (color already is the look).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tint: Option<String>,
 }
 
 /// One painted cell. (Serde shape: a list of triples rather than a map keyed
@@ -242,6 +247,11 @@ impl RoomGrid {
                 "color must be #rrggbb, got {}",
                 space.color
             )));
+        }
+        if let Some(tn) = &space.tint {
+            if !valid_color(tn) {
+                return Err(CoreError::Invalid(format!("tint must be #rrggbb, got {tn}")));
+            }
         }
         if let Some(m) = &space.material {
             let ok = !m.is_empty()
@@ -372,6 +382,7 @@ pub fn default_space(id: &str, name: &str, kind: SpaceKind) -> Space {
         color: "#334455".to_string(),
         kind,
         material: None,
+        tint: None,
     }
 }
 
@@ -410,6 +421,7 @@ mod tests {
             color: "#112233".into(),
             kind: SpaceKind::Room,
             material: None,
+        tint: None,
         })
         .unwrap();
         assert!(g.paint(&[CellKey::new(0, 0)], Some("nope")).is_err());

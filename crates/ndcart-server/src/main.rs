@@ -4134,6 +4134,7 @@ fn run_bench(args: Vec<String>) {
             kind: SpaceKind::Room,
             // Worst case for the baker: every cell borders a different material.
             material: Some(ndcart_paint::starter()[i].id.to_string()),
+        tint: None,
         };
         store::apply_ops_direct(&mut floor, &mut journal, &[Op::UpsertSpace { space }]).unwrap();
     }

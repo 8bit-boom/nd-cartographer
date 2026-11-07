@@ -3002,8 +3002,18 @@ function selSpaces() {
   return all.filter(s => state.sel.has(s.id));
 }
 function spaceOp(s, patch) {
-  const { id, name, color, kind, material } = { ...s, ...patch };
-  return { t: 'upsert_space', space: { id, name, color, kind, ...(material ? { material } : {}) } };
+  const { id, name, color, kind, material, tint } = { ...curRoom(s), ...patch };
+  const space = { id, name, color, kind, ...(material ? { material } : {}) };
+  // The outline does not carry tint; read it from the live floor unless the
+  // patch sets it (null clears).
+  space.tint = 'tint' in patch ? tint : (curFloor().grid.spaces[s.id] || {}).tint || null;
+  return { t: 'upsert_space', space };
+}
+// The outline row's fields; full data comes from the live grid.
+function curRoom(id) {
+  const o = curFloor().outline.spaces.find(x => x.id === id) || {};
+  const live = (curFloor().grid.spaces || {})[id] || {};
+  return { ...o, ...live };
 }
 
 function updateBulk() {
@@ -3100,6 +3110,15 @@ OK removes it.`);
     id: newId('enc'), space, creatures: list, note: String(note).slice(0, 500),
   } }]);
 };
+document.getElementById('bk-tint').onclick = async () => {
+  if (!state.sel.size) { statusEl.textContent = 'Select rooms to tint.'; return; }
+  const c = window.prompt('Tint colour (multiplied into the material; empty clears the tint)', '#c08080');
+  if (c === null) return;
+  const tint = c.trim() === '' ? null : c.trim();
+  if (tint && !/^#[0-9a-f]{6}$/i.test(tint)) { statusEl.textContent = 'Tint must be #rrggbb.'; return; }
+  postOps([{ t: 'batch', ops: selSpaces().map(s => spaceOp(s, { tint })) }]);
+};
+
 document.getElementById('bk-move').onclick = async () => {
   if (!state.sel.size) { statusEl.textContent = 'Select rooms to move.'; return; }
   const d = window.prompt('Move selected rooms by dx,dy cells (e.g. "6,0")', '0,0');

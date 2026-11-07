@@ -325,7 +325,7 @@ const FALLBACK: Surface = Surface::Flat([0x33, 0x44, 0x55]);
 /// What a space paints: a pack material, a picture-based custom material, or a flat colour.
 #[derive(Clone)]
 enum Surface {
-    Mat(&'static ndcart_paint::Material),
+    Mat(&'static ndcart_paint::Material, Option<[u8; 3]>),
     /// A picture repeated every `tile` cells (world coordinates, so tiles and
     /// the full render agree), looked up per pixel.
     Img(std::sync::Arc<tiny_skia::Pixmap>, f32, String),
@@ -333,13 +333,30 @@ enum Surface {
 }
 
 impl Surface {
+    fn tinted(self, tint: Option<&str>) -> Surface {
+        match (self, tint) {
+            (Surface::Mat(m, _), Some(t)) => Surface::Mat(m, Some(parse_hex(t))),
+            (s, _) => s,
+        }
+    }
+
     fn animated(&self) -> bool {
-        matches!(self, Surface::Mat(m) if m.animated())
+        matches!(self, Surface::Mat(m, _) if m.animated())
     }
 
     fn sample(&self, u: f32, v: f32) -> [u8; 3] {
         match self {
-            Surface::Mat(m) => m.sample(u, v, PAINT_SEED),
+            Surface::Mat(m, tint) => {
+                let c = m.sample(u, v, PAINT_SEED);
+                match tint {
+                    Some(t) => [
+                        ((u16::from(c[0]) * u16::from(t[0])) / 255) as u8,
+                        ((u16::from(c[1]) * u16::from(t[1])) / 255) as u8,
+                        ((u16::from(c[2]) * u16::from(t[2])) / 255) as u8,
+                    ],
+                    None => c,
+                }
+            }
             Surface::Img(pm, tile, _) => {
                 let (w, h) = (pm.width() as i64, pm.height() as i64);
                 let x = ((u / tile) * w as f32).floor() as i64;
@@ -355,7 +372,7 @@ impl Surface {
     }
     fn same_as(&self, o: &Surface) -> bool {
         match (self, o) {
-            (Surface::Mat(a), Surface::Mat(b)) => a.id == b.id,
+            (Surface::Mat(a, _), Surface::Mat(b, _)) => a.id == b.id,
             (Surface::Img(_, _, a), Surface::Img(_, _, b)) => a == b,
             (Surface::Flat(a), Surface::Flat(b)) => a == b,
             _ => false,
@@ -368,7 +385,7 @@ impl Surface {
 fn surface_for(material: Option<&str>, colour: &str) -> Surface {
     if let Some(id) = material {
         if let Some(m) = ndcart_paint::find(id) {
-            return Surface::Mat(m);
+            return Surface::Mat(m, None);
         }
         let assets = crate::assets::global();
         if let Some(c) = assets.find_custom(id, "material") {
@@ -386,7 +403,12 @@ fn surfaces_of(floor: &FloorDoc) -> std::collections::HashMap<&str, Surface> {
         .grid
         .spaces
         .iter()
-        .map(|(id, s)| (id.as_str(), surface_for(s.material.as_deref(), &s.color)))
+        .map(|(id, s)| {
+            (
+                id.as_str(),
+                surface_for(s.material.as_deref(), &s.color).tinted(s.tint.as_deref()),
+            )
+        })
         .collect()
 }
 
@@ -2265,6 +2287,7 @@ mod tests {
                     color: "#7f5539".into(),
                     kind: SpaceKind::Room,
                     material: None,
+        tint: None,
                 },
             },
         )
@@ -2991,6 +3014,7 @@ mod tests {
                 color: "#8a8a8a".into(),
                 kind: SpaceKind::Room,
                 material: None,
+        tint: None,
             })
             .unwrap();
         f.grid
@@ -3042,6 +3066,7 @@ mod tests {
                 color: "#ffffff".into(),
                 kind: ndcart_core::SpaceKind::Room,
                 material: None,
+        tint: None,
             })
             .unwrap();
         f.grid.paint(&[CellKey::new(0, 0)], Some("s")).unwrap();
@@ -3635,6 +3660,7 @@ mod tests {
                 color: "#d0d0d0".into(),
                 kind: SpaceKind::Room,
                 material: Some(mat.clone()),
+        tint: None,
             })
             .unwrap();
         f.add_stamp(mk_stamp("p", &stp, 3.5, 3.5), None).unwrap();
@@ -3671,6 +3697,7 @@ mod tests {
                 color: "#d0d0d0".into(),
                 kind: SpaceKind::Room,
                 material: Some("mat_000000000000".into()),
+        tint: None,
             })
             .unwrap();
         g2.add_stamp(mk_stamp("q", "stp_000000000000", 3.5, 3.5), None)
