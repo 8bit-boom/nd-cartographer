@@ -3061,7 +3061,6 @@ async fn doc_events(
 /// the pictures with the existing art pipeline and drops them into the pack.
 async fn theme_pack(
     State(app): State<App>,
-    Path(id): Path<String>,
     body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
@@ -3298,10 +3297,6 @@ struct TableBody {
     radius: f64,
     #[serde(default = "yes_bool")]
     darkness: bool,
-    /// The tablet companion sends `on: true` to turn the screen on with the
-    /// tap; absent leaves the on/off state as the GM set it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    on: Option<bool>,
 }
 fn d_radius() -> f64 {
     12.0
