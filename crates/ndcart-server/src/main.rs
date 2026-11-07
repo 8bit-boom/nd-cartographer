@@ -1016,7 +1016,25 @@ async fn furnish_rooms(
         None => doc.floors[0].id.clone(),
     };
     let idx = floors_by_id(&doc.floors, &floor_id)?;
-    let ops = ndcart_core::furnish::furnish(&doc.floors[idx], &b.spaces, b.seed, b.only_empty)?;
+    // Pack metadata v2: the lookup resolves a prop's footprint/clearance
+    // from its custom entry, or its natural size from the starter pack.
+    let meta_of = |asset: &str| -> (ndcart_core::assetmeta::AssetMeta, [f32; 2]) {
+        if let Some(def) = ndcart_paint::find_stamp(asset) {
+            (Default::default(), def.size)
+        } else if let Some(c) = assets::global().find_custom(asset, "stamp") {
+            let natural = [c.size, c.size];
+            (c.meta.clone(), natural)
+        } else {
+            (Default::default(), [1.0, 1.0])
+        }
+    };
+    let ops = ndcart_core::furnish::furnish_with(
+        &doc.floors[idx],
+        &b.spaces,
+        b.seed,
+        b.only_empty,
+        &meta_of,
+    )?;
     doc.apply_ops(&floor_id, &ops)?;
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
@@ -1485,10 +1503,33 @@ async fn list_stamps() -> Json<serde_json::Value> {
             .unwrap_or(1.0);
         stamps.push(serde_json::json!({
             "id": c.id, "name": c.name, "size": [c.size, c.size * aspect],
-            "custom": true, "origin": c.origin, "tags": c.tags,
+            "custom": true, "origin": c.origin, "tags": c.tags, "meta": c.meta,
         }));
     }
     Json(serde_json::json!({ "pack": "starter", "stamps": stamps }))
+}
+
+/// `POST /api/assets/{id}/meta` — set an asset's v2 metadata (footprint,
+/// clearance, placement, style tags, licence). The asset's picture is
+/// untouched.
+async fn set_asset_meta(
+    Path(id): Path<String>,
+    body: Result<Json<ndcart_core::assetmeta::AssetMeta>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(meta) = body.map_err(|_| {
+        ApiError(CoreError::Invalid(
+            "body must be the metadata object".into(),
+        ))
+    })?;
+    let kind = if meta.is_default() && assets::global().find_custom(&id, "material").is_some() {
+        "material"
+    } else {
+        "stamp"
+    };
+    assets::global()
+        .set_meta(&id, kind, meta)
+        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// `GET /api/stamps/{id}/icon.png` — a 64 px icon for the palette.
@@ -1736,6 +1777,7 @@ async fn make_material(
         let asset = a.put(&png)?;
         let mid = format!("mat_{}", &asset[..12]);
         a.register(assets::Custom {
+            meta: Default::default(),
             id: mid.clone(),
             name,
             kind: "material".into(),
@@ -1788,6 +1830,7 @@ async fn make_stamp(
         let asset = a.put(&synth::encode_png(&cut, cw, ch)?)?;
         let sid = format!("stp_{}", &asset[..12]);
         a.register(assets::Custom {
+            meta: Default::default(),
             id: sid.clone(),
             name,
             kind: "stamp".into(),
@@ -3062,6 +3105,7 @@ fn build_router(app: App) -> Router {
         .route("/api/materials", get(list_materials))
         .route("/api/assets", post(put_asset))
         .route("/api/assets/{id}", get(get_asset))
+        .route("/api/assets/{id}/meta", post(set_asset_meta))
         .route("/api/packs/export", get(export_pack))
         .route("/api/assets/{id}/make-material", post(make_material))
         .route(

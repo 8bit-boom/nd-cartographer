@@ -6,6 +6,7 @@
 //! (`cells` + `spaces` + `marks`; walls `{id, pts, kind, state}`; lights in
 //! squares with `range`/`intensity`), so publishing is a pass-through.
 
+pub mod assetmeta;
 pub mod base64;
 pub mod doc;
 pub mod error;

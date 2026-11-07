@@ -3329,6 +3329,7 @@ mod tests {
             &asset[..12]
         );
         a.register(crate::assets::Custom {
+            meta: Default::default(),
             id: id.clone(),
             name: "test".into(),
             kind: kind.into(),

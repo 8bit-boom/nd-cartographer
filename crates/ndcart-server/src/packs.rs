@@ -102,7 +102,21 @@ pub fn read_dir(dir: &Path) -> Result<Vec<Entry>, String> {
                     .and_then(|x| x.to_str())
                     .unwrap_or("")
                     .to_lowercase();
-                if !["png", "webp", "jpg", "jpeg", "json"].contains(&ext.as_str()) {
+                // Pictures become assets; json is pack metadata. The v2
+                // manifest (ndpack.toml) and licence files ride too - import()
+                // decides what each one is; a stray notes.txt stays out.
+                let base = path
+                    .file_name()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let meta_file = ext == "toml" && base == "ndpack.toml"
+                    || (ext == "txt"
+                        && (base == "license.txt"
+                            || base == "licence.txt"
+                            || base == "license"
+                            || base == "licence"));
+                if !["png", "webp", "jpg", "jpeg", "json"].contains(&ext.as_str()) && !meta_file {
                     continue;
                 }
                 let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {rel}: {e}"))?;
@@ -188,6 +202,7 @@ pub fn export_own(
         t.trim_matches('_').chars().take(40).collect()
     };
     let mut used = std::collections::BTreeSet::new();
+    let mut manifest: NdPackOut = NdPackOut::default();
     for (kind, dir) in [("stamp", "objects"), ("material", "terrain")] {
         for c in assets.customs(kind).into_iter().filter(|c| mine(c)) {
             let Some(bytes) = assets.get_bytes(&c.asset) else {
@@ -205,6 +220,21 @@ pub fn export_own(
             while !used.insert(path.clone()) {
                 path = format!("textures/{dir}/{base}_{n}.{ext}");
                 n += 1;
+            }
+            if !c.meta.is_default() {
+                manifest.assets.insert(
+                    path.clone(),
+                    PackEntryOut {
+                        footprint: c.meta.footprint.as_ref().map(|f| f.0.clone()),
+                        clearance: (c.meta.clearance != 0.0).then_some(c.meta.clearance),
+                        placement: (c.meta.placement
+                            != ndcart_core::assetmeta::Placement::default())
+                        .then_some(c.meta.placement.clone()),
+                        style_tags: (!c.meta.style_tags.is_empty())
+                            .then_some(c.meta.style_tags.clone()),
+                        license: c.meta.license.clone(),
+                    },
+                );
             }
             files.push((path, bytes.to_vec()));
             if kind == "stamp" {
@@ -230,6 +260,14 @@ pub fn export_own(
         "custom_color_overrides": {"enabled": false},
     });
     files.insert(0, ("pack.json".into(), info.to_string().into_bytes()));
+    // The v2 manifest: footprints, clearance, placement, licences - what
+    // another nd-cartographer reads back automatically (plan 22.1).
+    if !manifest.assets.is_empty() || manifest.license.is_some() {
+        match toml::to_string_pretty(&manifest) {
+            Ok(body) => files.insert(1, ("ndpack.toml".into(), body.into_bytes())),
+            Err(e) => eprintln!("ndpack.toml could not be written (skipped): {e}"),
+        }
+    }
     let refs: Vec<(&str, Vec<u8>)> = files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
     Ok((write_pck(&refs), stamps, mats))
 }
@@ -248,6 +286,79 @@ pub struct Report {
 enum Kind {
     Material,
     Stamp,
+}
+
+/// The v2 manifest as written into an exported pack (`ndpack.toml`).
+#[derive(Default, serde::Serialize)]
+struct NdPackOut {
+    license: Option<ndcart_core::assetmeta::License>,
+    assets: std::collections::BTreeMap<String, PackEntryOut>,
+}
+
+#[derive(serde::Serialize)]
+struct PackEntryOut {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    footprint: Option<Vec<[f32; 2]>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clearance: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placement: Option<ndcart_core::assetmeta::Placement>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    style_tags: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    license: Option<ndcart_core::assetmeta::License>,
+}
+
+/// A licence file a pack author shipped (read as terms text on import).
+fn is_license_file(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path).to_lowercase();
+    base == "license.txt" || base == "licence.txt" || base == "license" || base == "licence"
+}
+
+/// Draft style tags from the pack's own name: its words minus filler, so an
+/// imported pack is searchable by look later. The GM confirms or edits them.
+fn draft_style_tags(pack: &str) -> Vec<String> {
+    const FILLER: [&str; 8] = ["pack", "the", "and", "of", "set", "assets", "art", "volume"];
+    pack.split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| w.len() >= 3 && !FILLER.contains(&w.to_lowercase().as_str()))
+        .map(|w| w.to_lowercase())
+        .take(ndcart_core::assetmeta::MAX_STYLE_TAGS)
+        .collect()
+}
+
+/// One asset's overrides from `ndpack.toml` (the v2 authoring path).
+#[derive(Default, serde::Deserialize)]
+struct PackEntryOverride {
+    footprint: Option<Vec<[f32; 2]>>,
+    clearance: Option<f32>,
+    placement: Option<ndcart_core::assetmeta::Placement>,
+    style_tags: Option<Vec<String>>,
+    license: Option<ndcart_core::assetmeta::License>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct NdPackManifest {
+    license: Option<ndcart_core::assetmeta::License>,
+    #[serde(default)]
+    assets: std::collections::BTreeMap<String, PackEntryOverride>,
+}
+
+/// Parse an optional `ndpack.toml` at the pack root. Malformed manifests are
+/// reported, never fatal: the pictures still import.
+fn ndpack_overrides(entries: &[Entry]) -> NdPackManifest {
+    let Some(e) = entries
+        .iter()
+        .find(|e| e.path.to_lowercase() == "ndpack.toml")
+    else {
+        return NdPackManifest::default();
+    };
+    match toml::from_str::<NdPackManifest>(&String::from_utf8_lossy(&e.bytes)) {
+        Ok(m) => m,
+        Err(err) => {
+            eprintln!("ndpack.toml could not be read (ignored): {err}");
+            NdPackManifest::default()
+        }
+    }
 }
 
 fn classify(path: &str) -> Option<Kind> {
@@ -323,6 +434,29 @@ pub fn import(entries: &[Entry], fallback_name: &str, assets: &Assets) -> Result
         seed: -1,
         date: ndcart_core::doc::now_iso(),
     };
+    // Pack-asset metadata v2 (plan 22.1): the pack's name rides every item,
+    // a licence file becomes the licence block's terms, and an optional
+    // `ndpack.toml` at the pack root overrides per-asset (authoring path).
+    let mut pack_meta = ndcart_core::assetmeta::AssetMeta {
+        pack: Some(pack.clone()),
+        ..Default::default()
+    };
+    pack_meta.style_tags = draft_style_tags(&pack);
+    if let Some(lic) = entries.iter().find(|e| is_license_file(&e.path)) {
+        let terms = String::from_utf8_lossy(&lic.bytes[..lic.bytes.len().min(4_000)]).into_owned();
+        pack_meta.license = Some(ndcart_core::assetmeta::License {
+            identifier: String::new(),
+            commercial_map: ndcart_core::assetmeta::Rights::Unknown,
+            redistribution: ndcart_core::assetmeta::Rights::Unknown,
+            attribution_required: false,
+            terms,
+        });
+    }
+    let overrides = ndpack_overrides(entries);
+    if let Some(manifest_licence) = overrides.license {
+        // An author's structured licence beats a file excerpt.
+        pack_meta.license = Some(manifest_licence);
+    }
     let mut done = 0usize;
     for e in entries {
         let Some(kind) = classify(&e.path) else {
@@ -351,6 +485,26 @@ pub fn import(entries: &[Entry], fallback_name: &str, assets: &Assets) -> Result
                 squares.max(0.5),
             ),
         };
+        let mut meta = pack_meta.clone();
+        if let Some(o) = overrides.assets.get(&e.path) {
+            if let Some(f) = &o.footprint {
+                meta.footprint = Some(ndcart_core::assetmeta::Footprint(f.clone()));
+            }
+            if let Some(c) = o.clearance {
+                meta.clearance = c;
+            }
+            if let Some(p) = &o.placement {
+                meta.placement = p.clone();
+            }
+            if let Some(tags) = &o.style_tags {
+                if !tags.is_empty() {
+                    meta.style_tags = tags.clone();
+                }
+            }
+            if let Some(l) = &o.license {
+                meta.license = Some(l.clone());
+            }
+        }
         assets.register(Custom {
             id,
             name: pretty(&e.path),
@@ -359,6 +513,7 @@ pub fn import(entries: &[Entry], fallback_name: &str, assets: &Assets) -> Result
             size,
             origin: origin.clone(),
             tags: Vec::new(),
+            meta,
         })?;
         match kind {
             Kind::Stamp => rep.stamps += 1,
@@ -497,6 +652,7 @@ pub(crate) mod tests {
         let mk = |kind: &str, name: &str, prompt: &str, rgba: [u8; 4]| {
             let asset = a.put(&png(16, 16, rgba)).unwrap();
             a.register(Custom {
+                meta: Default::default(),
                 id: format!(
                     "{}_{}",
                     if kind == "stamp" { "stp" } else { "mat" },
@@ -556,6 +712,76 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn v2_metadata_rides_import_and_export() {
+        let dir = std::env::temp_dir().join(format!("ndcart-packv2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("objects")).unwrap();
+        std::fs::write(
+            dir.join("objects/table.png"),
+            png(256, 128, [180, 140, 90, 255]),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("LICENSE.txt"),
+            "CC-BY-4.0: share with attribution, no standalone redistribution.",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ndpack.toml"),
+            [
+                "[assets.\"objects/table.png\"]",
+                "clearance = 0.5",
+                "footprint = [[-1.5, -0.5], [1.5, -0.5], [1.5, 0.5]]",
+                "",
+                "[assets.\"objects/table.png\".placement]",
+                "align_to_wall = true",
+                "",
+                "[assets.\"objects/table.png\".license]",
+                "identifier = \"CC-BY-4.0\"",
+                "commercial_map = \"allowed\"",
+                "redistribution = \"forbidden\"",
+                "attribution_required = true",
+            ]
+            .join(
+                "
+",
+            ),
+        )
+        .unwrap();
+        let entries = read_dir(&dir).unwrap();
+        let a = store();
+        let rep = import(&entries, "Ink Workshop", &a).unwrap();
+        assert_eq!(rep.stamps, 1);
+
+        let stamp = a.customs("stamp").into_iter().next().unwrap();
+        assert_eq!(stamp.meta.pack.as_deref(), Some("Ink Workshop"));
+        assert!(
+            !stamp.meta.style_tags.is_empty(),
+            "drafted from the pack name"
+        );
+        let lic = stamp
+            .meta
+            .license
+            .as_ref()
+            .expect("the manifest licence wins");
+        assert_eq!(lic.identifier, "CC-BY-4.0");
+        assert_eq!(lic.commercial_map, ndcart_core::assetmeta::Rights::Allowed);
+        let fp = stamp.meta.footprint.as_ref().expect("override applied");
+        assert_eq!(fp.0.len(), 3);
+        assert!(stamp.meta.placement.align_to_wall);
+
+        // The exported pack carries the manifest back out.
+        let (pck, stamps_n, _m) = export_own(&a, "Ink Workshop", true).unwrap();
+        assert_eq!(stamps_n, 1);
+        let out = read_pck(&pck).unwrap();
+        assert!(out.iter().any(|e| e.path == "ndpack.toml"));
+        let toml_text =
+            String::from_utf8_lossy(&out.iter().find(|e| e.path == "ndpack.toml").unwrap().bytes);
+        assert!(toml_text.contains("footprint"), "{toml_text}");
+        assert!(toml_text.contains("CC-BY-4.0"));
+    }
+
+    #[test]
     fn a_plain_folder_imports_the_same_way() {
         let dir = std::env::temp_dir().join(format!("ndcart-pack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -573,7 +799,11 @@ pub(crate) mod tests {
         .unwrap();
         std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
         let entries = read_dir(&dir).unwrap();
-        assert_eq!(entries.len(), 2, "only pictures and json are read");
+        assert_eq!(
+            entries.len(),
+            2,
+            "pictures and pack json; notes.txt stays out (only licence/manifest txt-toml would ride)"
+        );
         let a = store();
         let rep = import(&entries, "My folder", &a).unwrap();
         assert_eq!(

@@ -817,6 +817,44 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             break;
         }
     }
+    // The rights audit (plan 22.5): every prop baked into a published map
+    // comes from the starter pack (MIT) or a GM-imported pack whose licence
+    // block is listed here, so the report can be checked before sharing.
+    let mut packs: std::collections::BTreeMap<String, serde_json::Value> = Default::default();
+    for job in &jobs {
+        let doc = &st.docs[&job.doc];
+        let floor = doc.floors.iter().find(|f| f.id == job.floor);
+        for s in floor.into_iter().flat_map(|f| &f.stamps) {
+            let (pack, license) = if ndcart_paint::find_stamp(&s.asset).is_some() {
+                ("nd-cartographer starter pack".to_string(), None)
+            } else if let Some(c) = crate::assets::global().find_custom(&s.asset, "stamp") {
+                (
+                    c.meta.pack.clone().unwrap_or_else(|| "imported art".into()),
+                    c.meta.license.clone(),
+                )
+            } else {
+                ("unknown".into(), None)
+            };
+            let e = packs
+                .entry(pack)
+                .or_insert_with(|| serde_json::json!({ "props": 0, "license": license }));
+            e["props"] = serde_json::json!(e["props"].as_i64().unwrap_or(0) + 1);
+        }
+    }
+    if !packs.is_empty() {
+        for (name, info) in &packs {
+            println!(
+                "rights: {} prop(s) from {} ({})",
+                info["props"],
+                name,
+                if info["license"].is_null() {
+                    "no licence stated"
+                } else {
+                    "licence stated in the report"
+                }
+            );
+        }
+    }
     if let Some(path) = &a.report {
         let body = serde_json::json!({
             "server": a.server,
@@ -825,6 +863,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             "updated": outcomes.iter().filter(|o| o.status == "updated").count(),
             "failed": outcomes.iter().filter(|o| o.status == "failed" || o.status == "not_sent").count(),
             "maps": outcomes,
+            "packs": packs,
         });
         std::fs::write(
             path,

@@ -36,6 +36,10 @@ pub struct Custom {
     /// Short search words the GM has confirmed (suggested by the AI, never applied unasked).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Pack-asset metadata v2 (plan 22.1): footprint, clearance, placement,
+    /// style tags, licence, pack. Defaults keep every v1 manifest loading.
+    #[serde(default)]
+    pub meta: ndcart_core::assetmeta::AssetMeta,
 }
 
 pub struct Assets {
@@ -105,6 +109,10 @@ impl Assets {
 
     /// Add (or replace) a custom material/stamp and save the list.
     pub fn register(&self, c: Custom) -> Result<(), String> {
+        c.meta
+            .validate()
+            .map_err(|e| format!("asset metadata: {e}"))?;
+
         if !ndcart_core::hash::is_asset_id(&c.asset) || self.get_bytes(&c.asset).is_none() {
             return Err("that picture is not in the asset store".into());
         }
@@ -129,6 +137,29 @@ impl Assets {
         c.tags = tags;
         if let Some(dir) = &self.dir {
             let body = serde_json::to_string(&*list).map_err(|e| e.to_string())?;
+            crate::store::write_atomic(&dir.join("custom.json"), body.as_bytes())
+                .map_err(|e| format!("cannot save the library: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Replace an asset's v2 metadata (validated; the asset itself is untouched).
+    pub fn set_meta(
+        &self,
+        id: &str,
+        kind: &str,
+        meta: ndcart_core::assetmeta::AssetMeta,
+    ) -> Result<(), String> {
+        meta.validate()
+            .map_err(|e| format!("asset metadata: {e}"))?;
+        let mut custom = self.custom.lock().expect("custom assets");
+        let c = custom
+            .iter_mut()
+            .find(|c| c.id == id && c.kind == kind)
+            .ok_or_else(|| format!("no {kind} {id}"))?;
+        c.meta = meta;
+        if let Some(dir) = &self.dir {
+            let body = serde_json::to_string(&*custom).map_err(|e| e.to_string())?;
             crate::store::write_atomic(&dir.join("custom.json"), body.as_bytes())
                 .map_err(|e| format!("cannot save the library: {e}"))?;
         }

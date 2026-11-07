@@ -152,16 +152,47 @@ pub fn furnish(
     seed: u64,
     only_empty: bool,
 ) -> CoreResult<Vec<Op>> {
+    furnish_with(floor, space_ids, seed, only_empty, &|_| {
+        (crate::assetmeta::AssetMeta::default(), [1.0, 1.0])
+    })
+}
+
+/// [`furnish`] with pack metadata v2 (plan 22.1): `meta_of` resolves an
+/// asset id to its metadata and natural size, so a prop's footprint (its
+/// collision box) and clearance are honoured - a 2x1 bed takes two cells,
+/// and a prop with clearance keeps that many cells clear around it (doors
+/// above all). Unknown assets behave exactly as before.
+pub fn furnish_with(
+    floor: &FloorDoc,
+    space_ids: &[String],
+    seed: u64,
+    only_empty: bool,
+    meta_of: &dyn Fn(&str) -> (crate::assetmeta::AssetMeta, [f32; 2]),
+) -> CoreResult<Vec<Op>> {
     if space_ids.is_empty() {
         return Err(CoreError::Invalid("choose the rooms to furnish".into()));
     }
     let grid = &floor.grid;
     let mut ops: Vec<Op> = Vec::new();
+    // Cells already occupied by props. A prop may cover several cells (its
+    // footprint box); existing stamps keep their single-cell approximation
+    // (their own footprints, if any, are what placed them).
     let mut taken: BTreeSet<(i32, i32)> = floor
         .stamps
         .iter()
         .map(|s| (s.x.floor() as i32, s.y.floor() as i32))
         .collect();
+    // A placement covers its box, centred as best as whole cells allow.
+    let mark_taken = |taken: &mut BTreeSet<(i32, i32)>, c: CellKey, box_wh: [f32; 2]| {
+        let (bw, bh) = (box_wh[0].ceil() as i32, box_wh[1].ceil() as i32);
+        let x0 = c.x - (bw - 1) / 2;
+        let y0 = c.y - (bh - 1) / 2;
+        for dy in 0..bh {
+            for dx in 0..bw {
+                taken.insert((x0 + dx, y0 + dy));
+            }
+        }
+    };
     let mut room = MAX_STAMPS.saturating_sub(floor.stamps.len());
     for (si, id) in space_ids.iter().enumerate() {
         let space = grid
@@ -181,21 +212,15 @@ pub fn furnish(
             continue;
         }
         // A cell is "free" for props only if no door/opening touches it or a neighbour.
+        // With metadata v2 the keep-out set is computed once per space: every
+        // cell within an asset's clearance of a door-touching cell, so a wide
+        // table's whole box stays out, not just its centre.
         let edges = [Edge::North, Edge::East, Edge::South, Edge::West];
-        let door_near = |c: CellKey| {
-            let touches = |cc: CellKey| {
-                edges.iter().any(|e| {
-                    grid.mark_between(cc, *e)
-                        .is_some_and(|m| m.kind != crate::grid::MarkKind::Window)
-                })
-            };
-            touches(c)
-                || [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| {
-                    touches(CellKey {
-                        x: c.x + dx,
-                        y: c.y + dy,
-                    })
-                })
+        let touches_door = |cc: CellKey| {
+            edges.iter().any(|e| {
+                grid.mark_between(cc, *e)
+                    .is_some_and(|m| m.kind != crate::grid::MarkKind::Window)
+            })
         };
         // How many of its four sides are walls (edge to another space or the void).
         let walls_of = |c: &CellKey| {
@@ -207,6 +232,44 @@ pub fn furnish(
         let mut rng = Rng(seed ^ (si as u64).wrapping_mul(0x9E37_79B9) ^ 0xF0F0_1234);
         for rule in recipe(&space.name, space.kind) {
             let want = (cells.len() / rule.per.max(1)).max(rule.min);
+            // The rule's asset, through the metadata lookup: its collision box
+            // (footprint or natural size, scaled) and its clearance.
+            let (meta, natural) = meta_of(rule.asset);
+            let clear = meta.clearance.ceil() as i32;
+            // The cells a placement covers, and whether they are all legal:
+            // inside the room, unoccupied, and clear of the door keep-out set
+            // (door cells ringed by the asset's clearance).
+            // The keep-out set: door-touching cells, their neighbours (the
+            // old rule), and the asset's clearance ring on top. A 4-neighbour
+            // ring is the classic behaviour; clearance widens it to a square.
+            let mut keepout: BTreeSet<(i32, i32)> = BTreeSet::new();
+            for c in &cells {
+                if touches_door(*c) {
+                    keepout.insert((c.x, c.y));
+                    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        keepout.insert((c.x + dx, c.y + dy));
+                    }
+                    for dy in -(clear)..=clear {
+                        for dx in -(clear)..=clear {
+                            keepout.insert((c.x + dx, c.y + dy));
+                        }
+                    }
+                }
+            }
+            let box_for = |scale: f32| meta.collision_box(natural, scale);
+            let covers = |c: CellKey, wh: [f32; 2]| -> Vec<(i32, i32)> {
+                let (bw, bh) = (wh[0].ceil() as i32, wh[1].ceil() as i32);
+                let x0 = c.x - (bw - 1) / 2;
+                let y0 = c.y - (bh - 1) / 2;
+                (0..bh)
+                    .flat_map(|dy| (0..bw).map(move |dx| (x0 + dx, y0 + dy)))
+                    .collect()
+            };
+            let legal = |taken: &BTreeSet<(i32, i32)>, c: CellKey, wh: [f32; 2]| -> bool {
+                covers(c, wh)
+                    .iter()
+                    .all(|p| inside.contains(p) && !taken.contains(p) && !keepout.contains(p))
+            };
             let mut pool: Vec<CellKey> = cells
                 .iter()
                 .copied()
@@ -217,7 +280,7 @@ pub fn furnish(
                         Where::Wall => w == 1,
                         Where::Middle => w == 0,
                     };
-                    ok && !door_near(*c) && !taken.contains(&(c.x, c.y))
+                    ok && legal(&taken, *c, box_for(rule.scale.0))
                 })
                 .collect();
             // A rule with nothing to stand on falls back to any free cell, so a 2x2 closet still gets a crate.
@@ -225,7 +288,7 @@ pub fn furnish(
                 pool = cells
                     .iter()
                     .copied()
-                    .filter(|c| !door_near(*c) && !taken.contains(&(c.x, c.y)))
+                    .filter(|c| legal(&taken, *c, box_for(rule.scale.0)))
                     .collect();
             }
             for _ in 0..want.min(pool.len()) {
@@ -237,8 +300,8 @@ pub fn furnish(
                     ));
                 }
                 room -= 1;
-                taken.insert((c.x, c.y));
                 let scale = rule.scale.0 + (rule.scale.1 - rule.scale.0) * rng.unit();
+                mark_taken(&mut taken, c, box_for(scale));
                 ops.push(Op::AddStamp {
                     stamp: Stamp {
                         id: format!("fu{:x}_{}", seed & 0xFFFF_FFFF, ops.len()),
@@ -313,6 +376,68 @@ mod tests {
             j.push(&mut out, &op).unwrap();
         }
         out
+    }
+
+    #[test]
+    fn footprints_take_their_cells_and_clearance_pushes_off_doors() {
+        use crate::assetmeta::{AssetMeta, Footprint};
+        let mut f = FloorDoc::new("f".into(), "G".into());
+        f.grid
+            .upsert_space(default_space("k", "Kitchen", SpaceKind::Room))
+            .unwrap();
+        // A 5x3 kitchen with a door on the north edge of (0,0).
+        let cells: Vec<CellKey> = (0..5)
+            .flat_map(|x| (0..3).map(move |y| CellKey::new(x, y)))
+            .collect();
+        f.grid.paint(&cells, Some("k")).unwrap();
+        f.grid
+            .set_mark(
+                EdgeKey {
+                    cell: CellKey::new(0, 0),
+                    edge: crate::grid::Edge::North,
+                },
+                Some(Mark::new(MarkKind::Door)),
+            )
+            .unwrap();
+
+        // The rule's asset is a wide table: 3 cells across, clearance 1.
+        let meta_of = |_: &str| {
+            (
+                AssetMeta {
+                    footprint: Some(Footprint(vec![
+                        [-1.5, -0.5],
+                        [1.5, -0.5],
+                        [1.5, 0.5],
+                        [-1.5, 0.5],
+                    ])),
+                    clearance: 1.0,
+                    ..Default::default()
+                },
+                [3.0, 1.0],
+            )
+        };
+        let ops = furnish_with(&f, &["k".into()], 42, true, &meta_of).unwrap();
+        let batch = match &ops[0] {
+            Op::Batch { ops } => ops.clone(),
+            other => panic!("expected a batch, got {other:?}"),
+        };
+        let placed: Vec<(f32, f32)> = batch
+            .iter()
+            .filter_map(|op| match op {
+                Op::AddStamp { stamp, .. } => Some((stamp.x, stamp.y)),
+                _ => None,
+            })
+            .collect();
+        assert!(!placed.is_empty(), "the table still fits somewhere");
+        for (x, y) in &placed {
+            // The 3-wide box, centred, covers x-1..x+2. Clearance 1 keeps the
+            // whole box out of the door ring (x <= 1, y <= 1): so a centre
+            // with x < 2.5 would cover a keep-out cell.
+            assert!(
+                *x >= 3.4,
+                "placed at ({x}, {y}) puts its box over the door keep-out"
+            );
+        }
     }
 
     #[test]

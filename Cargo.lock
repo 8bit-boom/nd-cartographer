@@ -2479,6 +2479,7 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "tokio",
+ "toml 0.8.2",
  "tower",
 ]
 
