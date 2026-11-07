@@ -2079,7 +2079,7 @@ async fn export_svg(
     Path(id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
-    use ndcart_core::{SpaceKind, WallKind};
+    use ndcart_core::WallKind;
     let store = app.store.read().await;
     let doc = store
         .docs
