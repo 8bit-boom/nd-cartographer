@@ -12,6 +12,7 @@ mod doctor;
 #[cfg(feature = "bridge")]
 mod draft;
 mod golden;
+mod mcp;
 mod packs;
 mod pdf;
 #[cfg(feature = "bridge")]
@@ -2297,7 +2298,8 @@ async fn export_svg(
     let floor_name = doc.floors[idx].name.clone();
     let doc_id_for_name = doc.manifest.id.clone();
     let floor = ndcart_core::for_audience(&doc.floors[idx], audience);
-    let cell = doc.manifest.cell_size;
+    let cell_size = doc.manifest.cell_size;
+    let cell = cell_size;
     let walls = tiles::derive_walls(&floor, cell);
     // Bounds: the painted bounding box with a one-cell margin.
     let mut xs = Vec::new();
@@ -2323,6 +2325,11 @@ async fn export_svg(
             .replace('>', "&gt;")
             .replace('"', "&quot;")
     };
+    // 22.4: px -> cells through the one transform (a cropped identity: the
+    // crop is the bounding box's outer margin cell).
+    let tr = ndcart_core::units::Transform::cropped(cell_size, [off_x, off_y]);
+    let to_cells =
+        |p: [f64; 2]| -> [f64; 2] { tr.px_to_cell(p).unwrap_or([f64::INFINITY, f64::INFINITY]) };
     let mut b = String::new();
     b.push_str(&format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">
@@ -2382,11 +2389,11 @@ async fn export_svg(
             WallKind::Window => "#7fb4d8",
             WallKind::Secret => "#b06ad0",
         };
+        let [ax, ay] = to_cells(w.pts[0]);
+        let [bx, by] = to_cells(w.pts[1]);
         b.push_str(&format!(
-            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{stroke}\" stroke-width=\"0.3\"/>
-",
-            w.pts[0][0] / cell - off_x, w.pts[0][1] / cell - off_y,
-            w.pts[1][0] / cell - off_x, w.pts[1][1] / cell - off_y,
+            "<line x1=\"{ax}\" y1=\"{ay}\" x2=\"{bx}\" y2=\"{by}\" stroke=\"{stroke}\" stroke-width=\"0.3\"/>
+"
         ));
     }
     // Labels as real text.
@@ -2394,7 +2401,7 @@ async fn export_svg(
         b.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" font-family=\"sans-serif\" font-size=\"{}\" fill=\"{}\"{}>{}</text>
 ",
-            l.x / cell - off_x, l.y / cell - off_y,
+            to_cells([l.x, l.y])[0], to_cells([l.x, l.y])[1],
             (l.size / 12.0).clamp(0.6, 6.0),
             esc(&l.color),
             if l.bold { " font-weight=\"bold\"" } else { "" },
@@ -4252,6 +4259,19 @@ async fn main() {
                 std::process::exit(2);
             }
             if let Err(e) = publish::run_bundle(args.collect()).await {
+                eprintln!("ndcart: {e}");
+                std::process::exit(1);
+            }
+        }
+        "mcp" => {
+            let mut data_dir = None;
+            let mut rest = args.collect::<Vec<_>>().into_iter();
+            while let Some(a) = rest.next() {
+                if a == "--data-dir" {
+                    data_dir = rest.next().map(PathBuf::from);
+                }
+            }
+            if let Err(e) = mcp::run(data_dir) {
                 eprintln!("ndcart: {e}");
                 std::process::exit(1);
             }

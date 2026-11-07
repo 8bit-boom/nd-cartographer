@@ -1248,15 +1248,16 @@ architecture, they deepen it.
    through every exporter, migration and the linter, plus the blueprint's
    portal edge cases (adjacent doors, corner proximity, nonzero crop origins,
    fractional geometry) as named fixtures.
-4. **One coordinate transform** **(started 2026-11-07: `ndcart-core::units::Transform` with inverse tests, adopted in the world-map publish's lat/lng conversion; remaining call sites migrate as exporters are touched)** - document cells -> picture px -> target
+4. **One coordinate transform** **(done: `ndcart-core::units::Transform` with inverse tests; adopted in the world-map publish and the SVG exporter — walls and labels convert through it)** - document cells -> picture px -> target
    units live in a few places today; centralise with inverse tests before
    more exporters land.
 5. **Rights audit on export** - when a map carries pack assets, the publish
    report lists each pack's license block (surface, not legal advice).
-6. **Plugin posture, written down early** - when the SDK/MCP surface lands:
-   declarative permissions, third-party scripts off by default and sandboxed,
-   everything through the same validation as the UI (the journal already is
-   that path).
+6. **Plugin posture, written down and first surface built** - `ndcart mcp`
+   (stdio, plan 21.17) is live with five read-shaped tools and the posture
+   they must keep is in [PLUGIN_POSTURE.md](PLUGIN_POSTURE.md): typed
+   operations only, same validation as the UI, no shell, off-by-default
+   third-party code.
 7. **Polygon rooms: parked, on purpose** - the blueprint's polygon-first
    geometry (boolean ops, holes, wall centrelines) serves Dungeon-Scrawl-style
    organic drawing. The grid-first model stays primary (exactness, integer
