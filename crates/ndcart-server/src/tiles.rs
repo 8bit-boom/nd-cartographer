@@ -2287,7 +2287,7 @@ mod tests {
                     color: "#7f5539".into(),
                     kind: SpaceKind::Room,
                     material: None,
-        tint: None,
+                    tint: None,
                 },
             },
         )
@@ -3014,7 +3014,7 @@ mod tests {
                 color: "#8a8a8a".into(),
                 kind: SpaceKind::Room,
                 material: None,
-        tint: None,
+                tint: None,
             })
             .unwrap();
         f.grid
@@ -3066,7 +3066,7 @@ mod tests {
                 color: "#ffffff".into(),
                 kind: ndcart_core::SpaceKind::Room,
                 material: None,
-        tint: None,
+                tint: None,
             })
             .unwrap();
         f.grid.paint(&[CellKey::new(0, 0)], Some("s")).unwrap();
@@ -3660,7 +3660,7 @@ mod tests {
                 color: "#d0d0d0".into(),
                 kind: SpaceKind::Room,
                 material: Some(mat.clone()),
-        tint: None,
+                tint: None,
             })
             .unwrap();
         f.add_stamp(mk_stamp("p", &stp, 3.5, 3.5), None).unwrap();
@@ -3697,7 +3697,7 @@ mod tests {
                 color: "#d0d0d0".into(),
                 kind: SpaceKind::Room,
                 material: Some("mat_000000000000".into()),
-        tint: None,
+                tint: None,
             })
             .unwrap();
         g2.add_stamp(mk_stamp("q", "stp_000000000000", 3.5, 3.5), None)

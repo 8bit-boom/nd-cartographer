@@ -250,7 +250,9 @@ impl RoomGrid {
         }
         if let Some(tn) = &space.tint {
             if !valid_color(tn) {
-                return Err(CoreError::Invalid(format!("tint must be #rrggbb, got {tn}")));
+                return Err(CoreError::Invalid(format!(
+                    "tint must be #rrggbb, got {tn}"
+                )));
             }
         }
         if let Some(m) = &space.material {
@@ -421,7 +423,7 @@ mod tests {
             color: "#112233".into(),
             kind: SpaceKind::Room,
             material: None,
-        tint: None,
+            tint: None,
         })
         .unwrap();
         assert!(g.paint(&[CellKey::new(0, 0)], Some("nope")).is_err());

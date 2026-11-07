@@ -102,7 +102,7 @@ impl Canvas {
             color: color.into(),
             kind,
             material: None,
-        tint: None,
+            tint: None,
         });
         self.spaces.len() as u16
     }
