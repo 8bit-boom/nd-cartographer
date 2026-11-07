@@ -1205,6 +1205,54 @@ can become a fight, every publish target exists. Then 5, 19, 17. Items 15,
 
 ---
 
+## 22. From the field research (November 2026 blueprint)
+
+An independent comparative study of 16 map-making tools ("TTRPG Map Makers
+Research and Ultimate Editor Blueprint", 2026-11-07) was reviewed against this
+plan. Its three headline findings - semantic geometry over bitmaps, procedural
+assistance without LLMs, and journal-based reversible automation - match this
+plan's core decisions D4, D7 and the journal design, derived independently.
+The deltas below are its recommendations worth adopting; none changes the
+architecture, they deepen it.
+
+1. **Pack manifest v2** [+] - `.ndpack` entries gain footprint polygons,
+   clearance units, placement rules (`alignToWall`, `surface`, `allowMirror`),
+   style tags and a structured license block (map-output / redistribution /
+   attribution). Furnishing recipes already keep doorways clear by rule;
+   footprints make that rigorous and give pack authoring a real preview.
+2. **Per-object generation provenance** [+] - generated placements carry
+   `generator id + slot key + pinned`, so "reroll this room's clutter" keeps
+   pinned and hand-moved objects at object level (the refine flow's pins, one
+   level down). Fits the journal naturally.
+3. **A golden adversarial fixture project** [+] - one small known map (two
+   floors, stairs, a secret door, a light, a deliberately missing asset) run
+   through every exporter, migration and the linter, plus the blueprint's
+   portal edge cases (adjacent doors, corner proximity, nonzero crop origins,
+   fractional geometry) as named fixtures.
+4. **One coordinate transform** - document cells -> picture px -> target
+   units live in a few places today; centralise with inverse tests before
+   more exporters land.
+5. **Rights audit on export** - when a map carries pack assets, the publish
+   report lists each pack's license block (surface, not legal advice).
+6. **Plugin posture, written down early** - when the SDK/MCP surface lands:
+   declarative permissions, third-party scripts off by default and sandboxed,
+   everything through the same validation as the UI (the journal already is
+   that path).
+7. **Polygon rooms: parked, on purpose** - the blueprint's polygon-first
+   geometry (boolean ops, holes, wall centrelines) serves Dungeon-Scrawl-style
+   organic drawing. The grid-first model stays primary (exactness, integer
+   walls, free nd-world parity); a polygon room layer is recorded as a
+   deliberate extension with its trigger: organic free-form tools become a
+   priority. Imported walls (UVTT) already coexist with derived walls, so the
+   two models can meet when needed.
+
+Deliberate disagreements, unchanged: Rust-first hybrid vs TypeScript core
+(the Windows + Docker + one-binary requirement decided D2/D9); AI as flagship
+vs postponed - the blueprint's fear is unvalidated mutation, and the proposal
+workflow is exactly its own recommended answer.
+
+---
+
 *Plan written 2026-11-05. Sources: `AGENTS.md`, `CLAUDE.md`, `docs/MAP_CREATOR_RESEARCH.md`
 (+ its appendices), `docs/AI_SCHEMATIC_GUIDE.md`, `app/main.py`, `app/routers/map_walls.py`,
 `app/routers/map_props.py`, `app/routers/importer.py`, `app/routers/ai.py`,
