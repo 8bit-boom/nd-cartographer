@@ -1010,6 +1010,7 @@ fn yes_bool() -> bool {
 /// `GET /api/world/tables` — the world's random tables (plan 21.4), so a
 /// room's contents can be rolled from the world's own tables.
 #[cfg(feature = "bridge")]
+#[cfg(feature = "bridge")]
 async fn world_tables(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
     #[cfg(feature = "bridge")]
     {
@@ -1045,6 +1046,7 @@ async fn world_tables(State(app): State<App>) -> Result<Json<serde_json::Value>,
 /// named world table (one weighted pick per click) into the room's encounter
 /// creatures. One undo step. Needs nd-world; the studio-side encounter is
 /// GM information and never publishes to players.
+#[cfg(feature = "bridge")]
 #[cfg(feature = "bridge")]
 async fn stock_room(
     State(app): State<App>,
@@ -1184,6 +1186,28 @@ async fn stock_room(
     Ok(Json(
         serde_json::json!({ "ok": true, "rolled": pick, "rev": rev }),
     ))
+}
+
+#[cfg(not(feature = "bridge"))]
+async fn world_tables(_app: State<App>) -> Result<Json<serde_json::Value>, ApiError> {
+    Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+}
+
+#[cfg(not(feature = "bridge"))]
+async fn stock_room(
+    _app: State<App>,
+    _id: Path<String>,
+    _body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+}
+
+#[cfg(not(feature = "bridge"))]
+async fn theme_pack(
+    _app: State<App>,
+    _body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
 }
 
 /// `GET /api/world/entities/{id}/preview` - the two-way lore sync's read
@@ -3059,6 +3083,7 @@ async fn doc_events(
 /// theme into a pack PLAN: 4-6 material prompts, 8-12 prop prompts with
 /// names/tags/placement, and a palette. Returns the plan; the GM generates
 /// the pictures with the existing art pipeline and drops them into the pack.
+#[cfg(feature = "bridge")]
 async fn theme_pack(
     State(app): State<App>,
     body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
