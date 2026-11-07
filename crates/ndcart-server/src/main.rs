@@ -1010,8 +1010,8 @@ fn yes_bool() -> bool {
 /// Also returns the configured server so the UI can deep-link to the full
 /// page there.
 async fn world_entity_preview(
-    State(app): State<App>,
-    Path(id): Path<i64>,
+    #[cfg_attr(not(feature = "bridge"), allow(unused_variables))] State(app): State<App>,
+    #[cfg_attr(not(feature = "bridge"), allow(unused_variables))] Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let _ = app;
     #[cfg(feature = "bridge")]
@@ -2533,6 +2533,7 @@ async fn world_entities(
 impl AppState {
     /// The AI config for this call: the saved settings merged under the
     /// environment (env wins per field - plan 22's settings work).
+    #[cfg(feature = "bridge")]
     fn resolve_ai(&self) -> Result<draft::Config, String> {
         let stored = self.ai.lock().expect("ai settings").clone();
         draft::Config::from_env_and(&stored)
@@ -2592,6 +2593,12 @@ async fn post_ai_settings(
 /// `GET /api/ai-models` — the endpoint's own model list (`GET {base}/models`,
 /// the OpenAI-compatible shape Unsloth Studio, Ollama and friends serve), so
 /// the settings dialog offers a dropdown instead of a typed guess.
+#[cfg(not(feature = "bridge"))]
+async fn ai_models(_app: State<App>) -> Result<Json<serde_json::Value>, ApiError> {
+    Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+}
+
+#[cfg(feature = "bridge")]
 async fn ai_models(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
     let url = {
         let stored = app.ai.lock().expect("ai settings").clone();
@@ -2650,6 +2657,12 @@ async fn ai_models(State(app): State<App>) -> Result<Json<serde_json::Value>, Ap
 
 /// `POST /api/ai-test` — send one tiny request to the configured model and
 /// report what came back, so the settings dialog can prove the connection.
+#[cfg(not(feature = "bridge"))]
+async fn ai_test(_app: State<App>) -> Result<Json<serde_json::Value>, ApiError> {
+    Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+}
+
+#[cfg(feature = "bridge")]
 async fn ai_test(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
     let cfg = app
         .resolve_ai()
@@ -6456,9 +6469,14 @@ mod tests {
             "the key never leaves the server"
         );
 
-        // The status banner flips to standalone immediately.
+        // The status banner flips to standalone immediately (a bridge build;
+        // without the bridge there is no AI client and the banner stays off).
         let text = body_string(get("/api/ai/status".into()).await).await;
-        assert!(text.contains("standalone"), "{text}");
+        if cfg!(feature = "bridge") {
+            assert!(text.contains("standalone"), "{text}");
+        } else {
+            assert!(text.contains("no AI client"), "{text}");
+        }
 
         // A non-http URL is refused with the reason.
         let resp = post(
