@@ -27,6 +27,7 @@ pub mod stamp;
 pub mod stroke;
 pub mod structure;
 pub mod terrain;
+pub mod units;
 pub mod view;
 pub mod visibility;
 pub mod walls;

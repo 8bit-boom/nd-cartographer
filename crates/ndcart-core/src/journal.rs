@@ -1140,6 +1140,7 @@ mod tests {
             flip: false,
             tint: None,
             shadow: true,
+            gen: None,
         }
     }
 

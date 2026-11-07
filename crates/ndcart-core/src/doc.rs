@@ -1451,6 +1451,7 @@ mod layer_tests {
                 flip: false,
                 tint: None,
                 shadow: true,
+                gen: None,
             },
             None,
         )

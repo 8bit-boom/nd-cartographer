@@ -427,9 +427,16 @@ pub fn build_region(
     let cell_size = doc.manifest.cell_size;
     let walls = tiles::derive_walls(floor, cell_size);
     let (image, w, h) = tiles::bake_full_as(floor, &walls, cell_size, ppc, format, 80)?;
-    let s = ppc as f64;
+    // Cells -> picture px through the one transform (plan 22.4); the viewer's
+    // lat counts up from the bottom, so the y flips around the picture height.
+    let tr = ndcart_core::units::Transform::new(ppc as f64);
     let (hf, round) = (f64::from(h), |v: f64| (v * 1000.0).round() / 1000.0);
-    let ll = |x: f32, y: f32| (round(hf - f64::from(y) * s), round(f64::from(x) * s)); // (lat, lng)
+    let ll = |x: f32, y: f32| {
+        let [px_x, px_y] = tr
+            .cell_to_px([f64::from(x), f64::from(y)])
+            .unwrap_or_default();
+        (round(hf - px_y), round(px_x)) // (lat, lng)
+    };
     Ok(PublishRegion {
         name: map_name(doc, &floor_name),
         width_px: w,

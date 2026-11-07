@@ -137,6 +137,12 @@ pub fn scatter_where(
                     flip,
                     tint: None,
                     shadow: true,
+                    gen: Some(crate::stamp::Generation {
+                        generator: "scatter".into(),
+                        room: String::new(),
+                        slot: format!("{}#{}", p.assets[pick], ops.len()),
+                        pinned: false,
+                    }),
                 },
                 index: None,
             });

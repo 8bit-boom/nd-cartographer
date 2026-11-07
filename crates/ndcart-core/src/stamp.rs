@@ -31,6 +31,11 @@ pub struct Stamp {
     /// A soft drop shadow under the stamp.
     #[serde(default = "yes")]
     pub shadow: bool,
+    /// How this prop came to be (plan 22.2): the generator that placed it,
+    /// which room, its slot there, and whether the GM pinned it (a reroll
+    /// keeps pinned and hand-placed props). None = placed by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gen: Option<Generation>,
 }
 
 fn one() -> f32 {
@@ -93,6 +98,7 @@ mod tests {
             y: 2.5,
             scale: 1.0,
             rotation: 0.3,
+            gen: None,
             flip: false,
             tint: None,
             shadow: true,
@@ -130,4 +136,19 @@ mod tests {
             assert!(s.validate().is_err(), "case {i}");
         }
     }
+}
+
+/// Per-object generation provenance (plan 22.2): what placed this prop, so a
+/// local reroll can replace exactly the generated clutter and keep pinned and
+/// hand-placed work.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Generation {
+    /// `furnish` today; scatter and others later.
+    pub generator: String,
+    /// The room the generator placed it for.
+    pub room: String,
+    /// The stable slot within the generator's plan (`table#0`).
+    pub slot: String,
+    #[serde(default)]
+    pub pinned: bool,
 }

@@ -317,6 +317,12 @@ pub fn furnish_with(
                         flip: rng.next() & 1 == 1,
                         tint: None,
                         shadow: true,
+                        gen: Some(crate::stamp::Generation {
+                            generator: "furnish".into(),
+                            room: id.clone(),
+                            slot: format!("{}#{}", rule.asset, ops.len()),
+                            pinned: false,
+                        }),
                     },
                     index: None,
                 });

@@ -1841,11 +1841,18 @@ function buildOutline() {
       }
     }
     if (g === 'stamps') for (const st of (o.stamps || [])) {
+      const full = (curFloor().stamps || []).find(x => x.id === st.id);
+      const gen = full?.gen;
+      const pin = gen ? (gen.pinned ? ' · 📌 pinned' : ' · 🎲 generated') : '';
       const name = STAMPS.find(x => x.id === st.asset)?.name || st.asset;
-      const r = addRow(treeEl, `p:${st.id}`, 2, `${esc(name)}<span class="meta">${st.cell[0]}, ${st.cell[1]}</span>`, `Prop ${name} at ${st.cell[0]}, ${st.cell[1]}`);
+      const r = addRow(treeEl, `p:${st.id}`, 2, `${esc(name)}<span class="meta">${st.cell[0]}, ${st.cell[1]}${pin}</span>`, `Prop ${name} at ${st.cell[0]}, ${st.cell[1]}${gen ? (gen.pinned ? ', pinned (rerolls keep it)' : ', generated (F2 pins it against rerolls)') : ', hand-placed'}`);
       r.dataset.kind = 'stamp';
       r.onclick = () => { focusRow(r); centerOn({ x: st.cell[0], y: st.cell[1] }); };
       r.ondeleterequest = () => postOps([{ t: 'remove_stamp', id: st.id }]);
+      if (gen) r.onrenamerequest = () => {
+        const next = { ...full, gen: { ...gen, pinned: !gen.pinned } };
+        postOps([{ t: 'update_stamp', stamp: next }]);
+      };
     }
     if (g === 'labels') for (const l of o.labels) {
       const r = addRow(treeEl, `n:${l.id}`, 2, `${esc(l.text)}<span class="meta">${l.gm_only ? 'GM only' : ''}</span>`,
@@ -2712,6 +2719,15 @@ document.getElementById('bk-refine').onclick = async () => {
     statusEl.textContent = 'Revision ready to preview. Accepting adds it as a new floor; this floor is untouched.';
   } catch (e) { statusEl.textContent = e.message; }
 };
+document.getElementById('bk-reroll').onclick = async () => {
+  if (state.sel.size !== 1) { statusEl.textContent = 'Select exactly one room to reroll its props.'; return; }
+  const [room] = [...state.sel];
+  try {
+    const res = await api('POST', `/api/docs/${state.docId}/reroll`, { floor: state.floorId, room });
+    statusEl.textContent = `Rerolled: ${res.removed} generated prop(s) out, ${res.placed} back in. Pinned and hand-placed props stayed.`;
+  } catch (e) { statusEl.textContent = e.message; }
+};
+
 document.getElementById('bk-furnish').onclick = async () => {
   try {
     const res = await api('POST', `/api/docs/${state.docId}/furnish`, { floor: state.floorId, spaces: [...state.sel], seed: Math.floor(Math.random() * 4294967295) });

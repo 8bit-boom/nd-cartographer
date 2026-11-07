@@ -10,6 +10,7 @@ mod convert;
 mod doctor;
 #[cfg(feature = "bridge")]
 mod draft;
+mod golden;
 mod packs;
 mod pdf;
 #[cfg(feature = "bridge")]
@@ -101,6 +102,7 @@ struct FloorView {
     regions: Vec<ndcart_core::Region>,
     routes: Vec<ndcart_core::Route>,
     zones: Vec<ndcart_core::Zone>,
+    stamps: Vec<ndcart_core::Stamp>,
     entity_links: Vec<ndcart_core::doc::EntityLink>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     encounters: Vec<ndcart_core::doc::Encounter>,
@@ -154,6 +156,7 @@ fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u6
         regions: floor.regions.clone(),
         routes: floor.routes.clone(),
         zones: floor.zones.clone(),
+        stamps: floor.stamps.clone(),
         entity_links: floor.entity_links.clone(),
         encounters: floor.encounters.clone(),
         eras: floor.eras.clone(),
@@ -996,6 +999,94 @@ struct FurnishBody {
 }
 fn yes_bool() -> bool {
     true
+}
+
+/// `POST /api/docs/{id}/reroll` `{floor?, room, seed?}` - plan 22.2: replace
+/// exactly the generated props of one room. Pinned and hand-placed props
+/// stay; the room's generated stamps are removed and furnished again in the
+/// same batch, so the whole thing is one undo step.
+async fn reroll_room(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    let room = b
+        .get("room")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError(CoreError::Invalid("body needs {room}".into())))?
+        .to_string();
+    let seed = b.get("seed").and_then(|v| v.as_u64()).unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    });
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let floor_id = b
+        .get("floor")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| doc.floors[0].id.clone());
+    let idx = floors_by_id(&doc.floors, &floor_id)?;
+
+    // Remove the room's unpinned generated props (a working copy; the real
+    // removals go out as ops in the same batch).
+    let mut scratch = doc.floors[idx].clone();
+    let doomed: Vec<String> = scratch
+        .stamps
+        .iter()
+        .filter(|s| s.gen.as_ref().is_some_and(|g| g.room == room && !g.pinned))
+        .map(|s| s.id.clone())
+        .collect();
+    if doomed.is_empty() {
+        return Err(ApiError(CoreError::Invalid(
+            "that room has no generated props to reroll (pin them or furnish it first)".into(),
+        )));
+    }
+    for sid in &doomed {
+        ndcart_core::journal::apply_op(
+            &mut scratch,
+            &ndcart_core::Op::RemoveStamp { id: sid.clone() },
+        )?;
+    }
+    // Furnish the room again on the scratch: fills only the free cells, so
+    // pinned and hand-placed props are untouched.
+    let meta_of = |asset: &str| -> (ndcart_core::assetmeta::AssetMeta, [f32; 2]) {
+        if let Some(def) = ndcart_paint::find_stamp(asset) {
+            (Default::default(), def.size)
+        } else if let Some(c) = assets::global().find_custom(asset, "stamp") {
+            let natural = [c.size, c.size];
+            (c.meta.clone(), natural)
+        } else {
+            (Default::default(), [1.0, 1.0])
+        }
+    };
+    let mut fill = ndcart_core::furnish::furnish_with(
+        &scratch,
+        std::slice::from_ref(&room),
+        seed,
+        false,
+        &meta_of,
+    )?;
+    let removed = doomed.len();
+    let mut ops: Vec<ndcart_core::Op> = doomed
+        .into_iter()
+        .map(|sid| ndcart_core::Op::RemoveStamp { id: sid })
+        .collect();
+    ops.append(&mut fill);
+    let added = ops.len() - removed;
+    doc.apply_ops(&floor_id, &[ndcart_core::Op::Batch { ops }])?;
+    store::save_doc(app.data_dir.as_deref(), doc);
+    drop(store);
+    app.tile_cache.lock().expect("tile cache").clear();
+    Ok(Json(serde_json::json!({
+        "ok": true, "removed": removed, "placed": added,
+    })))
 }
 
 /// `POST /api/docs/{id}/furnish` `{floor?, spaces:[room ids], seed, only_empty?}` —
@@ -3133,6 +3224,7 @@ fn build_router(app: App) -> Router {
         .route("/api/ai/jobs/{id}/cancel", post(ai_job_cancel))
         .route("/api/docs/{id}/underlay", post(set_underlay))
         .route("/api/docs/{id}/furnish", post(furnish_rooms))
+        .route("/api/docs/{id}/reroll", post(reroll_room))
         .route("/api/search", get(search_maps))
         .route("/api/docs/{id}/scatter", post(scatter_props))
         .route("/api/docs/{id}/preview", get(preview))
@@ -6059,6 +6151,128 @@ mod tests {
         assert_eq!(
             doc["floors"][0]["grid"]["cells"].as_array().unwrap().len(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn reroll_keeps_pinned_and_hand_placed_props() {
+        let app = test_app();
+        let router = build_router(app);
+        let post = |uri: String, body: String| async {
+            router
+                .clone()
+                .oneshot(
+                    Request::post(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+        };
+        let get = |uri: String| async {
+            router
+                .clone()
+                .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        };
+
+        let text =
+            body_string(post("/api/docs".into(), r#"{"name": "Reroll Me"}"#.into()).await).await;
+        let doc_id: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let doc_id = doc_id["id"].as_str().unwrap().to_string();
+        let text = body_string(get(format!("/api/docs/{doc_id}")).await).await;
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let fid = doc["floors"][0]["id"].as_str().unwrap().to_string();
+
+        // A named kitchen (the recipe places a table, barrels, crates).
+        let paint = serde_json::json!({"floor": fid, "ops": [{"t": "batch", "ops": [
+            {"t": "upsert_space", "space": {"id": "k", "name": "Kitchen", "color": "#7f5539", "kind": "room"}},
+            {"t": "paint_cells", "cells": [
+                {"x":0,"y":0},{"x":1,"y":0},{"x":2,"y":0},{"x":3,"y":0},
+                {"x":0,"y":1},{"x":1,"y":1},{"x":2,"y":1},{"x":3,"y":1},
+                {"x":0,"y":2},{"x":1,"y":2},{"x":2,"y":2},{"x":3,"y":2}
+            ], "space": "k"}
+        ]}]});
+        let resp = post(
+            format!("/api/docs/{doc_id}/ops"),
+            serde_json::to_string(&paint).unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = post(
+            format!("/api/docs/{doc_id}/furnish"),
+            serde_json::to_string(&serde_json::json!({"floor": fid, "spaces": ["k"], "seed": 7}))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let text = body_string(get(format!("/api/docs/{doc_id}")).await).await;
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let stamps = doc["floors"][0]["stamps"].as_array().unwrap().clone();
+        assert!(stamps.len() >= 2, "a kitchen furnishes");
+        assert!(
+            stamps[0]["gen"].is_object(),
+            "furnished props carry provenance"
+        );
+
+        // Pin the first generated prop; add a hand-placed one (no gen).
+        let mut pinned = stamps[0].clone();
+        pinned["gen"]["pinned"] = serde_json::json!(true);
+        let hand = serde_json::json!({
+            "t": "update_stamp",
+            "stamp": {"id": "hand1", "asset": "barrel", "x": 3.5, "y": 2.5,
+                      "scale": 1.0, "rotation": 0.0, "flip": false,
+                      "tint": null, "shadow": true, "gen": null}
+        });
+        let resp = post(
+            format!("/api/docs/{doc_id}/ops"),
+            serde_json::to_string(&serde_json::json!({"floor": fid, "ops": [
+                {"t": "update_stamp", "stamp": pinned},
+                {"t": "add_stamp", "stamp": hand["stamp"]}, hand
+            ]}))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Reroll the room.
+        let resp = post(
+            format!("/api/docs/{doc_id}/reroll"),
+            serde_json::to_string(&serde_json::json!({"floor": fid, "room": "k", "seed": 99}))
+                .unwrap(),
+        )
+        .await;
+        let status = resp.status();
+        if status != StatusCode::OK {
+            let rtext = body_string(resp).await;
+            panic!("reroll failed: {status} {rtext}");
+        }
+        let text = body_string(resp).await;
+        let out: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            out["removed"].as_u64().unwrap(),
+            stamps.len() as u64 - 1,
+            "every generated prop except the pinned one was removed"
+        );
+
+        let text = body_string(get(format!("/api/docs/{doc_id}")).await).await;
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let stamps = doc["floors"][0]["stamps"].as_array().unwrap();
+        let ids: Vec<&str> = stamps.iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"hand1"), "the hand-placed prop stayed");
+        let pinned_still = stamps
+            .iter()
+            .find(|s| s["id"] == pinned["id"] && s["gen"]["pinned"] == serde_json::json!(true));
+        assert!(pinned_still.is_some(), "the pinned prop stayed");
+        assert!(
+            stamps
+                .iter()
+                .any(|s| s["gen"]["pinned"] == serde_json::json!(false)),
+            "fresh generated props came back"
         );
     }
 

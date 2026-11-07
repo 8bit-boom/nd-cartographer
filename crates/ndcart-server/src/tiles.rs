@@ -2611,6 +2611,7 @@ mod tests {
             flip: false,
             tint: None,
             shadow: true,
+            gen: None,
         }
     }
 
@@ -2806,6 +2807,7 @@ mod tests {
             rotation: 0.0,
             flip: false,
             shadow: true,
+            gen: None,
             tint: None,
         });
         let walls = derive_walls(&f, 32.0);

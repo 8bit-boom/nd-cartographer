@@ -177,7 +177,11 @@ fn merge_and_render(mut horiz: Vec<Seg>, mut vert: Vec<Seg>, s: f64) -> Vec<Wall
                     if prev.line == seg.line
                         && prev.to == seg.from
                         && prev.kind == seg.kind
-                        && prev.state == seg.state =>
+                        && prev.state == seg.state
+                        // Doors and secrets are individual portals with
+                        // their own open/closed state: two doors side by
+                        // side are two doors, never one wide one.
+                        && !matches!(seg.kind, WallKind::Door | WallKind::Secret) =>
                 {
                     prev.to = seg.to;
                 }

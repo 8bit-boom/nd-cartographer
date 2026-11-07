@@ -1220,16 +1220,16 @@ architecture, they deepen it.
    style tags and a structured license block (map-output / redistribution /
    attribution). Furnishing recipes already keep doorways clear by rule;
    footprints make that rigorous and give pack authoring a real preview.
-2. **Per-object generation provenance** [+] - generated placements carry
+2. **Per-object generation provenance** [+] **(built 2026-11-07: stamps carry `gen` (generator, room, slot, pinned); furnish and scatter tag their placements; the bulk bar's 🎲 Reroll replaces exactly one room's generated props in one undo step; F2 on an outliner prop pins or unpins it)** - generated placements carry
    `generator id + slot key + pinned`, so "reroll this room's clutter" keeps
    pinned and hand-moved objects at object level (the refine flow's pins, one
    level down). Fits the journal naturally.
-3. **A golden adversarial fixture project** [+] - one small known map (two
+3. **A golden adversarial fixture project** [+] **(built 2026-11-07: the golden project - two floors, stairs both ways, adjacent doors, a secret door, a light, a GM label, a missing-asset prop, an era - plus a deliberately broken sibling, run through the linter, save/load, the legacy loader, the GM/player audience filter and the era bake; its first run caught a real defect, adjacent doors merging into one wide door, now fixed)** - one small known map (two
    floors, stairs, a secret door, a light, a deliberately missing asset) run
    through every exporter, migration and the linter, plus the blueprint's
    portal edge cases (adjacent doors, corner proximity, nonzero crop origins,
    fractional geometry) as named fixtures.
-4. **One coordinate transform** - document cells -> picture px -> target
+4. **One coordinate transform** **(started 2026-11-07: `ndcart-core::units::Transform` with inverse tests, adopted in the world-map publish's lat/lng conversion; remaining call sites migrate as exporters are touched)** - document cells -> picture px -> target
    units live in a few places today; centralise with inverse tests before
    more exporters land.
 5. **Rights audit on export** - when a map carries pack assets, the publish
