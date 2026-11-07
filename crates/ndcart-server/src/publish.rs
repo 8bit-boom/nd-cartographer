@@ -661,14 +661,14 @@ fn prepare(st: &store::Store, id: &str, a: &Args) -> Result<Vec<Job>, String> {
             .map(|f| {
                 f.encounters
                     .iter()
-                    .filter_map(|e| {
+                    .map(|e| {
                         let name = f
                             .grid
                             .spaces
                             .get(&e.space)
                             .map(|s| s.name.clone())
                             .unwrap_or_else(|| e.space.clone());
-                        Some((e.space.clone(), name, e.creatures.clone()))
+                        (e.space.clone(), name, e.creatures.clone())
                     })
                     .collect()
             })

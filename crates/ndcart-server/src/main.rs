@@ -1009,6 +1009,7 @@ fn yes_bool() -> bool {
 
 /// `GET /api/world/tables` — the world's random tables (plan 21.4), so a
 /// room's contents can be rolled from the world's own tables.
+#[cfg(feature = "bridge")]
 async fn world_tables(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
     #[cfg(feature = "bridge")]
     {
@@ -1044,6 +1045,7 @@ async fn world_tables(State(app): State<App>) -> Result<Json<serde_json::Value>,
 /// named world table (one weighted pick per click) into the room's encounter
 /// creatures. One undo step. Needs nd-world; the studio-side encounter is
 /// GM information and never publishes to players.
+#[cfg(feature = "bridge")]
 async fn stock_room(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -3863,6 +3865,8 @@ fn build_router(app: App) -> Router {
         .route("/api/draft", post(draft_spec))
         .route("/api/ai/status", get(ai_status))
         .route("/api/world/entities", get(world_entities))
+        .route("/api/world/tables", get(world_tables))
+        .route("/api/docs/{id}/stock-room", post(stock_room))
         .route(
             "/api/world/entities/{id}/preview",
             get(world_entity_preview),
