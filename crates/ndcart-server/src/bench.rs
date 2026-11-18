@@ -91,6 +91,20 @@ pub(crate) async fn run_large(json: bool) {
         ));
     });
 
+    // The same centre tile with the sun on (a shadow quad per wall).
+    let mut sunny = floor.clone();
+    sunny.sun = Some(ndcart_core::doc::Sun {
+        azimuth_deg: 300.0,
+        elevation_deg: 30.0,
+        strength: 0.8,
+    });
+    let tile_sun_ms = avg_ms(5, || {
+        std::hint::black_box(tiles::bake_tile_era(
+            &sunny, &walls, 32.0, 0, 5, 5, None, None, 0.0,
+        ));
+    });
+    drop(sunny);
+
     // Edits through the store, as the router does them.
     let mut doc = store::StoredDoc::new("bench", ndcart_core::doc::DocKind::Battle);
     doc.floors[0] = floor.clone();
@@ -181,6 +195,7 @@ pub(crate) async fn run_large(json: bool) {
             "edit_1_cell_batch_ms": r(edit_batch_ms),
             "tile_z0_centre_ms": r(tile_centre_ms),
             "tile_z0_far_ms": r(tile_far_ms),
+            "tile_z0_sun_ms": r(tile_sun_ms),
             "get_tile_cold_ms": r(handler_cold_ms),
             "get_tile_warm_ms": r(handler_warm_ms),
             "get_doc_ms": r(get_doc_ms),
@@ -197,6 +212,7 @@ pub(crate) async fn run_large(json: bool) {
         println!("  edit, 1-cell batch:     {edit_batch_ms:>8.2} ms");
         println!("  tile z0 centre (bake):  {tile_centre_ms:>8.2} ms   (budget {TILE_BUDGET_MS})");
         println!("  tile z0 far (bake):     {tile_far_ms:>8.2} ms");
+        println!("  tile z0 centre, sun on: {tile_sun_ms:>8.2} ms");
         println!("  GET tile cold:          {handler_cold_ms:>8.2} ms");
         println!("  GET tile warm:          {handler_warm_ms:>8.3} ms");
         println!("  GET doc:                {get_doc_ms:>8.2} ms, {get_doc_bytes} bytes   (budget {GET_DOC_BUDGET_MS})");

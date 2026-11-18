@@ -2065,6 +2065,16 @@ fn render_pixmap_hidden(
                 let bx = w.pts[1][0] as f32 * k - x0 as f32;
                 let by = w.pts[1][1] as f32 * k - y0 as f32;
                 let (ox, oy) = (dx * len, dy * len);
+                // Cull: a shadow quad whose bounding box misses the tile (with
+                // a 2 px margin for anti-aliasing) paints nothing in it.
+                let (tw, th) = (tile_px_w as f32, tile_px_h as f32);
+                if ax.max(bx).max(ax + ox).max(bx + ox) < -2.0
+                    || ax.min(bx).min(ax + ox).min(bx + ox) > tw + 2.0
+                    || ay.max(by).max(ay + oy).max(by + oy) < -2.0
+                    || ay.min(by).min(ay + oy).min(by + oy) > th + 2.0
+                {
+                    continue;
+                }
                 let mut pb = tiny_skia::PathBuilder::new();
                 pb.move_to(ax, ay);
                 pb.line_to(bx, by);
@@ -2429,6 +2439,34 @@ mod tests {
                 assert_eq!(tile.pixel(x, y), full.pixel(256 + x, y), "({x},{y})");
             }
         }
+    }
+
+    #[test]
+    fn a_sunlit_tile_is_the_matching_crop_of_the_full_render() {
+        // Shadows are culled per tile; the cull must never change a pixel.
+        let mut f = material_floor();
+        f.sun = Some(ndcart_core::doc::Sun {
+            azimuth_deg: 300.0,
+            elevation_deg: 12.0,
+            strength: 1.0,
+        });
+        let walls = derive_walls(&f, 32.0);
+        assert!(!walls.is_empty());
+        let (full, ..) = bake_full(&f, &walls, 32.0, 64).unwrap();
+        let full = tiny_skia::Pixmap::decode_png(&full).unwrap();
+        let mut shaded = 0;
+        for (tx, ty) in [(0i64, 0i64), (1, 0), (0, 1), (1, 1)] {
+            let tile = bake_tile(&f, &walls, 32.0, 2, tx, ty);
+            let tile = tiny_skia::Pixmap::decode_png(&tile).unwrap();
+            for y in 0..256u32 {
+                for x in 0..256u32 {
+                    let want = full.pixel(tx as u32 * 256 + x, ty as u32 * 256 + y);
+                    assert_eq!(tile.pixel(x, y), want, "tile ({tx},{ty}) at ({x},{y})");
+                    shaded += 1;
+                }
+            }
+        }
+        assert_eq!(shaded, 4 * 256 * 256);
     }
 
     #[test]
