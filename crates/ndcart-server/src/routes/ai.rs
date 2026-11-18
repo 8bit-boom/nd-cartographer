@@ -190,6 +190,36 @@ pub(crate) struct DraftBody {
     #[serde(default)]
     #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
     pub(crate) lore: bool,
+    /// Return `{job}` at once and poll `GET /api/ai/jobs/{id}` for the phase and the spec.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    pub(crate) background: bool,
+}
+
+/// Queue a draft as a background job and answer with its id.
+#[cfg(feature = "bridge")]
+fn start_draft_job(
+    cfg: draft::Config,
+    prompt: &str,
+    ctx: draft::Context,
+    world: bool,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if prompt.trim().is_empty() || prompt.chars().count() > 2_000 {
+        return Err(ApiError(CoreError::Invalid(
+            "describe the map in 1-2000 characters".into(),
+        )));
+    }
+    let id = aijobs::register(if world { "draft-world" } else { "draft" }, prompt, 1)
+        .map_err(|m| ApiError(CoreError::CapExceeded(m)))?;
+    let task = tokio::spawn(aijobs::run_draft(
+        id.clone(),
+        cfg,
+        prompt.to_string(),
+        ctx,
+        world,
+    ));
+    aijobs::set_abort(&id, task.abort_handle());
+    Ok(Json(serde_json::json!({ "job": id })))
 }
 
 #[cfg(not(feature = "bridge"))]
@@ -230,6 +260,9 @@ pub(crate) async fn draft_spec(
             .resolve_ai()
             .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         let ctx = draft_context(&app, &b.doc, b.lore).await;
+        if b.background {
+            return start_draft_job(cfg, &b.prompt, ctx, false);
+        }
         let d = draft::draft(&cfg, &b.prompt, &ctx)
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;
@@ -257,6 +290,9 @@ pub(crate) async fn draft_world_spec(
             .resolve_ai()
             .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         let ctx = draft_context(&app, &b.doc, b.lore).await;
+        if b.background {
+            return start_draft_job(cfg, &b.prompt, ctx, true);
+        }
         let spec = draft::draft_world(&cfg, &b.prompt, &ctx)
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;

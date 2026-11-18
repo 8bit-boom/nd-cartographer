@@ -11,7 +11,7 @@
 //! into a prompt or an argument).
 
 use crate::aipack::{self, Kind};
-use crate::repair::{self, Failure, Job, Outcome, Turn};
+use crate::repair::{self, Failure, Job, Outcome, Progress, Turn};
 use ndcart_bridge::Bridge;
 use ndcart_core::mapspec::MapSpec;
 
@@ -355,15 +355,27 @@ pub fn shape(kind: Kind) -> &'static Shape {
 }
 
 /// Run the shared repair loop against a connected model.
-async fn solve<T>(
-    backend: &Backend,
-    system: &str,
+struct Task<'a> {
+    system: &'a str,
     kind: Kind,
     first_user: String,
     rounds: usize,
-    what: &str,
+    what: &'a str,
+}
+
+async fn solve<T>(
+    backend: &Backend,
+    task: Task<'_>,
+    progress: &(dyn Fn(Progress) + Sync),
     judge: impl Fn(&str) -> Result<T, Vec<String>>,
 ) -> Result<Outcome<T>, Failure> {
+    let Task {
+        system,
+        kind,
+        first_user,
+        rounds,
+        what,
+    } = task;
     let job = Job {
         first_user,
         rounds,
@@ -371,7 +383,7 @@ async fn solve<T>(
     };
     repair::run(
         &job,
-        &|_| {},
+        progress,
         |turns| async move { backend.ask(system, &turns, Some(shape(kind))).await },
         judge,
     )
@@ -380,16 +392,29 @@ async fn solve<T>(
 
 /// Draft a battle-map spec from `prompt`.
 pub async fn draft(cfg: &Config, prompt: &str, ctx: &Context) -> Result<Drafted, String> {
+    draft_with_progress(cfg, prompt, ctx, &|_| {}).await
+}
+
+/// [`draft`], reporting where the repair loop is.
+pub async fn draft_with_progress(
+    cfg: &Config,
+    prompt: &str,
+    ctx: &Context,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<Drafted, String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
     let system = with_context(aipack::system(Kind::Map), &ctx.with_lore(&backend).await?);
     let out = solve(
         &backend,
-        &system,
-        Kind::Map,
-        format!("Design this map: {}", prompt.trim()),
-        2,
-        "spec",
+        Task {
+            system: &system,
+            kind: Kind::Map,
+            first_user: format!("Design this map: {}", prompt.trim()),
+            rounds: 2,
+            what: "spec",
+        },
+        progress,
         parse_reply_all,
     )
     .await?;
@@ -408,20 +433,33 @@ pub async fn draft_world(
     prompt: &str,
     ctx: &Context,
 ) -> Result<crate::worldspec::WorldSpec, String> {
+    Ok(draft_world_with(cfg, prompt, ctx, &|_| {}).await?.0)
+}
+
+/// [`draft_world`], reporting progress and how many asks it took.
+pub async fn draft_world_with(
+    cfg: &Config,
+    prompt: &str,
+    ctx: &Context,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<(crate::worldspec::WorldSpec, usize), String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
     let system = with_context(aipack::system(Kind::World), &ctx.with_lore(&backend).await?);
-    Ok(solve(
+    let out = solve(
         &backend,
-        &system,
-        Kind::World,
-        format!("Design this map: {}", prompt.trim()),
-        2,
-        "spec",
+        Task {
+            system: &system,
+            kind: Kind::World,
+            first_user: format!("Design this map: {}", prompt.trim()),
+            rounds: 2,
+            what: "spec",
+        },
+        progress,
         parse_world_reply_all,
     )
-    .await?
-    .value)
+    .await?;
+    Ok((out.value, out.attempts))
 }
 
 /// The user turn for a refinement: the current floor, the pins, the request.
@@ -492,11 +530,20 @@ pub async fn refine(
     );
     let first = refine_user_turn(current, pins, instruction)?;
     let judge = judge_refine(current, pins.to_vec());
-    Ok(
-        solve(&backend, &system, Kind::Refine, first, 3, "revision", judge)
-            .await?
-            .value,
+    Ok(solve(
+        &backend,
+        Task {
+            system: &system,
+            kind: Kind::Refine,
+            first_user: first,
+            rounds: 3,
+            what: "revision",
+        },
+        &|_| {},
+        judge,
     )
+    .await?
+    .value)
 }
 
 /// Clean a list of tags: lowercase, 1-24 characters of letters, digits, spaces and
@@ -559,11 +606,14 @@ pub async fn suggest_tags(cfg: &Config, name: &str, prompt: &str) -> Result<Vec<
     );
     Ok(solve(
         &backend,
-        aipack::system(Kind::Tags),
-        Kind::Tags,
-        subject,
-        1,
-        "tag list",
+        Task {
+            system: aipack::system(Kind::Tags),
+            kind: Kind::Tags,
+            first_user: subject,
+            rounds: 1,
+            what: "tag list",
+        },
+        &|_| {},
         judge_tags,
     )
     .await?
@@ -645,11 +695,14 @@ pub async fn theme_pack(cfg: &Config, theme: &str) -> Result<serde_json::Value, 
     let backend = Backend::connect(cfg).await?;
     Ok(solve(
         &backend,
-        aipack::system(Kind::ThemePack),
-        Kind::ThemePack,
-        format!("Theme: {theme}"),
-        2,
-        "plan",
+        Task {
+            system: aipack::system(Kind::ThemePack),
+            kind: Kind::ThemePack,
+            first_user: format!("Theme: {theme}"),
+            rounds: 2,
+            what: "plan",
+        },
+        &|_| {},
         judge_theme_pack,
     )
     .await?

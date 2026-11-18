@@ -2292,6 +2292,31 @@ async function showAiStatus() {
 }
 function openSpecDialog() { document.getElementById('spec-msg').textContent = ''; specDialog.showModal(); showAiStatus(); }
 document.getElementById('btn-spec').onclick = openSpecDialog;
+// Ask for a draft as a background job: show the phase and offer Stop. A server that answers
+// {spec} straight away (no AI set up, so a keyword draft; or an older server) works too.
+async function draftInBackground(path, body, msg) {
+  const first = await api('POST', path, { ...body, background: true });
+  if (!first.job) return first;
+  const stop = document.getElementById('spec-stop');
+  let stopped = false;
+  stop.hidden = false;
+  stop.onclick = async () => { stopped = true; try { await api('POST', `/api/ai/jobs/${first.job}/cancel`); } catch { /* finished already */ } };
+  try {
+    for (;;) {
+      await new Promise(r => setTimeout(r, 700));
+      const j = await api('GET', `/api/ai/jobs/${first.job}`);
+      if (j.status === 'running') {
+        msg.textContent = j.message + (j.problems && j.problems.length ? ` (${j.problems[0].slice(0, 120)})` : '');
+      } else if (j.status === 'done') {
+        return j;
+      } else if (j.status === 'cancelled' || stopped) {
+        throw new Error('Stopped.');
+      } else {
+        throw new Error(j.message);
+      }
+    }
+  } finally { stop.hidden = true; }
+}
 document.getElementById('spec-draft').onclick = async () => {
   const prompt = document.getElementById('spec-prompt').value.trim();
   const msg = document.getElementById('spec-msg');
@@ -2299,7 +2324,7 @@ document.getElementById('spec-draft').onclick = async () => {
   const btn = document.getElementById('spec-draft');
   btn.disabled = true; msg.textContent = 'Asking the AI (this can take a minute)…';
   try {
-    const { spec } = await api('POST', specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt, doc: state.docId, lore: document.getElementById('spec-lore').checked });
+    const { spec } = await draftInBackground(specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt, doc: state.docId, lore: document.getElementById('spec-lore').checked }, msg);
     document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
     await runSpec(Math.floor(Math.random() * 1e6));
   } catch (e) { msg.textContent = e.message; }

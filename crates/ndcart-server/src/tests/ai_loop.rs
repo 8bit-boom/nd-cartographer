@@ -183,3 +183,101 @@ async fn the_thinking_setting_lifts_the_no_think_request() {
     .await;
     assert!(h.stats.bodies()[0].get("chat_template_kwargs").is_none());
 }
+
+async fn poll_job(
+    router: &Router,
+    id: &str,
+    until: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    for _ in 0..200 {
+        let (st, b) = call(router, "GET", &format!("/api/ai/jobs/{id}"), vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let v = jv(&b);
+        if until(&v) {
+            return v;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+    }
+    panic!("job {id} never reached the wanted state");
+}
+
+#[tokio::test]
+async fn a_background_draft_goes_from_asking_to_done_with_its_spec() {
+    let (router, h) = app_for(Options {
+        behaviour: Behaviour::Slow,
+        delay_ms: 300,
+        ..Options::default()
+    })
+    .await;
+    let (st, v) = post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a crypt","background":true}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let id = v["job"].as_str().unwrap().to_string();
+    let asking = poll_job(&router, &id, |j| j["phase"] == "asking").await;
+    assert_eq!(
+        (asking["attempt"].as_u64(), asking["max_attempts"].as_u64()),
+        (Some(1), Some(3))
+    );
+    assert_eq!(asking["status"], "running");
+    let done = poll_job(&router, &id, |j| j["status"] != "running").await;
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["phase"], "done");
+    assert!(done["spec"]["floors"].is_array());
+    assert_eq!(done["attempts"], 1);
+    assert_eq!(h.stats.chats(), 1);
+}
+
+#[tokio::test]
+async fn a_repairing_draft_shows_its_try_and_stop_ends_it_within_a_second() {
+    let (router, _h) = app_for(Options {
+        behaviour: Behaviour::Slow,
+        delay_ms: 5000,
+        ..Options::default()
+    })
+    .await;
+    let (_, v) = post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a crypt","background":true}),
+    )
+    .await;
+    let id = v["job"].as_str().unwrap().to_string();
+    poll_job(&router, &id, |j| j["phase"] == "asking").await;
+    let t = std::time::Instant::now();
+    let (st, _) = post_json(
+        &router,
+        &format!("/api/ai/jobs/{id}/cancel"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let j = poll_job(&router, &id, |j| j["status"] == "cancelled").await;
+    assert!(t.elapsed() < std::time::Duration::from_secs(1));
+    assert_eq!(j["message"], "Cancelled.");
+}
+
+#[tokio::test]
+async fn a_background_draft_that_needs_repair_reports_the_second_try() {
+    let (router, _h) = app_for(Options {
+        behaviour: Behaviour::FixOnce,
+        ..Options::default()
+    })
+    .await;
+    let (_, v) = post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a crypt","background":true}),
+    )
+    .await;
+    let id = v["job"].as_str().unwrap().to_string();
+    let done = poll_job(&router, &id, |j| j["status"] != "running").await;
+    assert_eq!(
+        (done["status"].as_str(), done["attempts"].as_u64()),
+        (Some("done"), Some(2)),
+        "{done}"
+    );
+}

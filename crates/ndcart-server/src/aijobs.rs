@@ -26,6 +26,32 @@ pub struct AiJob {
     pub seeds: Vec<i64>,
     /// Where nd-world keeps each finished picture, so a later job can start from one.
     pub urls: Vec<String>,
+    /// Draft jobs: `asking`, `checking`, `repairing`, `done` or `error`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub phase: String,
+    /// Draft jobs: which try this is, of how many at most.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub attempt: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub max_attempts: usize,
+    /// Draft jobs: what the repair loop is complaining about while it asks again.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub problems: Vec<String>,
+    /// Draft jobs: the finished spec and the linter's notes about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spec: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<serde_json::Value>,
+    /// How many asks the finished spec took.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub attempts: usize,
+    /// Cancelling drops the task, and with it the request in flight.
+    #[serde(skip)]
+    abort: Option<tokio::task::AbortHandle>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 fn registry() -> &'static Mutex<BTreeMap<String, AiJob>> {
@@ -48,6 +74,9 @@ pub fn cancel(id: &str) -> bool {
         Some(j) if j.status == "running" => {
             j.status = "cancelled".into();
             j.message = "Cancelled.".into();
+            if let Some(a) = j.abort.take() {
+                a.abort();
+            }
             true
         }
         _ => false,
@@ -61,6 +90,7 @@ fn update(id: &str, f: impl FnOnce(&mut AiJob)) {
 }
 
 const MAX_RUNNING: usize = 2;
+const MAX_DRAFTS: usize = 4;
 const MAX_KEPT: usize = 40;
 
 /// The prompt as sent: the user's words plus what each kind of picture needs.
@@ -84,7 +114,16 @@ pub fn shape_negative(kind: &str) -> &'static str {
 /// Register a job and return its id (the work itself is `run`).
 pub fn register(kind: &str, prompt: &str, count: usize) -> Result<String, String> {
     let mut r = registry().lock().expect("jobs");
-    if r.values().filter(|j| j.status == "running").count() >= MAX_RUNNING {
+    // Pictures and drafts queue apart: a stuck draft never blocks the art, and the other way round.
+    let drafting = kind.starts_with("draft");
+    let running = r
+        .values()
+        .filter(|j| j.status == "running" && j.kind.starts_with("draft") == drafting)
+        .count();
+    if drafting && running >= MAX_DRAFTS {
+        return Err("four drafts are already running; wait for one to finish or stop it".into());
+    }
+    if !drafting && running >= MAX_RUNNING {
         return Err(
             "two picture jobs are already running; wait for one to finish or cancel it".into(),
         );
@@ -112,9 +151,104 @@ pub fn register(kind: &str, prompt: &str, count: usize) -> Result<String, String
             assets: Vec::new(),
             seeds: Vec::new(),
             urls: Vec::new(),
+            phase: String::new(),
+            attempt: 0,
+            max_attempts: 0,
+            problems: Vec::new(),
+            spec: None,
+            warnings: None,
+            attempts: 0,
+            abort: None,
         },
     );
     Ok(id)
+}
+
+/// Hand the task of a registered job over, so Stop can end it. A job already cancelled
+/// (Stop came first) ends at once.
+pub fn set_abort(id: &str, handle: tokio::task::AbortHandle) {
+    let mut r = registry().lock().expect("jobs");
+    match r.get_mut(id) {
+        Some(j) if j.status == "running" => j.abort = Some(handle),
+        _ => handle.abort(),
+    }
+}
+
+/// Do the work of a registered draft job: ask the model with the repair loop, reporting each
+/// phase to the job as it goes. `world` drafts an overland map instead of a battle map.
+#[cfg(feature = "bridge")]
+pub async fn run_draft(
+    id: String,
+    cfg: crate::draft::Config,
+    prompt: String,
+    ctx: crate::draft::Context,
+    world: bool,
+) {
+    use crate::repair::Progress;
+    let progress = |p: Progress| {
+        update(&id, |j| match p {
+            Progress::Asking { attempt, max } => {
+                j.phase = "asking".into();
+                j.attempt = attempt;
+                j.max_attempts = max;
+                j.message = if attempt > 1 {
+                    format!("Asking (try {attempt} of {max})…")
+                } else {
+                    "Asking…".into()
+                };
+            }
+            Progress::Checking { attempt } => {
+                j.phase = "checking".into();
+                j.attempt = attempt;
+                j.message = "Checking the answer…".into();
+            }
+            Progress::Repairing { attempt, problems } => {
+                j.phase = "repairing".into();
+                j.attempt = attempt;
+                j.problems = problems;
+                j.message = format!("Fixing problems (try {attempt})…");
+            }
+        })
+    };
+    let result: Result<(serde_json::Value, serde_json::Value, usize), String> = async {
+        if world {
+            let out = crate::draft::draft_world_with(&cfg, &prompt, &ctx, &progress).await?;
+            Ok((
+                serde_json::to_value(&out.0).map_err(|e| e.to_string())?,
+                serde_json::json!([]),
+                out.1,
+            ))
+        } else {
+            let d = crate::draft::draft_with_progress(&cfg, &prompt, &ctx, &progress).await?;
+            Ok((
+                serde_json::to_value(&d.spec).map_err(|e| e.to_string())?,
+                serde_json::to_value(&d.warnings).map_err(|e| e.to_string())?,
+                d.attempts,
+            ))
+        }
+    }
+    .await;
+    update(&id, |j| {
+        if j.status != "running" {
+            return; // cancelled meanwhile
+        }
+        match result {
+            Ok((spec, warnings, attempts)) => {
+                j.status = "done".into();
+                j.phase = "done".into();
+                j.message = "Done.".into();
+                j.spec = Some(spec);
+                j.warnings = Some(warnings);
+                j.attempts = attempts;
+                j.problems.clear();
+            }
+            Err(e) => {
+                j.status = "error".into();
+                j.phase = "error".into();
+                j.message = e;
+            }
+        }
+    });
 }
 
 #[cfg(feature = "bridge")]
