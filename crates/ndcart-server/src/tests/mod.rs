@@ -2613,7 +2613,7 @@ async fn ai_settings_save_read_redact_and_take_effect() {
 
     // Save an Unsloth-style config; the key is never echoed back.
     let save = serde_json::json!({
-        "direct_url": "http://127.0.0.1:3915/v1",
+        "direct_url": "http://127.0.0.1:8391/v1",
         "direct_model": "unsloth/Qwen3-4B-GGUF",
         "key": "sk-local-1"
     });
@@ -2627,7 +2627,7 @@ async fn ai_settings_save_read_redact_and_take_effect() {
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(
         v["settings"]["direct_url"],
-        serde_json::json!("http://127.0.0.1:3915/v1")
+        serde_json::json!("http://127.0.0.1:8391/v1")
     );
     assert!(text.contains("\"key_set\":true"));
     assert!(
@@ -2654,7 +2654,7 @@ async fn ai_settings_save_read_redact_and_take_effect() {
 
     // Posting the same address again (no key) keeps the key; a different
     // address without a key drops it and says so.
-    let same = serde_json::json!({"direct_url": "http://127.0.0.1:3915/v1"});
+    let same = serde_json::json!({"direct_url": "http://127.0.0.1:8391/v1"});
     let v: serde_json::Value = serde_json::from_str(
         &body_string(post("/api/ai-settings".into(), same.to_string()).await).await,
     )

@@ -215,13 +215,13 @@
     <h3>Settings and health</h3>
     <ul id="settings-list" class="checks" aria-live="polite"></ul>
     <fieldset>
-      <legend>AI model (local Unsloth Studio, Ollama, ...)</legend>
-      <p class="dim">An OpenAI-compatible endpoint. Example for Unsloth Studio:
-        <code>http://127.0.0.1:3915/v1</code> — for Ollama: <code>http://127.0.0.1:11434/v1</code>.
+      <legend>AI model (llama.cpp, Ollama, Unsloth Studio, ...)</legend>
+      <p class="dim">An OpenAI-compatible endpoint. Example for llama-server (the port you pass with <code>--port</code>):
+        <code>http://127.0.0.1:8391/v1</code> — for Ollama: <code>http://127.0.0.1:11434/v1</code>.
         Applies immediately to draft, refine and ask. nd-world credentials stay in the
         environment as before.</p>
-      <label>Endpoint <input id="ai-url" placeholder="http://127.0.0.1:3915/v1" autocomplete="off"></label>
-      <label>Model <input id="ai-model" list="ai-model-list" placeholder="unsloth/Qwen3-4B-GGUF" autocomplete="off">
+      <label>Endpoint <input id="ai-url" placeholder="http://127.0.0.1:8391/v1" autocomplete="off"></label>
+      <label>Model <input id="ai-model" list="ai-model-list" placeholder="ndcart-local" autocomplete="off">
         <datalist id="ai-model-list"></datalist></label>
       <label>API key <input id="ai-key" type="password" placeholder="leave empty if none" autocomplete="off"></label>
       <menu>

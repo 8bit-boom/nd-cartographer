@@ -19,8 +19,8 @@ ND_CARTO_PASSWORD_FILE=/run/secrets/ndcart  ndcart serve --data-dir ~/ndcart-dat
 
 Optional: `ND_CARTO_WORLD=<slug>`, `ND_CARTO_MODEL=<name>`, `ND_CARTO_TOTP`.
 
-**A model you run yourself** (any OpenAI-compatible server: **Unsloth Studio**,
-Ollama's `/v1`, llama.cpp's server, ...). Two ways to point the studio at it:
+**A model you run yourself** (any OpenAI-compatible server: llama.cpp's
+`llama-server` serving an Unsloth GGUF, Ollama's `/v1`, Unsloth Studio, ...). Two ways to point the studio at it:
 
 *In the studio* — open **⚙ Settings**, fill in the endpoint, pick the model from
 the dropdown (it reads the endpoint's own model list), optionally an API key,
@@ -39,17 +39,23 @@ Optional key: `ND_CARTO_LLM_KEY` or `ND_CARTO_LLM_KEY_FILE`. Environment
 variables win over saved settings per field. Requests go one at a time. A direct
 model writes specs but cannot make pictures or read the world's place names.
 
-**Unsloth Studio** (a local server for Unsloth fine-tuned GGUF models):
+**llama.cpp's `llama-server` serving an Unsloth GGUF** (Unsloth publishes the
+quantised GGUF files; llama.cpp runs them):
 
-1. Start Unsloth Studio and load a model (any instruct model works; bigger is
-   better at following the JSON spec shape).
-2. In the studio's ⚙ Settings set the endpoint to its OpenAI-compatible address
-   (for example `http://127.0.0.1:3915/v1`), press the model dropdown to load
-   the served models, pick one, **Test connection** (the model should reply
-   "OK"), then **Save**.
+1. Start `llama-server` with a model and a port you choose, for example
+   `llama-server -hf unsloth/Qwen3.5-4B-GGUF:UD-Q4_K_XL --host 127.0.0.1 --port 8391 --alias ndcart-local`.
+   Always pass `--port`: its default has changed between releases.
+2. In the studio's ⚙ Settings set the endpoint to `http://127.0.0.1:8391/v1`
+   (the port you passed), press the model dropdown to load the served models,
+   pick one (`ndcart-local` if you passed that alias), **Test connection** (the
+   model should reply "OK"), then **Save**.
 3. Use ✨ **From a spec…** to draft, outline **Refine…** to edit a floor while
    keeping the rooms you pinned, and ⚙ **Ask** to search your maps — all
    against your local model.
+
+**If you already run Unsloth Studio:** its OpenAI-compatible API is on the Studio
+port (`unsloth studio -p 8888` gives `http://127.0.0.1:8888/v1`). Create a key in
+Studio's Settings → API (`sk-unsloth-...`) and paste it into the API key field.
 
 Small local models: the spec is strict JSON and the studio re-asks with the
 exact complaint twice before giving up, so 4B-class models usually work; if a

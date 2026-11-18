@@ -1,5 +1,5 @@
 //! The studio's AI model settings (plan §21's "standalone direct mode",
-//! e.g. a local Unsloth Studio or Ollama): persisted at
+//! e.g. a local llama.cpp server, Ollama or Unsloth Studio): persisted at
 //! `<data dir>/ai-settings.json`, with environment variables keeping the
 //! final word per field (so CI, the CLI and Docker keep working unchanged).
 //!
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
 pub struct StoredAiSettings {
-    /// OpenAI-compatible base URL, e.g. `http://127.0.0.1:3915/v1`.
+    /// OpenAI-compatible base URL, e.g. `http://127.0.0.1:8391/v1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_url: Option<String>,
     /// The model name the endpoint serves (`unsloth/Qwen3-...`, `llama3.1:8b`).
@@ -139,7 +139,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ndcart-ai-set-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let stored = StoredAiSettings {
-            direct_url: Some("http://127.0.0.1:3915/v1".into()),
+            direct_url: Some("http://127.0.0.1:8391/v1".into()),
             direct_model: Some("unsloth/Qwen3-4B-GGUF".into()),
             key: None,
         };
