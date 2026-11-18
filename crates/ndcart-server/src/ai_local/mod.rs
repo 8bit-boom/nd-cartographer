@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod catalog;
+pub mod hw;
 
 use std::path::PathBuf;
 
@@ -95,6 +96,19 @@ pub fn models(args: Vec<String>) -> Result<(), String> {
     }
     let cat = catalog::bundled();
     let records = catalog::load_records(&c.data);
+    let machine = hw::detect(None);
+    let recs = hw::recommend(&machine, &cat);
+    let mark = |id: &str| {
+        recs.iter()
+            .find(|r| r.entry.id == id)
+            .map(|r| match (r.recommended, r.fit) {
+                (true, _) => "recommended for this computer",
+                (_, hw::Fit::Full) => "fits",
+                (_, hw::Fit::Partial) => "fits with part on the CPU (slower)",
+                _ => "too big for this computer",
+            })
+            .unwrap_or("")
+    };
     if c.json {
         let rows: Vec<_> = cat
             .iter()
@@ -103,6 +117,7 @@ pub fn models(args: Vec<String>) -> Result<(), String> {
                     "id": m.id, "label": m.label, "tier": m.tier, "hf_repo": m.hf_repo,
                     "file": m.file, "quant": m.quant, "approx_bytes": m.approx_bytes,
                     "ctx_default": m.ctx_default, "license": m.license,
+                    "fit": mark(&m.id),
                     "verified": records.contains_key(&m.id),
                     "tested": records.get(&m.id),
                 })
@@ -114,9 +129,10 @@ pub fn models(args: Vec<String>) -> Result<(), String> {
         );
         return Ok(());
     }
+    println!("This computer: {}\n", machine.summary());
     for m in &cat {
         println!(
-            "{:<18} {:<8} ~{:<8} {}\n{:<18} {}/{}  [{}]",
+            "{:<18} {:<8} ~{:<8} {}\n{:<18} {}/{}  [{}] [{}]",
             m.id,
             m.tier,
             human_bytes(m.approx_bytes),
@@ -124,6 +140,7 @@ pub fn models(args: Vec<String>) -> Result<(), String> {
             "",
             m.hf_repo,
             m.file,
+            mark(&m.id),
             catalog::status_label(records.get(&m.id)),
         );
     }
