@@ -281,6 +281,7 @@ routes/        the HTTP handlers, grouped by what they serve (routes/mod.rs list
   assets.rs      materials, props (stamps), pictures, Dungeondraft packs, make-material/make-stamp
   ai.rs          ai image jobs, draft/refine/ask, AI model settings, nd-world entities
   proposals.rs   map and world proposals (preview, accept, reject)
+  spec.rs        the AI instruction pack and the spec check over HTTP (no AI needed)
   table.rs       the shared table screen
 bundle.rs      the .ndmapz backup format (build and validated read); also the `ndcart bundle` CLI
 store.rs       StoredDoc / Store, the journal wiring, persistence (save_doc, save_doc_edit, SnapshotJob)
@@ -290,6 +291,9 @@ cache.rs       the byte-budget LRU used by the tile, asset and pixmap caches
 auth.rs        token gate, same-origin and Host guards, security headers, table tokens
 bench.rs       `ndcart bench` and `bench --large` (budgets)
 publish.rs, draft.rs   the nd-world client side (cargo feature `bridge`)
+aipack.rs      the AI instruction pack (assets/ai/: prompts, schemas, reference, examples) and the
+               tests that keep it in step with the code; speccheck.rs / specshape.rs check a spec
+               (unknown fields, validate, lay out, lint) for the AI loop, HTTP and MCP alike
 mcp.rs, ask.rs, aijobs.rs, ai_settings.rs, doctor.rs, packs.rs, pdf.rs, convert.rs, synth.rs,
 text.rs, worldspec.rs, golden.rs   feature modules
 tests/mod.rs   router-level tests and their helpers (`test_app`, `call`, `new_doc`, `post_ops_json`)

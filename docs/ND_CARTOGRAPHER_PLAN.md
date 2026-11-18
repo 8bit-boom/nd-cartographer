@@ -16,7 +16,7 @@ Throughout, "the studio" means nd-cartographer (earlier drafts said "companion" 
 same app, bigger ambition).
 
 Everything marked **[verified]** below was read out of this repository (file:line given)
-or measured by [MAP_CREATOR_RESEARCH.md](MAP_CREATOR_RESEARCH.md). Anything marked
+or measured by `MAP_CREATOR_RESEARCH.md` (not in this repository). Anything marked
 **[verify]** must be re-checked against the live server at implementation time.
 
 ---
@@ -214,7 +214,7 @@ publishing is a pass-through, not a translation:
 - **Lights** = `{id?, x, y, range, color, intensity, on, label}` ≤ 60 **[verified,
   `map_walls.py:181-195`]**.
 - **Floors/props/labels** render into `elements_json` shapes (`rect`, `text`, `image`,
-  … full list in [AI_SCHEMATIC_GUIDE.md](AI_SCHEMATIC_GUIDE.md); the importer's accepted
+  … full list in `AI_SCHEMATIC_GUIDE.md` (nd-world's guide); the importer's accepted
   set is `rect, circle, line, arrow, poly, path, text, pin, image, measure, token`
   **[verified, `app/routers/importer.py:46`]**).
 - Multi-floor: one grid per floor; stairs/lifts carry `links_to` floor+cell so AI and

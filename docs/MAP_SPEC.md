@@ -9,6 +9,11 @@ Two kinds: a **MapSpec** (rooms and how they connect) and a **WorldSpec** (an
 overland map). Paste either into the studio's **✨ From a spec…** dialog, or let
 **✨ Draft with AI** write it.
 
+> **For AI and agents:** the instruction pack in `crates/ndcart-server/assets/ai/` is the
+> source of truth for how a model should write these specs: JSON Schemas, system prompts,
+> a full reference and worked examples. This page is the human summary. See
+> [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md) for how to get the pack over HTTP or MCP.
+
 ## MapSpec (battle maps)
 
 ```json

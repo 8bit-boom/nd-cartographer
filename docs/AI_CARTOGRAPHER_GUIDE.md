@@ -63,6 +63,13 @@ draft keeps failing, try a model with stronger instruction following.
 
 The dialogs show which one is in use (🌐 nd-world, 🏠 your own model, ⛔ none).
 
+## Instructions for other agents
+
+An outside agent (Claude Code, a script, an MCP client) can read the same instruction pack the
+studio's own AI uses, check a spec with no model involved, and hand a valid spec to you to
+preview. See [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md). The pack lives in
+`crates/ndcart-server/assets/ai/` and is the source of truth for prompts and schemas.
+
 ## What you can ask for
 
 | Where | What | Result |
