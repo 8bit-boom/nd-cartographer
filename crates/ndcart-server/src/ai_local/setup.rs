@@ -75,6 +75,41 @@ fn parse(rest: Vec<String>) -> Result<Flags, String> {
     Ok(f)
 }
 
+/// Optional overrides when choosing a model.
+pub struct UseOpts {
+    pub port: Option<u16>,
+    pub autostart: bool,
+}
+
+/// Make `entry` (downloaded as `rel`) the model the studio uses: the managed block is set,
+/// keeping earlier tuning, and a saved endpoint (with the key that belonged to it) is
+/// cleared because it would take precedence.
+pub fn use_model(
+    st: &mut ai_settings::StoredAiSettings,
+    entry: &Entry,
+    rel: &str,
+    key: &Path,
+    o: UseOpts,
+) -> Managed {
+    let old = st.managed.clone().unwrap_or_default();
+    let m = Managed {
+        model_file: rel.to_string(),
+        model_id: Some(entry.id.clone()),
+        ctx: Some(entry.ctx_default),
+        port: o.port.or(old.port),
+        gpu_layers: old.gpu_layers,
+        threads: old.threads,
+        autostart: o.autostart || old.autostart,
+        runtime_path: old.runtime_path,
+        key_file: Some(key.to_string_lossy().into_owned()),
+    };
+    st.managed = Some(m.clone());
+    st.direct_url = None;
+    st.direct_model = None;
+    st.key = None;
+    m
+}
+
 /// Returns the exit code (0 good or usable, 3 too weak).
 pub async fn run_setup(args: Vec<String>) -> Result<i32, String> {
     let c = super::common(args)?;
@@ -199,24 +234,16 @@ pub async fn run_setup(args: Vec<String>) -> Result<i32, String> {
         }
     }
     let key = serve::ensure_key(data)?;
-    let old = stored.managed.clone().unwrap_or_default();
-    let m = Managed {
-        model_file: rel.clone(),
-        model_id: Some(entry.id.clone()),
-        ctx: Some(entry.ctx_default),
-        port: f.port.or(old.port),
-        gpu_layers: old.gpu_layers,
-        threads: old.threads,
-        autostart: f.autostart || old.autostart,
-        runtime_path: old.runtime_path,
-        key_file: Some(key.to_string_lossy().into_owned()),
-    };
-    st.managed = Some(m.clone());
-    // The local model is used when nothing else is set; a saved endpoint (and the key that
-    // belonged to it) would take precedence, so it is cleared.
-    st.direct_url = None;
-    st.direct_model = None;
-    st.key = None;
+    let m = use_model(
+        &mut st,
+        &entry,
+        &rel,
+        &key,
+        UseOpts {
+            port: f.port,
+            autostart: f.autostart,
+        },
+    );
     ai_settings::save(Some(data), &st)?;
     eprintln!(
         "Saved: the studio will use the local model{}.",

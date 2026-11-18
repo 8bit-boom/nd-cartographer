@@ -422,9 +422,9 @@ pub fn stop(data: &Path, patience: Duration) -> Result<Stopped, String> {
     Ok(Stopped::Ended(rec.pid))
 }
 
-/// Start a detached server and wait for it. Refuses when one is already running or the port
-/// is taken.
-pub async fn start(data: &Path, l: &Launch, wait: Duration) -> Result<RuntimeRec, String> {
+/// Start a detached server without waiting for it. Refuses when one is already running or
+/// the port is taken. The caller polls [`health`] (a big model takes a while to load).
+pub fn start_nowait(data: &Path, l: &Launch) -> Result<(RuntimeRec, Child), String> {
     if let Some(rec) = read_rec(data) {
         if is_alive(rec.pid) && belongs(&rec) != Some(false) {
             return Err(format!(
@@ -440,9 +440,15 @@ pub async fn start(data: &Path, l: &Launch, wait: Duration) -> Result<RuntimeRec
             l.port
         ));
     }
-    let mut child = spawn_child(l, true)?;
+    let child = spawn_child(l, true)?;
     let rec = rec_for(l, child.id());
     write_rec(data, &rec)?;
+    Ok((rec, child))
+}
+
+/// Start a detached server and wait for it.
+pub async fn start(data: &Path, l: &Launch, wait: Duration) -> Result<RuntimeRec, String> {
+    let (rec, mut child) = start_nowait(data, l)?;
     if let Err(e) = wait_ready(l.port, wait, Some(&mut child), &l.log).await {
         let _ = child.kill();
         let _ = child.wait();

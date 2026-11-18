@@ -216,8 +216,25 @@
   <dialog id="settings-dialog">
     <h3>Settings and health</h3>
     <ul id="settings-list" class="checks" aria-live="polite"></ul>
+    <fieldset id="local-ai">
+      <legend>Run a model on this computer</legend>
+      <p class="dim">Downloads an open model (a GGUF file) after you confirm its size, and runs it with
+        llama.cpp on this computer only. Nothing leaves your machine, and no program is downloaded for you.</p>
+      <p id="local-hw" class="dim"></p>
+      <div id="local-runtime"></div>
+      <ul id="local-models" class="checks"></ul>
+      <p id="local-job" class="hint" aria-live="polite" hidden><progress id="local-bar" max="100" value="0"></progress> <span id="local-job-text"></span>
+        <button id="local-cancel" type="button">Cancel</button></p>
+      <menu>
+        <button id="local-start" type="button">Start</button>
+        <button id="local-stop" type="button">Stop</button>
+        <button id="local-test" type="button">Run self-test</button>
+      </menu>
+      <pre id="local-report" class="dim" hidden></pre>
+      <p id="local-msg" class="hint" aria-live="polite"></p>
+    </fieldset>
     <fieldset>
-      <legend>AI model (llama.cpp, Ollama, Unsloth Studio, ...)</legend>
+      <legend>Use another server (llama.cpp, Ollama, Unsloth Studio, ...)</legend>
       <p class="dim">An OpenAI-compatible endpoint. Example for llama-server (the port you pass with <code>--port</code>):
         <code>http://127.0.0.1:8391/v1</code> — for Ollama: <code>http://127.0.0.1:11434/v1</code>.
         Applies immediately to draft, refine and ask. nd-world credentials stay in the

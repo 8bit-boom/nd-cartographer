@@ -298,6 +298,10 @@ repair.rs      the one ask/judge/repair loop (conversational, complaint-aware) f
 stepwise.rs    outline-then-floors drafting for multi-floor maps (bridge); aicache.rs the opt-in result cache
 ai_standin.rs  `ndcart ai stand-in`: a deterministic fake model server (tests, demos); also see
                tests/ai_loop.rs for the router tests that drive the AI routes against it
+ai_local/      local AI (bridge): `catalog` (assets/ai/models.toml), `hw` (hardware and fit), `runtime`
+               (finds llama-server), `pull` (safe GGUF downloads), `serve` (the managed server and its
+               supervisor), `selftest`, `status`, `setup` (the `ndcart ai …` commands) and `http`
+               (`/api/ai/local/*`); tests/ai_local*.rs and tests/ai_local_serve.rs (real processes)
 mcp.rs, ask.rs, aijobs.rs, ai_settings.rs, doctor.rs, packs.rs, pdf.rs, convert.rs, synth.rs,
 text.rs, worldspec.rs, golden.rs   feature modules
 tests/mod.rs   router-level tests and their helpers (`test_app`, `call`, `new_doc`, `post_ops_json`)

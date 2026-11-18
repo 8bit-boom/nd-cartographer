@@ -669,7 +669,7 @@ impl Pull {
         &self,
         plan: &Plan,
         data: &Path,
-        progress: &mut dyn FnMut(&Progress),
+        progress: &mut (dyn FnMut(&Progress) + Send),
         cancel: Option<&AtomicBool>,
     ) -> Result<String, String> {
         let root = models_dir(data).join(&plan.repo);
@@ -688,7 +688,7 @@ impl Pull {
         spec: &FileSpec,
         root: &Path,
         before: u64,
-        progress: &mut dyn FnMut(&Progress),
+        progress: &mut (dyn FnMut(&Progress) + Send),
         cancel: Option<&AtomicBool>,
     ) -> Result<(), String> {
         let dest = root.join(&spec.path);
@@ -699,7 +699,7 @@ impl Pull {
         let mut part_name = dest.as_os_str().to_owned();
         part_name.push(".part");
         let part = PathBuf::from(part_name);
-        let report = |progress: &mut dyn FnMut(&Progress), at: u64, resumed: bool| {
+        let report = |progress: &mut (dyn FnMut(&Progress) + Send), at: u64, resumed: bool| {
             progress(&Progress {
                 file: spec.path.clone(),
                 done: before + at,

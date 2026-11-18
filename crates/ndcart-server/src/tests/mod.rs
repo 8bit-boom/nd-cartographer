@@ -12,6 +12,8 @@ use tower::ServiceExt;
 #[cfg(feature = "bridge")]
 mod ai_local;
 #[cfg(feature = "bridge")]
+mod ai_local_http;
+#[cfg(feature = "bridge")]
 mod ai_loop;
 mod ai_pack;
 mod spec_problems;

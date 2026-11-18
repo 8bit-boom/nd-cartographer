@@ -2618,13 +2618,198 @@ async function saveAiQuiet() {
   await api('POST', '/api/ai-settings', body);
 }
 
+// ---------- run a model on this computer (plan 4.7) ----------
+// The panel is a thin view over /api/ai/local: hardware, the llama-server it found, the
+// catalog with how each model fits, a download (the real size is confirmed first), start and
+// stop, a self-test, and "Use this model". It polls while something is happening.
+let localTimer = null;
+let localLoading = false;   // we asked the server to start and it is still loading
+
+function localMsg(t) { document.getElementById('local-msg').textContent = t; }
+
+async function localCall(method, url, body) {
+  const res = await fetch(url, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  let json = {};
+  try { json = await res.json(); } catch { /* no body */ }
+  return { ok: res.ok, status: res.status, json };
+}
+
+function gb(bytes) { return bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + ' GB' : (bytes / 1e6).toFixed(1) + ' MB'; }
+
+function fitText(m) {
+  if (m.recommended) return 'recommended for this computer';
+  if (m.fit === 'full') return 'fits';
+  if (m.fit === 'partial') return 'runs partly on the CPU (slower)';
+  return 'too big for this computer';
+}
+
+function renderLocal(d) {
+  const hw = d.hw;
+  const gpus = hw.gpus.length ? hw.gpus.map(g => `${g.name} ${gb(g.vram_bytes)}`).join(', ') : (hw.apple_silicon ? 'Apple Silicon (shared memory)' : 'no GPU found');
+  document.getElementById('local-hw').textContent = `This computer: ${hw.os} ${hw.arch}, ${gb(hw.ram_bytes)} RAM, ${gpus}.`;
+  const rt = document.getElementById('local-runtime');
+  rt.textContent = '';
+  if (d.runtime.found) {
+    const p = document.createElement('p');
+    p.className = 'dim';
+    p.textContent = `llama-server ${d.runtime.version || ''} found (${d.runtime.path}).`;
+    rt.appendChild(p);
+  } else {
+    const p = document.createElement('p');
+    p.textContent = 'llama-server (the program that runs the model) was not found. Install it, then reopen this window:';
+    const pre = document.createElement('pre');
+    pre.textContent = d.runtime.hint;
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.textContent = 'Copy commands';
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(d.runtime.hint); localMsg('Copied.'); } catch { localMsg('Select the text above to copy it.'); }
+    };
+    rt.append(p, pre, copy);
+  }
+  const list = document.getElementById('local-models');
+  list.textContent = '';
+  const busy = d.pull.state === 'running';
+  for (const m of d.catalog) {
+    const li = document.createElement('li');
+    li.className = m.recommended ? 'ok' : (m.fit === 'no' ? 'fail' : 'warn');
+    const lv = document.createElement('span');
+    lv.className = 'lv';
+    lv.textContent = m.recommended ? 'best' : (m.fit === 'no' ? 'big' : 'ok');
+    const t = document.createElement('span');
+    t.style.flex = '1';
+    const tested = m.tested ? `tested here: ${m.tested.verdict}` : 'not tested yet';
+    t.textContent = `${m.label} - about ${gb(m.approx_bytes)}, ${fitText(m)}; ${tested}`;
+    li.append(lv, t);
+    const mk = (label, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      b.disabled = busy;
+      b.onclick = fn;
+      li.appendChild(b);
+    };
+    if (!m.installed) {
+      mk('Download', () => localDownload(m));
+    } else {
+      mk('Use this model', () => localUse(m));
+      mk('Delete', () => localDelete(m));
+    }
+    list.appendChild(li);
+  }
+  const job = d.pull;
+  const jobEl = document.getElementById('local-job');
+  jobEl.hidden = !(job.state === 'running');
+  if (job.state === 'running') {
+    const bar = document.getElementById('local-bar');
+    bar.value = job.total ? Math.round(100 * job.done / job.total) : 0;
+    document.getElementById('local-job-text').textContent = `Downloading ${job.id}: ${gb(job.done)} of ${gb(job.total)}`;
+  } else if (job.state === 'error') {
+    localMsg(`Download failed: ${job.error}`);
+  }
+  const sv = d.server;
+  const running = !!(sv.configured && sv.running);
+  document.getElementById('local-start').disabled = !sv.configured || running || !d.runtime.found;
+  document.getElementById('local-stop').disabled = !running;
+  document.getElementById('local-test').disabled = !sv.configured || sv.health !== 'ready';
+  if (sv.configured) {
+    const state = sv.health === 'ready' ? 'running' : (sv.health === 'loading' ? 'loading the model…' : (running ? 'starting…' : 'stopped'));
+    if (!busy) localMsg(`Local model: ${sv.model_id || sv.model_file} is ${state}.`);
+    if (sv.health === 'ready') localLoading = false;
+  }
+  if (!d.data_dir_ok) {
+    localMsg('Start the studio with --data-dir (or ND_CARTO_DATA_DIR) to download and run local models.');
+    list.textContent = '';
+  }
+  return busy || (localLoading && sv.health !== 'ready');
+}
+
+async function refreshLocal() {
+  clearTimeout(localTimer);
+  const panel = document.getElementById('local-ai');
+  if (!settingsDialog.open) return;
+  try {
+    const r = await localCall('GET', '/api/ai/local');
+    if (!r.ok) { panel.hidden = true; return; }   // this build has no local-model support
+    panel.hidden = false;
+    if (renderLocal(r.json)) localTimer = setTimeout(refreshLocal, 1000);
+  } catch (e) { localMsg(e.message); }
+}
+
+async function localDownload(m) {
+  localMsg('Checking the download…');
+  // The first ask learns the real size from the Hub; the person confirms it; the second starts it.
+  let r = await localCall('POST', '/api/ai/local/pull', { id: m.id });
+  if (r.status === 400 && r.json.size_bytes) {
+    const free = 'Make sure the disk has room: it needs about 10% more than that.';
+    if (!window.confirm(`Download ${gb(r.json.size_bytes)} from huggingface.co/${r.json.repo}?\n${free}`)) { localMsg('Not downloaded.'); return; }
+    r = await localCall('POST', '/api/ai/local/pull', { id: m.id, confirm_bytes: r.json.size_bytes });
+  }
+  if (!r.ok) { localMsg(`Not downloaded: ${r.json.error || r.status}`); return; }
+  localMsg('Downloading…');
+  refreshLocal();
+}
+
+async function localUse(m) {
+  const r = await localCall('POST', '/api/ai/local/use', { id: m.id });
+  if (!r.ok) { localMsg(`Not changed: ${r.json.error || r.status}`); return; }
+  localMsg(`Using ${m.id}. ${r.json.restart_needed ? 'Stop and start the server to load it.' : 'Press Start to run it.'}`);
+  fillAiSettings();
+  refreshLocal();
+}
+
+async function localDelete(m) {
+  if (!window.confirm(`Delete the downloaded file for ${m.id}? You can download it again.`)) return;
+  const r = await localCall('DELETE', `/api/ai/local/models/${encodeURIComponent(m.id)}`);
+  localMsg(r.ok ? `Deleted ${m.id}.` : `Not deleted: ${r.json.error || r.status}`);
+  refreshLocal();
+}
+
+document.getElementById('local-start').onclick = async () => {
+  localMsg('Starting…');
+  const r = await localCall('POST', '/api/ai/local/start');
+  if (!r.ok) { localMsg(`Not started: ${r.json.error || r.status}`); return; }
+  localLoading = true;
+  refreshLocal();
+};
+document.getElementById('local-stop').onclick = async () => {
+  const r = await localCall('POST', '/api/ai/local/stop');
+  localLoading = false;
+  localMsg(r.ok ? 'Stopped.' : `Not stopped: ${r.json.error || r.status}`);
+  refreshLocal();
+};
+document.getElementById('local-cancel').onclick = async () => {
+  await localCall('POST', '/api/ai/local/pull/cancel');
+  localMsg('Cancelling (the partial file is kept, so a later download resumes)…');
+};
+document.getElementById('local-test').onclick = async () => {
+  const pre = document.getElementById('local-report');
+  localMsg('Running the self-test (a minute or so)…');
+  pre.hidden = true;
+  const r = await localCall('POST', '/api/ai/local/test', {});
+  if (!r.ok) { localMsg(`Self-test failed: ${r.json.error || r.status}`); return; }
+  const rep = r.json;
+  const lines = rep.steps.map(s => `${s.status === 'pass' ? 'pass' : s.status === 'fail' ? 'FAIL' : 'skip'}  ${s.name}: ${s.detail}`);
+  pre.textContent = lines.join('\n');
+  pre.hidden = false;
+  const word = { good: 'GOOD', usable: 'USABLE', 'too weak': 'TOO WEAK', error: 'could not be tested' }[rep.verdict] || rep.verdict;
+  localMsg(`Self-test verdict: ${word} (${rep.valid} of ${rep.total} drafts valid, ${rep.first_try} on the first ask).`);
+  refreshLocal();
+};
+
 const settingsDialog = document.getElementById('settings-dialog');
 document.getElementById('btn-settings').onclick = async () => {
   fillAiSettings();
   loadAiModels();
+  localLoading = false;
   const list = document.getElementById('settings-list');
   list.textContent = 'Checking…';
   settingsDialog.showModal();
+  refreshLocal();
   try {
     const { checks } = await api('GET', '/api/doctor');
     list.textContent = '';
@@ -2637,6 +2822,7 @@ document.getElementById('btn-settings').onclick = async () => {
   } catch (e) { list.textContent = e.message; }
 };
 document.getElementById('settings-close').onclick = () => settingsDialog.close();
+settingsDialog.addEventListener('close', () => clearTimeout(localTimer));
 
 // ---------- import an art pack ----------
 document.getElementById('btn-pack').onclick = () => document.getElementById('pack-file').click();

@@ -89,7 +89,7 @@ const TABLE_HTML: &str = include_str!("../../../ui/table.html");
 /// (as `/api/packs/import` and `/api/import/bundle` do) and goes below the
 /// shared `/api/convert` limit.
 fn build_router(app: App) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         .route("/", get(index))
         .route("/app.js", get(app_js))
@@ -226,7 +226,11 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/api/docs/{id}/redo", post(post_redo))
-        .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
+        .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile));
+    // The local-model panel's routes (the bridge feature carries all the AI code).
+    #[cfg(feature = "bridge")]
+    let router = router.merge(ai_local::http::routes());
+    router
         .with_state(app)
         .layer(axum::middleware::from_fn(auth::same_origin_guard))
         .layer(axum::middleware::from_fn(auth::security_headers))
