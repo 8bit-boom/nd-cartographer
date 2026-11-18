@@ -200,6 +200,45 @@ pub fn render(text: &str) -> String {
     out
 }
 
+/// Everything an agent needs to write a spec of `kind` (`map`, `world`, `refine`, `tags` or
+/// `theme_pack`): the system prompt, the reference, the repair template, the schema and the
+/// worked examples. The answer of `GET /api/ai/instructions` and the MCP `get_instructions` tool.
+pub fn instructions(kind: &str) -> Result<Value, String> {
+    use crate::specshape::SpecKind;
+    let k = Kind::parse(kind).ok_or_else(|| {
+        format!("kind must be map, world, refine, tags or theme_pack, not '{kind}'")
+    })?;
+    let schema_text = match k {
+        Kind::Map | Kind::Refine => Some(schema(SpecKind::Map)),
+        Kind::World => Some(schema(SpecKind::World)),
+        Kind::Tags | Kind::ThemePack => None,
+    };
+    let want_world = k == Kind::World;
+    let mut ex: Vec<Example> = match k {
+        Kind::Map | Kind::Refine | Kind::World => examples()
+            .into_iter()
+            .filter(|e| e.file.contains("world-") == want_world)
+            .collect(),
+        Kind::Tags | Kind::ThemePack => Vec::new(),
+    };
+    if k == Kind::Refine {
+        ex.sort_by_key(|e| !e.file.ends_with("map-refine.json"));
+    }
+    Ok(serde_json::json!({
+        "version": version(),
+        "schema_version": schema_version(),
+        "kind": kind,
+        "system": system(k),
+        "reference": reference(),
+        "mistakes": mistakes(),
+        "repair": render(raw("repair.md").expect("pack")),
+        "schema": schema_text.map(|t| serde_json::from_str::<Value>(t).expect("schema is JSON")),
+        "examples": ex.iter().map(|e| serde_json::json!({
+            "file": e.file, "request": e.request, "why": e.why, "spec": e.spec,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
 static SYSTEMS: LazyLock<[String; 5]> = LazyLock::new(|| {
     [
         Kind::Map,

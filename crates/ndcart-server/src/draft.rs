@@ -11,80 +11,22 @@
 //! into a prompt or an argument).
 
 use crate::aipack::{self, Kind};
-use crate::specshape::{unknown_fields_complaint, SpecKind};
 use ndcart_bridge::Bridge;
 use ndcart_core::mapspec::MapSpec;
 use std::future::Future;
 
-/// The first JSON object in `text`, tolerating code fences and chatter around it.
-pub fn extract_json(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let mut depth = 0i32;
-    let (mut in_str, mut esc) = (false, false);
-    for (i, ch) in text[start..].char_indices() {
-        if in_str {
-            match (esc, ch) {
-                (true, _) => esc = false,
-                (false, '\\') => esc = true,
-                (false, '"') => in_str = false,
-                _ => {}
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_str = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&text[start..start + i + 1]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// An AI reply may not carry fields the spec does not have: they would be dropped silently.
-/// (A person's pasted spec stays lenient; only the AI paths call this.)
-fn reject_unknown_fields(json: &str, kind: SpecKind) -> Result<(), String> {
-    match serde_json::from_str::<serde_json::Value>(json) {
-        Ok(v) => match unknown_fields_complaint(&v, kind) {
-            Some(m) => Err(m),
-            None => Ok(()),
-        },
-        // Malformed JSON gets serde's own message from the typed parse that follows.
-        Err(_) => Ok(()),
-    }
-}
+pub use crate::speccheck::extract_json;
 
 /// Parse and validate one reply. The error text is what is sent back to the model.
 pub fn parse_reply(reply: &str) -> Result<MapSpec, String> {
     let json = extract_json(reply)
         .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
-    reject_unknown_fields(json, SpecKind::Map)?;
-    let spec: MapSpec = serde_json::from_str(json)
-        .map_err(|e| format!("The JSON did not match the schema: {e}."))?;
-    spec.validate()
-        .map_err(|e| format!("The spec broke a rule: {e}."))?;
-    // Laying it out is the next check: it may not fit.
-    let laid = ndcart_core::mapspec::compile(&spec, 1)
-        .map_err(|e| format!("The spec could not be laid out: {e}."))?;
-    // The floor linter runs on the result: an error here (a publish cap) goes back to the model.
-    let errors: Vec<String> = ndcart_core::speclint::lint_compiled(&spec, &laid)
-        .map_err(|e| format!("The spec could not be checked: {e}."))?
-        .into_iter()
-        .filter(|p| p.severity == ndcart_core::Severity::Error)
-        .map(|p| p.message)
-        .collect();
-    if !errors.is_empty() {
-        return Err(format!(
-            "The laid-out map breaks a limit: {} Make the map smaller.",
-            errors.join(" ")
-        ));
+    let c = crate::speccheck::check_map(json);
+    match (c.errors.into_iter().next(), c.spec) {
+        (Some(e), _) => Err(e),
+        (None, Some(spec)) => Ok(spec),
+        (None, None) => Err("The spec could not be read.".into()),
     }
-    Ok(spec)
 }
 
 /// A drafted map and what the linter noticed about it (shown beside the preview; none of it
@@ -144,14 +86,12 @@ where
 pub fn parse_world_reply(reply: &str) -> Result<crate::worldspec::WorldSpec, String> {
     let json = extract_json(reply)
         .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
-    reject_unknown_fields(json, SpecKind::World)?;
-    let spec: crate::worldspec::WorldSpec = serde_json::from_str(json)
-        .map_err(|e| format!("The JSON did not match the schema: {e}."))?;
-    spec.validate()
-        .map_err(|e| format!("The spec broke a rule: {e}."))?;
-    crate::worldspec::compile(&spec, 1, &[])
-        .map_err(|e| format!("The spec could not be drawn: {e}."))?;
-    Ok(spec)
+    let c = crate::speccheck::check_world(json);
+    match (c.errors.into_iter().next(), c.spec) {
+        (Some(e), _) => Err(e),
+        (None, Some(spec)) => Ok(spec),
+        (None, None) => Err("The spec could not be read.".into()),
+    }
 }
 
 /// Where the model lives: nd-world's AI queue, or a direct OpenAI-compatible endpoint.

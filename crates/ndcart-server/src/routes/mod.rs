@@ -8,6 +8,7 @@ pub(crate) mod edit;
 pub(crate) mod export;
 pub(crate) mod import;
 pub(crate) mod proposals;
+pub(crate) mod spec;
 pub(crate) mod system;
 pub(crate) mod table;
 pub(crate) mod tiles;

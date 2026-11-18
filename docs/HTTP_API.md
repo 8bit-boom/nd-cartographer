@@ -68,6 +68,9 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | GET | `/api/docs/{id}/proposals/{pid}/preview?floor=N&ppc=` | – | PNG of one proposed floor. |
 | POST | `/api/docs/{id}/proposals/{pid}/accept` | – | Adds the floors (and stairs) as new floors; undo with `undo-structure` once per floor. |
 | DELETE | `/api/docs/{id}/proposals/{pid}` | – | Reject. |
+| GET | `/api/ai/instructions?kind=map\|world\|refine` | – | The AI instruction pack for a kind: `{version, schema_version, kind, system, reference, mistakes, repair, schema, examples:[{file, request, why, spec}]}`. Works with no AI configured. See `docs/AI_INSTRUCTIONS.md`. |
+| GET | `/api/ai/schema/{mapspec\|worldspec}` | – | The JSON Schema (draft 2020-12) of a spec. |
+| POST | `/api/spec/check` | `{spec, kind?}` | Run a spec (an object, or text holding one) through the checks the AI loop uses: `{ok, kind, errors:[…], unknown_fields:[paths], problems:[…]}`. Changes nothing; works with no AI configured. |
 | POST | `/api/draft` | `{prompt}` | Ask the AI (nd-world, or your own model) for a MapSpec; answers `{spec, warnings}` (linter findings, same shape as `problems` above). Needs `ND_CARTO_SERVER`, `ND_CARTO_EMAIL`, `ND_CARTO_PASSWORD[_FILE]` in the studio's environment (404 naming what is missing otherwise). |
 | GET | `/api/docs/{id}/preview?floor&x&y&radius&darkness&ppc` | – | PNG of what the table sees from a point (players' copy, fog, sight blocked by walls and closed doors, lamps light what they reach). |
 | POST | `/api/docs/{id}/scatter` | `{floor?, points:[[x,y]…], biome? \| assets[], spacing?, density?, seed}` | Fill an area with props (and, for a biome, a tinted region) as one undoable step. Biomes: forest, meadow, rocky, swamp, desert. |

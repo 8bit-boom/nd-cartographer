@@ -27,6 +27,7 @@ mod pdf;
 #[cfg(feature = "bridge")]
 mod publish;
 mod routes;
+mod speccheck;
 mod specshape;
 mod state;
 mod store;
@@ -59,6 +60,7 @@ use routes::edit::*;
 use routes::export::*;
 use routes::import::*;
 use routes::proposals::*;
+use routes::spec::*;
 use routes::system::*;
 use routes::table::*;
 use routes::tiles::*;
@@ -154,6 +156,9 @@ fn build_router(app: App) -> Router {
         .route("/api/import/foundry", post(import_foundry))
         .route("/api/draft", post(draft_spec))
         .route("/api/ai/status", get(ai_status))
+        .route("/api/ai/instructions", get(ai_instructions))
+        .route("/api/ai/schema/{which}", get(ai_schema))
+        .route("/api/spec/check", post(spec_check))
         .route("/api/world/entities", get(world_entities))
         .route("/api/world/tables", get(world_tables))
         .route("/api/docs/{id}/stock-room", post(stock_room))
