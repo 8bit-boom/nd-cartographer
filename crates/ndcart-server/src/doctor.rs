@@ -147,7 +147,7 @@ pub fn local_checks_with(data: Option<&Path>, listen: Option<&str>) -> Vec<Check
 
 /// The AI and nd-world configuration, as much as can be known without a password. Reads the
 /// saved AI settings from `data` (environment variables still win per field).
-#[cfg(feature = "bridge")]
+#[cfg(all(test, feature = "bridge"))]
 pub async fn ai_checks(data: Option<&Path>) -> Vec<Check> {
     ai_checks_with(&crate::ai_settings::load(data)).await
 }
@@ -188,6 +188,18 @@ pub async fn ai_checks_with(stored: &crate::ai_settings::StoredAiSettings) -> Ve
         });
     }
     v
+}
+
+/// The checks for a local model the studio manages (empty when none is set up). `verify`
+/// allows hashing the model file (the command line does; the web panel only trusts an earlier
+/// good check).
+#[cfg(feature = "bridge")]
+pub async fn local_ai_checks(
+    data: Option<&Path>,
+    stored: &crate::ai_settings::StoredAiSettings,
+    verify: bool,
+) -> Vec<Check> {
+    crate::ai_local::checks::local_checks(data, stored, verify).await
 }
 
 /// `scheme://host[:port]` of an endpoint address (what `/health` hangs off).
@@ -324,7 +336,11 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     #[allow(unused_mut)]
     let mut checks = local_checks(data.as_deref(), &listen);
     #[cfg(feature = "bridge")]
-    checks.extend(ai_checks(data.as_deref()).await);
+    {
+        let stored = crate::ai_settings::load(data.as_deref());
+        checks.extend(ai_checks_with(&stored).await);
+        checks.extend(local_ai_checks(data.as_deref(), &stored, true).await);
+    }
     print!("{}", render(&checks));
     if checks.iter().any(|c| c.level == Level::Fail) {
         Err("doctor found problems".into())

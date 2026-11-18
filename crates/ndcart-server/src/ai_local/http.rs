@@ -85,7 +85,7 @@ fn pull_client() -> Pull {
 
 static HW: Mutex<Option<(Instant, Option<PathBuf>, Hw)>> = Mutex::new(None);
 
-fn hardware(rt: Option<&Runtime>) -> Hw {
+pub(crate) fn hardware(rt: Option<&Runtime>) -> Hw {
     let key = rt.map(|r| r.path.clone());
     if let Some((at, k, h)) = HW.lock().expect("hw").as_ref() {
         if *k == key && at.elapsed() < Duration::from_secs(120) {

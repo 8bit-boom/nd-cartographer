@@ -39,6 +39,7 @@ pub(crate) async fn doctor_checks(State(app): State<App>) -> Json<serde_json::Va
     {
         let stored = app.ai.lock().expect("ai settings").clone();
         checks.extend(doctor::ai_checks_with(&stored).await);
+        checks.extend(doctor::local_ai_checks(app.data_dir.as_deref(), &stored, false).await);
     }
     let skipped = app.store.read().await.skipped.clone();
     if !skipped.is_empty() {

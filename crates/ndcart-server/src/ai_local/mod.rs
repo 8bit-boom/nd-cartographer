@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 pub mod catalog;
+pub mod checks;
 pub mod http;
 pub mod hw;
 pub mod pull;
