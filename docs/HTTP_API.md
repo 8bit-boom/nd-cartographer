@@ -44,7 +44,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | GET | `/api/world/entities?q=` | – | The world's entities (nd-world) matching the words, ≤50, for linking a room. The op `link_entity {link:{space, entity_id, name, kind}}` / `unlink_entity {space}` does the linking. |
 | POST | `/api/ask` | `{question}` | Answer a question from a digest of every project's text. Needs an AI. |
 | POST | `/api/packs/import?name=file` | raw `.dungeondraft_pack` bytes (≤200 MB) | Objects → props, terrain → materials; `{pack, stamps, materials, skipped, notes}`. Zip and newer archive formats are refused with advice. |
-| POST / GET / DELETE | `/api/docs/{id}/table` | POST `{floor?, x, y, radius?, darkness?}` | The shared table view. GET returns what the screen polls; DELETE turns it off. The screen itself is `GET /table/{id}` (read-only HTML). |
+| POST / GET / DELETE | `/api/docs/{id}/table` | POST `{floor?, x, y, radius?, darkness?}` | The shared table view. GET returns what the screen polls; DELETE turns it off. The screen itself is `GET /table/{id}` (read-only HTML). POST returns `table_token`: a random token for that project's table screen, created when the table is turned on and revoked by DELETE (see Access control). |
 | POST | `/api/docs/{id}/furnish` | `{floor?, spaces:[room ids], seed, only_empty?}` | Props from each room's name/kind, never in a doorway. One undo step. |
 | GET | `/api/search?q=` | – | Rooms, notes, markers, zones, regions, routes, floors and projects whose text holds every word typed. ≤100 hits with where they are. |
 | POST | `/api/docs/{id}/propose-world` | `{spec: WorldSpec, seed?}` | An overland map as a proposal (land/rivers, biome masks on dry ground, places, regions). World-map projects only. |
@@ -158,6 +158,13 @@ Listening off loopback requires a token: `Authorization: Bearer T`, cookie
 `ndcart_token=T`, or `?token=T` (sets the cookie). `/health` is public. Token from
 `ND_CARTO_TOKEN`, `ND_CARTO_TOKEN_FILE`, or `<data-dir>/token` (generated 0600 on
 first run, printed once). 401 without it.
+
+Table token: when the token gate is on, `GET /table/{id}`, `GET`/`POST /api/docs/{id}/table`,
+`GET /api/docs/{id}/preview` and `GET /api/docs/{id}/events` also accept the project's
+`table_token` (Bearer, `?token=`, or the `ndcart_table_{id}` cookie that `?token=` sets).
+It opens nothing else (the GM document, exports, settings and the other projects stay
+401), so the tablet link no longer carries the GM token. Loopback mode has no gate and
+needs no table token.
 
 Every response from the app carries `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer` and `Content-Security-Policy: frame-ancestors 'none'`

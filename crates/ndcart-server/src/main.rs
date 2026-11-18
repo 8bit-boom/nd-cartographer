@@ -79,6 +79,8 @@ struct AppState {
     /// Limits how many big bakes (exports, pdf, previews, convert) run at
     /// once, so a few parallel requests cannot exhaust memory.
     heavy: tokio::sync::Semaphore,
+    /// Scoped tokens for the table screen (project id -> token); see `auth::gate`.
+    table_tokens: auth::TableTokens,
 }
 type App = Arc<AppState>;
 
@@ -3637,7 +3639,13 @@ async fn table_set(
         darkness: b.darkness,
         n,
     });
-    Ok(Json(serde_json::json!({ "ok": true, "n": n })))
+    drop(store);
+    // The scoped token the table screen uses instead of the GM token
+    // (kept while the table stays on; revoked by `table_off`).
+    let token = auth::table_token_for(&app.table_tokens, &id);
+    Ok(Json(
+        serde_json::json!({ "ok": true, "n": n, "table_token": token }),
+    ))
 }
 
 async fn table_off(
@@ -3650,6 +3658,7 @@ async fn table_off(
         .get_mut(&id)
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
     doc.table = None;
+    app.table_tokens.lock().expect("table tokens").remove(&id);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -4583,7 +4592,9 @@ async fn main() {
                 wall_cache: Mutex::new(HashMap::new()),
                 tile_cache: Mutex::new(HashMap::new()),
                 heavy: tokio::sync::Semaphore::new(heavy_permits()),
+                table_tokens: Default::default(),
             });
+            let table_tokens = app.table_tokens.clone();
             let mut router = build_router(app);
             if auth::is_loopback(&listen) {
                 let allowed = Arc::new(auth::allowed_hosts());
@@ -4597,7 +4608,7 @@ async fn main() {
                 }
                 println!("ndcart: not loopback, token required (?token=… or Bearer)");
                 router = router.layer(axum::middleware::from_fn(move |req, next| {
-                    auth::gate(token.clone(), req, next)
+                    auth::gate(token.clone(), table_tokens.clone(), req, next)
                 }));
             }
             let listener = tokio::net::TcpListener::bind(&listen)
@@ -4643,6 +4654,7 @@ mod tests {
             wall_cache: Mutex::new(HashMap::new()),
             tile_cache: Mutex::new(HashMap::new()),
             heavy: tokio::sync::Semaphore::new(heavy_permits()),
+            table_tokens: Default::default(),
         })
     }
 
@@ -4654,7 +4666,7 @@ mod tests {
     #[tokio::test]
     async fn token_gate_blocks_without_token() {
         let router = build_router(test_app()).layer(axum::middleware::from_fn(|req, next| {
-            auth::gate("s3cret".to_string(), req, next)
+            auth::gate("s3cret".to_string(), Default::default(), req, next)
         }));
         let get = |uri: &str, extra: Option<(&str, &str)>| {
             let mut b = Request::get(uri.to_string());
@@ -7836,6 +7848,7 @@ mod tests {
             wall_cache: Mutex::new(HashMap::new()),
             tile_cache: Mutex::new(HashMap::new()),
             heavy: tokio::sync::Semaphore::new(1),
+            table_tokens: Default::default(),
         });
         assert!(app.heavy.available_permits() >= 1);
         let router = build_router(app1.clone());
@@ -7859,5 +7872,136 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         assert_eq!(app1.heavy.available_permits(), 1, "the permit is returned");
+    }
+
+    #[tokio::test]
+    async fn table_token_is_scoped_to_the_table_screen_and_revocable() {
+        let app = test_app();
+        let tt = app.table_tokens.clone();
+        let router = build_router(app).layer(axum::middleware::from_fn(move |req, next| {
+            auth::gate("G".to_string(), tt.clone(), req, next)
+        }));
+        let send = |method: &str, uri: &str, hdr: Option<(&str, String)>, body: &str| {
+            let mut b = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json");
+            if let Some((k, v)) = hdr {
+                b = b.header(k, v);
+            }
+            router
+                .clone()
+                .oneshot(b.body(Body::from(body.to_string())).unwrap())
+        };
+        let gm = || Some(("authorization", "Bearer G".to_string()));
+        let r = send("POST", "/api/docs", gm(), r#"{"name": "T"}"#)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        let id = v["id"].as_str().unwrap().to_string();
+        let r = send(
+            "POST",
+            &format!("/api/docs/{id}/table"),
+            gm(),
+            r#"{"x":1,"y":1}"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        let t = v["table_token"].as_str().unwrap().to_string();
+        // A second move keeps the same token.
+        let r = send(
+            "POST",
+            &format!("/api/docs/{id}/table"),
+            gm(),
+            r#"{"x":2,"y":1}"#,
+        )
+        .await
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["table_token"], t.as_str());
+
+        let status = |m: &'static str, uri: String, hdr: Option<(&'static str, String)>| {
+            let send = &send;
+            async move { send(m, &uri, hdr, "{}").await.unwrap().status() }
+        };
+        // The GM document (secrets, labels) is out of reach for the table token.
+        assert_eq!(
+            status("GET", format!("/api/docs/{id}?token={t}"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(
+                "GET",
+                "/api/docs".into(),
+                Some(("authorization", format!("Bearer {t}")))
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(
+                "GET",
+                format!("/api/docs/{id}/preview?token={t}&x=1&y=1"),
+                None
+            )
+            .await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("GET", format!("/api/docs/{id}/events?token={t}"), None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("GET", format!("/api/docs/{id}/table?token={t}"), None).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("POST", format!("/api/docs/{id}/table?token={t}"), None).await,
+            StatusCode::BAD_REQUEST
+        ); // reaches the handler ("{}" lacks x, y)
+        assert_eq!(
+            status("DELETE", format!("/api/docs/{id}/table?token={t}"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status("GET", format!("/api/docs/{id}/export/png?token={t}"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status("GET", format!("/api/docs/other/preview?token={t}"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // The page sets a cookie named for the project, which then carries the screen.
+        let r = send("GET", &format!("/table/{id}?token={t}"), None, "")
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let cookie = r.headers()["set-cookie"].to_str().unwrap().to_string();
+        assert!(
+            cookie.starts_with(&format!("ndcart_table_{id}={t};")),
+            "{cookie}"
+        );
+        let c = Some(("cookie", format!("ndcart_table_{id}={t}")));
+        assert_eq!(
+            status("GET", format!("/api/docs/{id}/table"), c).await,
+            StatusCode::OK
+        );
+
+        // Turning the table off revokes the token.
+        assert_eq!(
+            status("DELETE", format!("/api/docs/{id}/table"), gm()).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("GET", format!("/api/docs/{id}/preview?token={t}"), None).await,
+            StatusCode::UNAUTHORIZED
+        );
+        // And the GM token still works everywhere.
+        assert_eq!(
+            status("GET", format!("/api/docs/{id}"), gm()).await,
+            StatusCode::OK
+        );
     }
 }

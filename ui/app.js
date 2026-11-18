@@ -2642,17 +2642,23 @@ state.pv.share = false;
 async function pushTable() {
   if (!state.pv.share) return;
   try {
-    await api('POST', `/api/docs/${state.docId}/table`, {
+    const out = await api('POST', `/api/docs/${state.docId}/table`, {
       floor: state.floorId, x: state.pv.x, y: state.pv.y,
       radius: Number(document.getElementById('pv-radius').value), darkness: document.getElementById('pv-dark').checked,
     });
+    // The table screen gets its own scoped token, never the GM token.
+    if (out.table_token) tableLink(out.table_token);
   } catch (e) { statusEl.textContent = `Table: ${e.message}`; }
+}
+function tableLink(token) {
+  document.getElementById('pv-link').textContent =
+    `On the table: open ${location.origin}/table/${state.docId}?token=${token} on the TV or tablet`;
 }
 async function setShare(on) {
   state.pv.share = on;
   const btn = document.getElementById('pv-share');
   btn.setAttribute('aria-pressed', String(on));
-  document.getElementById('pv-link').textContent = on ? `On the table: open ${location.origin}/table/${state.docId} on the TV or tablet` : '';
+  document.getElementById('pv-link').textContent = on ? 'Sharing to the table...' : '';
   if (on) await pushTable();
   else { try { await api('DELETE', `/api/docs/${state.docId}/table`); } catch { /* already off */ } }
 }

@@ -171,7 +171,47 @@ pub async fn host_guard(
     next.run(req).await
 }
 
-pub async fn gate(token: String, req: Request, next: Next) -> Response {
+/// Table tokens: project id -> the scoped token the table screen uses. In
+/// memory only, like the table state itself.
+pub type TableTokens = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
+
+/// The table token for a project, created on first use and kept while the
+/// table stays on.
+pub fn table_token_for(tokens: &TableTokens, doc_id: &str) -> String {
+    tokens
+        .lock()
+        .expect("table tokens")
+        .entry(doc_id.to_string())
+        .or_insert_with(random_token)
+        .clone()
+}
+
+/// The project a table token may be used on for this request, if the route is
+/// one the table screen needs (and nothing else):
+/// `GET /table/{id}`, `GET|POST /api/docs/{id}/table`, `GET /api/docs/{id}/preview`
+/// and `GET /api/docs/{id}/events`.
+fn table_route_doc(method: &axum::http::Method, path: &str) -> Option<String> {
+    use axum::http::Method;
+    let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let get = *method == Method::GET;
+    let id = match seg.as_slice() {
+        ["table", id] if get => id,
+        ["api", "docs", id, "table"] if get || *method == Method::POST => id,
+        ["api", "docs", id, "preview" | "events"] if get => id,
+        _ => return None,
+    };
+    Some((*id).to_string())
+}
+
+fn cookie_named(req: &Request, name: &str) -> Option<String> {
+    let c = req.headers().get(header::COOKIE)?.to_str().ok()?;
+    c.split(';')
+        .filter_map(|p| p.trim().strip_prefix(name)?.strip_prefix('='))
+        .map(str::to_string)
+        .next()
+}
+
+pub async fn gate(token: String, tables: TableTokens, req: Request, next: Next) -> Response {
     if req.uri().path() == "/health" {
         return next.run(req).await;
     }
@@ -182,22 +222,45 @@ pub async fn gate(token: String, req: Request, next: Next) -> Response {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
     let from_query = query_token(&req);
-    let supplied = bearer
-        .clone()
-        .or_else(|| cookie_token(&req))
-        .or_else(|| from_query.clone());
-    if !supplied.as_deref().is_some_and(|s| ct_eq(s, &token)) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
-            "ndcart: access token required (open the page with ?token=…)",
-        )
-            .into_response();
+    let cookie = cookie_token(&req);
+    let is_gm = |s: &Option<String>| s.as_deref().is_some_and(|s| ct_eq(s, &token));
+    let gm = is_gm(&bearer) || is_gm(&cookie) || is_gm(&from_query);
+    // A table token is good only for the table screen's own routes, on its own project.
+    // `table` = (project, whether it came in the query string).
+    let mut table: Option<(String, bool)> = None;
+    if !gm {
+        if let Some(doc) = table_route_doc(req.method(), req.uri().path()) {
+            let want = tables.lock().expect("table tokens").get(&doc).cloned();
+            if let Some(want) = want {
+                let is_t = |s: &Option<String>| s.as_deref().is_some_and(|s| ct_eq(s, &want));
+                let table_cookie = cookie_named(&req, &format!("ndcart_table_{doc}"));
+                if is_t(&bearer) || is_t(&table_cookie) || is_t(&from_query) {
+                    table = Some((doc, is_t(&from_query)));
+                }
+            }
+        }
+        if table.is_none() {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+                "ndcart: access token required (open the page with ?token=…)",
+            )
+                .into_response();
+        }
     }
-    let set_cookie = from_query.as_deref().is_some_and(|q| ct_eq(q, &token));
+    let set_cookie = match (&table, &from_query) {
+        (None, Some(q)) if is_gm(&Some(q.clone())) => Some(format!(
+            "ndcart_token={token}; Path=/; HttpOnly; SameSite=Strict"
+        )),
+        // Remember a table token in a cookie named for its project, so the
+        // GM's own cookie in the same browser is never overwritten.
+        (Some((doc, true)), Some(q)) => Some(format!(
+            "ndcart_table_{doc}={q}; Path=/; HttpOnly; SameSite=Strict"
+        )),
+        _ => None,
+    };
     let mut resp = next.run(req).await;
-    if set_cookie {
-        let v = format!("ndcart_token={token}; Path=/; HttpOnly; SameSite=Strict");
+    if let Some(v) = set_cookie {
         if let Ok(hv) = HeaderValue::from_str(&v) {
             resp.headers_mut().append(header::SET_COOKIE, hv);
         }

@@ -19,8 +19,11 @@ assets and the access token.
 3. **Token**: set `ND_CARTO_TOKEN` to a long random string. Without it, one is
    generated on first start, saved in `/data/token` and printed once in the logs.
 4. Start the app and open `http://<truenas-ip>:8300/?token=<token>` once; the
-   browser keeps a cookie after that. For a TV or tablet use
-   `http://<truenas-ip>:8300/table/<project>?token=<token>`.
+   browser keeps a cookie after that. For a TV or tablet do **not** use that token:
+   turn on "share to table" in the studio and open the link it shows
+   (`http://<truenas-ip>:8300/table/<project>?token=<table-token>`). The table token
+   is scoped to that one project's table screen (no GM data, no editing) and stops
+   working when sharing is turned off.
 
 Older TrueNAS (Kubernetes apps): *Apps → Launch Docker Image* with image
 `ghcr.io/8bit-boom/nd-cartographer:latest`, port 8300, a host-path volume at
