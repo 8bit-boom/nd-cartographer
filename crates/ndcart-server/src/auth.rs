@@ -108,6 +108,27 @@ pub async fn same_origin_guard(req: Request, next: Next) -> Response {
     (StatusCode::FORBIDDEN, "ndcart: cross-site request refused").into_response()
 }
 
+/// Hardening headers on every response: no MIME sniffing of user-uploaded
+/// assets, no `Referer` (so `?token=` URLs do not leak), and no framing by
+/// other sites.
+pub async fn security_headers(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    resp
+}
+
 /// Hostnames (any port) accepted in loopback mode, plus the comma-separated
 /// extras in `ND_CARTO_ALLOWED_HOSTS`.
 pub fn allowed_hosts() -> Vec<String> {

@@ -4234,6 +4234,7 @@ fn build_router(app: App) -> Router {
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
         .with_state(app)
         .layer(axum::middleware::from_fn(auth::same_origin_guard))
+        .layer(axum::middleware::from_fn(auth::security_headers))
 }
 
 // ---------- bench ----------
@@ -7780,5 +7781,26 @@ mod tests {
             );
         }
         assert_eq!(get(None).await.unwrap().status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn hardening_headers_are_on_every_response() {
+        let app = test_app();
+        let id = ndcart_core::hash::sha256_hex(b"nope");
+        let router = build_router(app);
+        for uri in ["/health".to_string(), format!("/api/assets/{id}")] {
+            let r = router
+                .clone()
+                .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let h = r.headers();
+            assert_eq!(h["x-content-type-options"], "nosniff", "{uri}");
+            assert_eq!(h["referrer-policy"], "no-referrer", "{uri}");
+            assert_eq!(
+                h["content-security-policy"], "frame-ancestors 'none'",
+                "{uri}"
+            );
+        }
     }
 }

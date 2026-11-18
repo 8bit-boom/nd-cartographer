@@ -159,6 +159,10 @@ Listening off loopback requires a token: `Authorization: Bearer T`, cookie
 `ND_CARTO_TOKEN`, `ND_CARTO_TOKEN_FILE`, or `<data-dir>/token` (generated 0600 on
 first run, printed once). 401 without it.
 
+Every response from the app carries `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer` and `Content-Security-Policy: frame-ancestors 'none'`
+(the table screen cannot be embedded in another site either).
+
 Host allow-list (loopback listeners only): the `Host` header must be `localhost`,
 `127.0.0.1` or `[::1]` (any port), or one of the comma-separated names in
 `ND_CARTO_ALLOWED_HOSTS`; anything else gets 421 `unknown host` (blocks DNS
