@@ -679,8 +679,9 @@ impl Journal {
     /// Append one op: computes the inverse against the current floor state
     /// and applies the op.
     pub fn push(&mut self, floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
-        let inverse = op.inverse_against(floor)?;
-        apply_op(floor, op)?;
+        // One pass: the inverse is taken while the op is applied (a batch
+        // needs no scratch copy of the floor).
+        let inverse = apply_with_inverse(floor, op)?;
         self.entries.push(JournalEntry {
             op: op.clone(),
             inverse,

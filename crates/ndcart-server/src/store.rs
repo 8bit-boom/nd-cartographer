@@ -155,12 +155,16 @@ impl StoredDoc {
     pub fn apply_ops(&mut self, floor_id: &str, ops: &[Op]) -> CoreResult<()> {
         let idx = floors_by_id(&self.floors, floor_id)?;
         // All or nothing: a bad op in the middle must not leave the ones before it applied
-        // and journaled while the request is refused.
-        let (backup, mark) = (self.floors[idx].clone(), self.journal.len());
+        // and journaled while the request is refused. A failed op leaves the floor as it
+        // was, so the ones before it are undone with their journaled inverses (no copy of
+        // the floor is taken on the happy path).
+        let mark = self.journal.len();
         for op in ops {
             // Journal::push applies and journals; run against the right floor.
             if let Err(e) = self.journal.push(&mut self.floors[idx], op) {
-                self.floors[idx] = backup;
+                for entry in self.journal.entries()[mark..].iter().rev() {
+                    let _ = apply_op(&mut self.floors[idx], &entry.inverse);
+                }
                 self.journal.truncate(mark);
                 return Err(e);
             }
@@ -822,6 +826,27 @@ mod persistence_tests {
         let d = std::env::temp_dir().join(format!("ndcart-fast-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn failed_apply_ops_rolls_back_without_a_backup_clone() {
+        let mut doc = StoredDoc::new("rb", DocKind::Battle);
+        let fid = doc.floors[0].id.clone();
+        doc.apply_ops(&fid, &paint(0)).unwrap();
+        let before = serde_json::to_string(&doc.floors[0]).unwrap();
+        let (len, rev) = (doc.journal.len(), doc.rev);
+        let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
+            {"t":"paint_cells","space":"s","cells":[{"x":5,"y":5}]},
+            {"t":"batch","ops":[
+                {"t":"paint_cells","space":"s","cells":[{"x":6,"y":6}]},
+                {"t":"upsert_space","space":{"id":"s2","name":"Two","color":"#112233","kind":"room"}}]},
+            {"t":"paint_cells","space":"no_such_space","cells":[{"x":7,"y":7}]}
+        ]))
+        .unwrap();
+        assert!(doc.apply_ops(&fid, &ops).is_err());
+        assert_eq!(serde_json::to_string(&doc.floors[0]).unwrap(), before);
+        assert_eq!(doc.journal.len(), len);
+        assert_eq!(doc.rev, rev);
     }
 
     /// One edit = one journal entry (a batch), like a stroke in the UI.
