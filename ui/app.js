@@ -2831,6 +2831,9 @@ function subscribeDoc() {
       statusEl.textContent = 'Updated: this project was changed elsewhere.';
     }, 150);
   });
+  // The server ends the stream after `gone` (project deleted): close it so
+  // the browser does not auto-reconnect forever.
+  es.addEventListener('gone', () => { if (es) { es.close(); es = null; } });
   es.onerror = () => { /* the poll below covers it; EventSource retries itself */ };
 }
 setInterval(async () => {
