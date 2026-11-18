@@ -129,6 +129,10 @@ pub struct StoredDoc {
     /// The shared table view, if the GM turned it on.
     pub table: Option<TableState>,
     pub rev: u64,
+    /// Per floor, the journal indexes of undo entries that can be redone,
+    /// newest last. In memory only: redo does not survive a restart. Any new
+    /// edit of a floor forgets that floor's redo history.
+    pub redo: std::collections::HashMap<String, Vec<usize>>,
     pub persisted: Arc<Persisted>,
 }
 
@@ -158,12 +162,20 @@ impl StoredDoc {
             world_proposals: Vec::new(),
             table: None,
             rev: 0,
+            redo: Default::default(),
             persisted: Arc::new(Persisted::default()),
         }
     }
 
     /// Apply ops to one floor as journal entries (each op keeps its inverse).
     pub fn apply_ops(&mut self, floor_id: &str, ops: &[Op]) -> CoreResult<()> {
+        self.apply_ops_keeping_redo(floor_id, ops)?;
+        // A new edit starts a new future: what was undone can no longer be redone.
+        self.redo.remove(floor_id);
+        Ok(())
+    }
+
+    fn apply_ops_keeping_redo(&mut self, floor_id: &str, ops: &[Op]) -> CoreResult<()> {
         let idx = floors_by_id(&self.floors, floor_id)?;
         // All or nothing: a bad op in the middle must not leave the ones before it applied
         // and journaled while the request is refused. A failed op leaves the floor as it
@@ -192,7 +204,15 @@ impl StoredDoc {
     fn compact_journal(&mut self) {
         let len = self.journal.len();
         if len >= JOURNAL_COMPACT_AT {
-            self.journal.drop_front(len - JOURNAL_KEEP);
+            let dropped = len - JOURNAL_KEEP;
+            self.journal.drop_front(dropped);
+            // Redo points at journal indexes: shift them, forget what fell out.
+            for stack in self.redo.values_mut() {
+                *stack = stack
+                    .iter()
+                    .filter_map(|i| i.checked_sub(dropped))
+                    .collect();
+            }
         }
     }
 
@@ -461,6 +481,7 @@ impl StoredDoc {
         });
         self.journal = Journal::default();
         self.structure = StructJournal::default();
+        self.redo.clear();
         self.touched();
         Ok(())
     }
@@ -474,9 +495,39 @@ impl StoredDoc {
         let idx = floors_by_id(&self.floors, floor_id)?;
         let floor = &mut self.floors[idx];
         self.journal.undo_last(floor)?;
+        self.redo
+            .entry(floor_id.to_string())
+            .or_default()
+            .push(self.journal.len() - 1);
         self.rev += 1;
         self.manifest.updated_at = ndcart_core::doc::now_iso();
         self.compact_journal();
+        Ok(())
+    }
+
+    /// The op a redo on this floor would apply, without applying it.
+    pub fn peek_redo(&self, floor_id: &str) -> Option<ndcart_core::Op> {
+        let u = *self.redo.get(floor_id)?.last()?;
+        self.journal.entries().get(u).map(|e| e.inverse.clone())
+    }
+
+    /// Take back the last undo on this floor: its inverse is applied as a new
+    /// forward entry (so the redo can itself be undone, and the journal stays
+    /// append-only).
+    pub fn redo_last(&mut self, floor_id: &str) -> CoreResult<()> {
+        floors_by_id(&self.floors, floor_id)?;
+        let op = self
+            .peek_redo(floor_id)
+            .ok_or_else(|| ndcart_core::CoreError::NotFound("nothing to redo".to_string()))?;
+        // Take it off the stack first: applying may compact the journal, which
+        // re-indexes what is left.
+        let taken = self.redo.get_mut(floor_id).and_then(|s| s.pop());
+        if let Err(e) = self.apply_ops_keeping_redo(floor_id, std::slice::from_ref(&op)) {
+            if let Some(u) = taken {
+                self.redo.entry(floor_id.to_string()).or_default().push(u);
+            }
+            return Err(e);
+        }
         Ok(())
     }
 }
@@ -618,6 +669,7 @@ impl Store {
                 world_proposals: Vec::new(),
                 table: None,
                 rev,
+                redo: Default::default(),
                 persisted: Arc::new({
                     let p = Persisted::default();
                     p.appended.store(jlen, std::sync::atomic::Ordering::Relaxed);
@@ -1062,6 +1114,37 @@ mod persistence_tests {
         let back = reload(&dir);
         assert_eq!(back.docs[&id].floors, d.floors);
         assert_eq!(back.docs[&id].floors.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn redo_is_per_floor_drops_compacted_entries_and_is_forgotten_on_a_restart() {
+        let dir = tmpdir("redo");
+        let mut d = StoredDoc::new("Redo", DocKind::Battle);
+        let (id, f1) = (d.manifest.id.clone(), d.floors[0].id.clone());
+        let f2 = d.add_floor("Up", None).unwrap();
+        d.apply_ops(&f1, &paint(0)).unwrap();
+        d.apply_ops(&f2, &paint(50)).unwrap();
+        d.undo_last(&f1).unwrap();
+        // Floor 2's redo is its own: floor 1's undo does not give it one.
+        assert!(d.redo_last(&f2).is_err());
+        // An edit on floor 2 leaves floor 1's redo alone.
+        d.apply_ops(&f2, &paint(51)).unwrap();
+        d.redo_last(&f1).unwrap();
+        assert_eq!(d.floors[0].grid.cell_count(), 1);
+        // Compaction: undo, then enough edits elsewhere to compact the journal.
+        d.undo_last(&f1).unwrap();
+        for x in 0..JOURNAL_COMPACT_AT as i32 {
+            d.apply_ops(&f2, &paint(100 + x)).unwrap();
+        }
+        // (floor 2's edits do not touch floor 1's redo, but the old undo entry
+        // was dropped by the compaction: the redo is gone, cleanly.)
+        assert!(d.redo_last(&f1).is_err());
+        // A restart forgets redo history; the journal itself reloads.
+        d.undo_last(&f2).unwrap();
+        save_doc(Some(&dir), &d);
+        let mut back = reload(&dir).docs.remove(&id).unwrap();
+        assert!(back.redo_last(&f2).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -4218,6 +4218,33 @@ async fn post_undo(
     ))
 }
 
+async fn post_redo(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<FloorBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|_| ApiError(CoreError::Invalid("body must be {floor}".into())))?;
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let dirty = match doc.peek_redo(&b.floor) {
+        Some(op) => dirty_of(doc, &b.floor, std::slice::from_ref(&op)),
+        None => ndcart_core::Dirty::All,
+    };
+    let old_rev = doc.rev;
+    doc.redo_last(&b.floor)?;
+    let rev = doc.rev;
+    let snapshot = store::save_doc_edit(app.data_dir.as_deref(), doc);
+    invalidate_dirty(&app, &id, &b.floor, old_rev, rev, dirty);
+    drop(store);
+    write_snapshot_later(snapshot);
+    Ok(Json(
+        serde_json::json!({"ok": true, "rev": rev, "dirty": dirty_json(dirty)}),
+    ))
+}
+
 #[derive(Deserialize)]
 struct TileQuery {
     /// Another floor of the same document to show faintly underneath.
@@ -4436,6 +4463,7 @@ fn build_router(app: App) -> Router {
         )
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
+        .route("/api/docs/{id}/redo", post(post_redo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
         .with_state(app)
         .layer(axum::middleware::from_fn(auth::same_origin_guard))
@@ -7898,6 +7926,68 @@ mod tests {
         assert_eq!(back.docs[&id].floors[0].grid.cell_count(), 600);
         assert_eq!(back.docs[&id].journal.len(), live.docs[&id].journal.len());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn redo_takes_back_an_undo_and_a_new_edit_forgets_it() {
+        let router = build_router(test_app());
+        let (id, f) = new_doc(&router, "Redo").await;
+        let space = serde_json::json!({"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}});
+        let paint =
+            |x: i32| serde_json::json!({"t":"paint_cells","space":"sp_a","cells":[{"x":x,"y":0}]});
+        let ops = |ops: Vec<serde_json::Value>| serde_json::json!({"floor": f, "ops": ops});
+        assert_eq!(
+            post_ops_json(&router, &id, ops(vec![space, paint(0)])).await,
+            StatusCode::OK
+        );
+        let a = floor_digest(&router, &id).await;
+        assert_eq!(
+            post_ops_json(&router, &id, ops(vec![paint(1)])).await,
+            StatusCode::OK
+        );
+        let ab = floor_digest(&router, &id).await;
+        assert_ne!(a, ab);
+        let post = |what: &'static str| {
+            let (router, id, f) = (router.clone(), id.clone(), f.clone());
+            async move {
+                call(
+                    &router,
+                    "POST",
+                    &format!("/api/docs/{id}/{what}"),
+                    serde_json::json!({"floor": f}).to_string().into_bytes(),
+                )
+                .await
+            }
+        };
+        // Nothing to redo yet.
+        let (st, body) = post("redo").await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        assert!(String::from_utf8_lossy(&body).contains("nothing to redo"));
+        // Undo B, redo B.
+        assert_eq!(post("undo").await.0, StatusCode::OK);
+        assert_eq!(floor_digest(&router, &id).await, a);
+        let (st, body) = post("redo").await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(jv(&body)["dirty"], serde_json::json!([-1, -2, 3, 2]));
+        assert_eq!(floor_digest(&router, &id).await, ab);
+        // The redo is itself undoable. undo, undo, redo, redo gets back to A+B.
+        assert_eq!(post("undo").await.0, StatusCode::OK);
+        assert_eq!(floor_digest(&router, &id).await, a);
+        assert_eq!(post("undo").await.0, StatusCode::OK);
+        assert_eq!(post("redo").await.0, StatusCode::OK);
+        assert_eq!(floor_digest(&router, &id).await, a);
+        assert_eq!(post("redo").await.0, StatusCode::OK);
+        assert_eq!(floor_digest(&router, &id).await, ab);
+        assert_eq!(post("redo").await.0, StatusCode::NOT_FOUND);
+        // undo, then a new edit: the redo is gone.
+        assert_eq!(post("undo").await.0, StatusCode::OK);
+        assert_eq!(
+            post_ops_json(&router, &id, ops(vec![paint(7)])).await,
+            StatusCode::OK
+        );
+        let (st, body) = post("redo").await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        assert!(String::from_utf8_lossy(&body).contains("nothing to redo"));
     }
 
     #[tokio::test]

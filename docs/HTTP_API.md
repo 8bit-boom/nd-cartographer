@@ -32,6 +32,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 |---|---|---|---|
 | POST | `/api/docs/{id}/ops` | `{floor, ops:[…]}` | Applies a batch as journal entries; `{"ok":true,"rev":N,"dirty":…}`. ≤ 500 ops per request. `dirty` says which map cells the edit can have redrawn: `[x0,y0,x1,y1]` (inclusive cell rectangle, already padded for edge blends and wall strokes), `[]` when no tile pixel changed (a light), or `null` when anything may have (text, sun, relief, an era, or an op that is not purely local). Tiles outside the rectangle are byte-identical to before. |
 | POST | `/api/docs/{id}/undo` | `{floor}` | Applies the last entry's inverse as a new entry; `{"ok":true,"rev":N,"dirty":…}` (same `dirty` as `/ops`). |
+| POST | `/api/docs/{id}/redo` | `{floor}` | Takes back the last undo on that floor by applying its inverse as a new (undoable) entry; `{"ok":true,"rev":N,"dirty":…}`. 404 "nothing to redo" when there is none: a new edit of the floor forgets its redo history, and redo history is in memory only (not kept across a server restart). |
 | POST | `/api/docs/{id}/floors` | `{action:"add",name,copy_from?}` / `{action:"rename",floor,name}` / `{action:"remove",floor}` / `{action:"move",floor,to}` | Floor structure. Max 64 floors, last floor cannot be removed. `{"ok":true,"rev":N,"floor":id?}`. |
 | POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
 

@@ -26,6 +26,8 @@ you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
 - **Generate**: dungeons, caves, buildings, ship decks, city districts, and
   overland worlds (continents, mountains, rivers, forests, swamps). Seeded: the
   same seed always gives the same map, and every generation is one undo step.
+- **Undo and redo**: Ctrl+Z, Ctrl+Shift+Z (or Ctrl+Y) per floor; redo history is
+  kept while the server runs, not across a restart.
 - **Work at scale**: zones, multi-select and bulk edits, symmetric painting,
   prefabs you can reuse across projects, named checkpoints, a minimap, saved
   views, search across all your maps, a problems panel with one-click fixes.

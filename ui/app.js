@@ -1940,11 +1940,13 @@ const KEYS = [
   { key: 'p', label: 'Problems panel', run: () => toggleProblems() },
   { key: 'o', label: 'Outline (focus the tree)', run: () => toggleOutline() },
   { key: 'z', ctrl: true, label: 'Undo', run: () => undo() },
+  { key: 'z', ctrl: true, shift: true, label: 'Redo', run: () => redo() },
+  { key: 'y', ctrl: true, label: 'Redo', run: () => redo() },
   { key: 'F1', label: 'This help', run: () => toggleHelp() },
   { key: 'Escape', label: 'Pan tool / close panels / clear measure', run: () => { riverDraft = null; overlayDraft = null; measureClear(); toggleHelp(false); setTool('pan'); } },
 ];
 
-function keyLabel(k) { return (k.ctrl ? 'Ctrl+' : '') + (k.key.length === 1 ? k.key.toUpperCase() : k.key); }
+function keyLabel(k) { return (k.ctrl ? 'Ctrl+' : '') + (k.shift ? 'Shift+' : '') + (k.key.length === 1 ? k.key.toUpperCase() : k.key); }
 
 window.addEventListener('keydown', (e) => {
   // Inside the outline tree (or any text field) letters belong to it, not to the tools.
@@ -1957,7 +1959,9 @@ window.addEventListener('keydown', (e) => {
     if (inField && !['F1', 'Escape'].includes(e.key)) return;
     if (inTree && !combo && !['F1', 'Escape'].includes(e.key)) return;
   }
-  const k = KEYS.find(x => x.key.toLowerCase() === e.key.toLowerCase() && !!x.ctrl === (e.ctrlKey || e.metaKey));
+  // Shift tells Ctrl+Z (undo) from Ctrl+Shift+Z (redo); plain keys ignore it.
+  const k = KEYS.find(x => x.key.toLowerCase() === e.key.toLowerCase() && !!x.ctrl === (e.ctrlKey || e.metaKey)
+    && (!x.ctrl || !!x.shift === e.shiftKey));
   if (!k) return;
   e.preventDefault();
   k.run();
@@ -3327,10 +3331,13 @@ function setExportLinks() {
   document.getElementById('exp-uvtt').download = `${state.doc.manifest.name}${suffix}.dd2vtt`;
 }
 
-async function undo() {
+async function undo() { return stepHistory('undo'); }
+// Redo takes back the last undo on this floor (not kept across a server restart).
+async function redo() { return stepHistory('redo'); }
+async function stepHistory(which) {
   try {
     const prevRev = state.rev, floorId = state.floorId;
-    const res = await api('POST', `/api/docs/${state.docId}/undo`, { floor: floorId });
+    const res = await api('POST', `/api/docs/${state.docId}/${which}`, { floor: floorId });
     noteEdit(res, prevRev, floorId);
     await refresh(true);
   } catch (err) {
@@ -3358,6 +3365,7 @@ document.getElementById('problems-close').onclick = () => toggleProblems(false);
 document.getElementById('btn-help').onclick = () => toggleHelp();
 document.getElementById('exp-player').onchange = setExportLinks;
 document.getElementById('btn-undo').onclick = undo;
+document.getElementById('btn-redo').onclick = redo;
 
 function buildPalette() {
   const wrap = document.getElementById('palette');
