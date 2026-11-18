@@ -36,6 +36,9 @@ you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
 - **Print**: a PDF at one inch per square, cut into pages with corner ticks.
 - **Export**: PNG, WebP, AVIF, Universal VTT, Foundry VTT scene data, players'
   copy without secrets; import Universal VTT and Foundry scenes.
+- **Back up and restore**: Export ▸ Backup saves a project with its history,
+  checkpoints and pictures as one `.ndmapz` file; Open backup brings it back as
+  a new project.
 - **Bring your own art**: import a Dungeondraft pack or a folder of pictures;
   turn any picture into a seamless material or a cut-out prop. See
   [docs/PACK.md](docs/PACK.md).
@@ -56,6 +59,7 @@ you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
 | `ndcart open-published SLUG --server URL --email E --data-dir DIR` | bring a published map back as a project (picture, walls, lights) |
 | `ndcart publish DOC --server URL --email E [--all-floors] [--all-docs] [--report FILE]` | publish to nd-world |
 | `ndcart draft "a flooded crypt" ...` | ask an AI for a map spec |
+| `ndcart bundle DOC --out FILE.ndmapz --data-dir DIR [--embed-assets]` | write a project backup (the same file the studio's Backup link serves) |
 | `ndcart convert IN OUT` | convert pictures between PNG, WebP and AVIF |
 | `ndcart bench` | time the renderer |
 

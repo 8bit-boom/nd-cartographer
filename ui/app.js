@@ -808,6 +808,23 @@ document.getElementById('file-open').onchange = async (e) => {
   }
 };
 
+document.getElementById('btn-open-backup').onclick = () => document.getElementById('file-backup').click();
+document.getElementById('file-backup').onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  statusEl.textContent = `Restoring ${file.name}…`;
+  try {
+    const res = await fetch('/api/import/bundle', { method: 'POST', body: await file.arrayBuffer() });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out.error || res.statusText);
+    await openDoc(out.id);
+    statusEl.textContent = `Restored ${file.name} as a new project: ${out.manifest.name}`;
+  } catch (err) {
+    statusEl.textContent = `Could not restore ${file.name}: ${err.message}`;
+  }
+};
+
 const curFloor = () => state.doc.floors.find(f => f.id === state.floorId) || state.doc.floors[0];
 
 // `lite` after an edit: the server sends only the floor being looked at in
@@ -3323,6 +3340,8 @@ function setExportLinks() {
   document.getElementById('exp-webp').href = `${base}/png?${q}&format=webp`;
   document.getElementById('exp-avif').href = `${base}/png?${q}&format=avif`;
   document.getElementById('exp-uvtt').href = `${base}/uvtt?${q}`;
+  document.getElementById('exp-backup').href = `/api/docs/${state.docId}/bundle?assets=1`;
+  document.getElementById('exp-backup').download = `${state.doc.manifest.name}.ndmapz`;
   document.getElementById('exp-pdf').href = `${base}/pdf?${q}`;
   document.getElementById('exp-foundry').href = `${base}/foundry?${q}`;
   document.getElementById('exp-png').download = `${state.doc.manifest.name}${suffix}.png`;

@@ -8,6 +8,7 @@ mod ask;
 mod assets;
 mod auth;
 mod bench;
+mod bundle;
 mod cache;
 mod convert;
 mod doctor;
@@ -825,6 +826,97 @@ async fn import_uvtt(
         "floor": floor_id,
         "stats": { "cols": map.cols, "rows": map.rows, "walls": wall_count, "lights": light_count },
     })))
+}
+
+#[derive(Deserialize)]
+struct BundleQuery {
+    /// `1`: the pictures the project uses are packed in too (a full backup).
+    assets: Option<String>,
+}
+
+/// `GET /api/docs/{id}/bundle[?assets=1]` — the project as a `.ndmapz` backup:
+/// its files, the licences of the packs it uses, and with `assets=1` the
+/// pictures too. `POST /api/import/bundle` reads it back.
+async fn get_bundle(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<BundleQuery>,
+) -> Result<Response, ApiError> {
+    let embed = matches!(q.assets.as_deref(), Some("1" | "true"));
+    // Gather the files under the lock (a consistent copy); zip them without it.
+    let (parts, name) = {
+        let store = app.store.read().await;
+        let doc = store
+            .docs
+            .get(&id)
+            .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+        (
+            bundle::bundle_parts(doc, embed).map_err(CoreError::Invalid)?,
+            doc.manifest.name.clone(),
+        )
+    };
+    let _heavy = app.heavy.acquire().await;
+    let bytes = tokio::task::spawn_blocking(move || bundle::zip_parts(&parts.files))
+        .await
+        .map_err(|e| ApiError(CoreError::Invalid(format!("bundle failed: {e}"))))?
+        .map_err(CoreError::Invalid)?;
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{safe}.ndmapz\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// Largest bundle `POST /api/import/bundle` accepts.
+const MAX_BUNDLE_BYTES: usize = 200 << 20;
+
+/// `POST /api/import/bundle` — a `.ndmapz` backup in the body comes back as a
+/// new project (always a new id). All of it is validated before anything is
+/// stored; a refused bundle creates nothing.
+async fn import_bundle(
+    State(app): State<App>,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let _heavy = app.heavy.acquire().await;
+    let imp = tokio::task::spawn_blocking(move || bundle::read_bundle(&body))
+        .await
+        .map_err(|e| ApiError(CoreError::Invalid(format!("import failed: {e}"))))?
+        .map_err(CoreError::Invalid)?;
+    let imp = tokio::task::spawn_blocking(move || {
+        bundle::store_assets(&imp, assets::global()).map(|()| imp.doc)
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("import failed: {e}"))))?
+    .map_err(CoreError::Invalid)?;
+    let id = imp.manifest.id.clone();
+    let mut store = app.store.write().await;
+    store.docs.insert(id.clone(), imp);
+    store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
+    let doc = &store.docs[&id];
+    let out = serde_json::json!({
+        "id": id,
+        "manifest": doc.manifest,
+        "floors": doc.floors.iter().map(|f| serde_json::json!({"id": f.id, "name": f.name})).collect::<Vec<_>>(),
+    });
+    drop(store);
+    invalidate_doc(&app, &id);
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
@@ -4377,6 +4469,13 @@ fn build_router(app: App) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             convert::MAX_INPUT_BYTES,
         ))
+        .route("/api/docs/{id}/bundle", get(get_bundle))
+        .route(
+            "/api/import/bundle",
+            post(import_bundle).layer(axum::extract::DefaultBodyLimit::max(
+                MAX_BUNDLE_BYTES + (1 << 20),
+            )),
+        )
         .route("/api/docs/{id}/generate", post(generate_world))
         .route("/api/docs/{id}/floors", post(floors_route))
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
@@ -4736,13 +4835,8 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        #[cfg(feature = "bridge")]
         "bundle" => {
-            if !cfg!(feature = "bridge") {
-                eprintln!("bundle needs the bridge feature");
-                std::process::exit(2);
-            }
-            if let Err(e) = publish::run_bundle(args.collect()).await {
+            if let Err(e) = bundle::run_bundle(args.collect()).await {
                 eprintln!("ndcart: {e}");
                 std::process::exit(1);
             }
@@ -7988,6 +8082,238 @@ mod tests {
         let (st, body) = post("redo").await;
         assert_eq!(st, StatusCode::NOT_FOUND);
         assert!(String::from_utf8_lossy(&body).contains("nothing to redo"));
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        let mut pm = tiny_skia::Pixmap::new(8, 8).unwrap();
+        pm.fill(tiny_skia::Color::from_rgba8(200, 40, 40, 255));
+        pm.encode_png().unwrap()
+    }
+
+    /// Rebuild a zip entry by entry: `f` may rename, change or drop each one.
+    fn rezip(bytes: &[u8], f: impl Fn(&str, Vec<u8>) -> Option<(String, Vec<u8>)>) -> Vec<u8> {
+        use std::io::{Read, Write};
+        let mut r = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default();
+        for i in 0..r.len() {
+            let mut e = r.by_index(i).unwrap();
+            let name = e.name().to_string();
+            let mut data = Vec::new();
+            e.read_to_end(&mut data).unwrap();
+            if let Some((n, d)) = f(&name, data) {
+                w.start_file(n, opts).unwrap();
+                w.write_all(&d).unwrap();
+            }
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    async fn doc_count(app: &App) -> usize {
+        app.store.read().await.docs.len()
+    }
+
+    #[tokio::test]
+    async fn a_backup_restores_as_a_new_project_with_everything_in_it() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let (id, f) = new_doc(&router, "Backup me").await;
+        // A custom prop with its own picture, placed on the floor.
+        let a = assets::global();
+        let picture = a.put(&tiny_png()).unwrap();
+        a.register(assets::Custom {
+            meta: Default::default(),
+            id: "stp_backup00001".into(),
+            name: "Red square".into(),
+            kind: "stamp".into(),
+            asset: picture.clone(),
+            size: 1.0,
+            origin: assets::Provenance {
+                source: "ai".into(),
+                prompt: String::new(),
+                seed: 0,
+                date: "2026-11-18".into(),
+            },
+            tags: Vec::new(),
+        })
+        .unwrap();
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","space":"sp_a","cells":[{"x":0,"y":0},{"x":1,"y":0}]},
+                {"t":"add_stamp","stamp":{"id":"p1","asset":"stp_backup00001","x":1.5,"y":1.5,"scale":1.0,
+                    "rotation":0.0,"flip":false,"tint":null,"shadow":true,"gen":null}},
+                {"t":"add_stamp","stamp":{"id":"p2","asset":"barrel","x":3.5,"y":1.5,"scale":1.0,
+                    "rotation":0.0,"flip":false,"tint":null,"shadow":true,"gen":null}}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, zip_bytes) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/bundle?assets=1"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // The bundle lists only the allowed names and carries the picture + its library entry.
+        let names: Vec<String> = {
+            let mut z = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes[..])).unwrap();
+            (0..z.len())
+                .map(|i| z.by_index(i).unwrap().name().to_string())
+                .collect()
+        };
+        assert!(
+            names.contains(&format!("{id}/assets/{picture}")),
+            "{names:?}"
+        );
+        assert!(names.contains(&format!("{id}/custom.json")));
+        assert!(names.contains(&format!("{id}/PACKS.txt")));
+        // Without assets=1 the picture stays out.
+        let (_, light) = call(&router, "GET", &format!("/api/docs/{id}/bundle"), vec![]).await;
+        assert!(!String::from_utf8_lossy(&light).contains(&picture));
+        // Import it back.
+        let (st, b) = call(&router, "POST", "/api/import/bundle", zip_bytes.clone()).await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        let new_id = jv(&b)["id"].as_str().unwrap().to_string();
+        assert_ne!(new_id, id, "a restored project always gets a new id");
+        let (_, old) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let (st, new) = call(&router, "GET", &format!("/api/docs/{new_id}"), vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            jv(&old)["floors"],
+            jv(&new)["floors"],
+            "the floors are equal"
+        );
+        assert_eq!(jv(&new)["floors"][0]["stamps"].as_array().unwrap().len(), 2);
+        assert_eq!(jv(&new)["manifest"]["name"], jv(&old)["manifest"]["name"]);
+        assert_ne!(jv(&new)["manifest"]["id"], jv(&old)["manifest"]["id"]);
+        // Undo history came along too.
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{new_id}/undo"),
+            serde_json::json!({"floor": f}).to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // The same bundle again is another new project.
+        let (st, b2) = call(&router, "POST", "/api/import/bundle", zip_bytes).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_ne!(jv(&b2)["id"], jv(&b)["id"]);
+    }
+
+    #[tokio::test]
+    async fn a_bad_bundle_is_refused_and_creates_nothing() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let (id, f) = new_doc(&router, "Bad bundles").await;
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","space":"sp_a","cells":[{"x":0,"y":0}]}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, good) = call(&router, "GET", &format!("/api/docs/{id}/bundle"), vec![]).await;
+        let before = doc_count(&app).await;
+        let refuse = |bytes: Vec<u8>| {
+            let router = router.clone();
+            async move {
+                let (st, body) = call(&router, "POST", "/api/import/bundle", bytes).await;
+                (st, String::from_utf8_lossy(&body).to_string())
+            }
+        };
+        // Not a zip at all.
+        assert_eq!(
+            refuse(b"definitely not a zip".to_vec()).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        // A path that climbs out.
+        let evil = rezip(&good, |n, d| {
+            Some((
+                if n.ends_with("manifest.json") {
+                    "x/../../evil".to_string()
+                } else {
+                    n.to_string()
+                },
+                d,
+            ))
+        });
+        let (st, msg) = refuse(evil).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{msg}");
+        // An absolute path, and a name that is not on the list.
+        let abs = rezip(&good, |n, d| {
+            Some((
+                if n.ends_with("PACKS.txt") {
+                    "/etc/passwd".to_string()
+                } else {
+                    n.to_string()
+                },
+                d,
+            ))
+        });
+        assert_eq!(refuse(abs).await.0, StatusCode::BAD_REQUEST);
+        let extra = rezip(&good, |n, d| {
+            Some((
+                if n.ends_with("PACKS.txt") {
+                    format!("{}/notes.txt", n.split('/').next().unwrap())
+                } else {
+                    n.to_string()
+                },
+                d,
+            ))
+        });
+        assert_eq!(refuse(extra).await.0, StatusCode::BAD_REQUEST);
+        // A corrupt journal.
+        let corrupt = rezip(&good, |n, d| {
+            Some((
+                n.to_string(),
+                if n.ends_with("journal.ndjson") {
+                    b"{not json}\n".to_vec()
+                } else {
+                    d
+                },
+            ))
+        });
+        let (st, msg) = refuse(corrupt).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{msg}");
+        // A corrupt snapshot, and a picture that is not what its name says.
+        let broken_snapshot = rezip(&good, |n, d| {
+            Some((
+                n.to_string(),
+                if n.ends_with("snapshot.json") {
+                    b"{".to_vec()
+                } else {
+                    d
+                },
+            ))
+        });
+        assert_eq!(refuse(broken_snapshot).await.0, StatusCode::BAD_REQUEST);
+        let fake_picture = rezip(&good, |n, d| Some((n.to_string(), d)));
+        let fake_picture = {
+            let top = id.clone();
+            let name = format!("{top}/assets/{}", "ab".repeat(32));
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            let mut r = zip::ZipArchive::new(std::io::Cursor::new(&fake_picture[..])).unwrap();
+            for i in 0..r.len() {
+                let e = r.by_index(i).unwrap();
+                w.raw_copy_file(e).unwrap();
+            }
+            w.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut w, &tiny_png()).unwrap();
+            w.finish().unwrap().into_inner()
+        };
+        assert_eq!(refuse(fake_picture).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(doc_count(&app).await, before, "nothing was created");
+        // And the good one still restores.
+        assert_eq!(refuse(good).await.0, StatusCode::OK);
+        assert_eq!(doc_count(&app).await, before + 1);
     }
 
     #[tokio::test]

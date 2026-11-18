@@ -26,6 +26,8 @@
   <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
   <button id="btn-open" title="Open a Universal VTT file (.dd2vtt / .uvtt) as a project">📂 Open .dd2vtt…</button>
   <input type="file" id="file-open" accept=".dd2vtt,.uvtt,.df2vtt,application/json" hidden>
+  <button id="btn-open-backup" title="Restore a backup (.ndmapz) as a new project">📦 Open backup…</button>
+  <input type="file" id="file-backup" accept=".ndmapz,.zip,application/zip" hidden>
   <span id="doc-meta" class="dim"></span>
   <span class="spacer"></span>
   <div class="tools">
@@ -66,6 +68,7 @@
       <a id="exp-webp" download>WebP</a>
       <a id="exp-avif" download>AVIF</a>
       <a id="exp-uvtt" download>UVTT</a>
+      <a id="exp-backup" download title="The whole project with its history, checkpoints and pictures, as a .ndmapz you can restore with Open backup">Backup</a>
     <a id="exp-foundry" title="Foundry VTT scene data (v11/v12): walls, doors, lights. Export the picture as WebP at 100 px a square and upload it to Foundry" target="_blank" rel="noopener">Foundry</a>
     <a id="exp-pdf" title="Print at true scale: one inch per square, cut into pages" target="_blank" rel="noopener">PDF</a>
     </span>
