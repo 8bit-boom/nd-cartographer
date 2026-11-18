@@ -529,6 +529,44 @@ fn terrain_restore(floor: &FloorDoc, keys: Vec<(i32, i32)>) -> Op {
 /// invalid is ever journaled (the D1 lesson: refuse at the boundary).
 pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
     match op {
+        // A batch is all-or-nothing: see `apply_with_inverse`.
+        Op::Batch { .. } => apply_with_inverse(floor, op).map(|_| ()),
+        _ => apply_single(floor, op),
+    }
+}
+
+/// Apply `op` and return its inverse (computed against the state before the
+/// op). A `Batch` is atomic: if a sub-op fails, the sub-ops already applied
+/// are undone (in reverse, ignoring their errors) and the original error is
+/// returned, so the floor is left exactly as it was.
+pub fn apply_with_inverse(floor: &mut FloorDoc, op: &Op) -> CoreResult<Op> {
+    match op {
+        Op::Batch { ops } => {
+            let mut inverses: Vec<Op> = Vec::with_capacity(ops.len());
+            for sub in ops {
+                match apply_with_inverse(floor, sub) {
+                    Ok(inv) => inverses.push(inv),
+                    Err(e) => {
+                        for inv in inverses.iter().rev() {
+                            let _ = apply_op(floor, inv);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            inverses.reverse();
+            Ok(Op::Batch { ops: inverses })
+        }
+        _ => {
+            let inverse = op.inverse_against(floor)?;
+            apply_single(floor, op)?;
+            Ok(inverse)
+        }
+    }
+}
+
+fn apply_single(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
+    match op {
         Op::PaintCells { cells, space } => floor.grid.paint(cells, space.as_deref())?,
         Op::UpsertSpace { space } => floor.grid.upsert_space(space.clone())?,
         Op::RemoveSpace { id } => floor.grid.remove_space(id)?,
@@ -588,11 +626,8 @@ pub fn apply_op(floor: &mut FloorDoc, op: &Op) -> CoreResult<()> {
         Op::SetCanvas { canvas } => floor.set_canvas(*canvas)?,
         Op::PutOverlay { item, index } => floor.put_overlay(item.clone(), *index)?,
         Op::RemoveOverlay { kind, id } => floor.remove_overlay(*kind, id)?,
-        Op::Batch { ops } => {
-            for op in ops {
-                apply_op(floor, op)?;
-            }
-        }
+        // Batches are handled by `apply_op`/`apply_with_inverse`.
+        Op::Batch { .. } => unreachable!("batches go through apply_with_inverse"),
     }
     Ok(())
 }
@@ -919,6 +954,69 @@ mod tests {
         journal.undo_last(&mut floor).unwrap();
         assert_eq!(floor.grid.cell_count(), 10);
         assert!(floor.grid.spaces.contains_key("a"));
+        assert_eq!(floor, before);
+    }
+
+    fn failing_batch() -> Op {
+        Op::Batch {
+            ops: vec![
+                Op::UpsertSpace {
+                    space: Space {
+                        id: "b".into(),
+                        ..space_a()
+                    },
+                },
+                Op::PaintCells {
+                    cells: vec![CellKey::new(3, 3)],
+                    space: Some("b".into()),
+                },
+                Op::PaintCells {
+                    cells: vec![CellKey::new(4, 4)],
+                    space: Some("missing".into()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_failing_batch_leaves_the_floor_untouched() {
+        let (mut floor, _journal) = painted_floor();
+        let before = floor.clone();
+        assert!(apply_op(&mut floor, &failing_batch()).is_err());
+        assert_eq!(floor, before);
+        // Nested: the failure is in an inner batch after outer sub-ops applied.
+        let nested = Op::Batch {
+            ops: vec![
+                Op::PaintCells {
+                    cells: vec![CellKey::new(9, 9)],
+                    space: Some("a".into()),
+                },
+                failing_batch(),
+            ],
+        };
+        assert!(apply_op(&mut floor, &nested).is_err());
+        assert_eq!(floor, before);
+    }
+
+    #[test]
+    fn apply_with_inverse_returns_a_working_inverse() {
+        let (mut floor, _journal) = painted_floor();
+        let before = floor.clone();
+        let op = Op::Batch {
+            ops: vec![
+                Op::PaintCells {
+                    cells: vec![CellKey::new(0, 0), CellKey::new(1, 0)],
+                    space: Some("a".into()),
+                },
+                Op::PaintCells {
+                    cells: vec![CellKey::new(1, 0)],
+                    space: None,
+                },
+            ],
+        };
+        let inv = apply_with_inverse(&mut floor, &op).unwrap();
+        assert_ne!(floor, before);
+        apply_op(&mut floor, &inv).unwrap();
         assert_eq!(floor, before);
     }
 
