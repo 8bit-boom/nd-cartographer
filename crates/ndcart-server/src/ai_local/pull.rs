@@ -928,40 +928,29 @@ fn ask(question: &str) -> bool {
         && matches!(line.trim(), "y" | "Y" | "yes" | "YES")
 }
 
-/// `ndcart ai pull <id|repo:File.gguf> [--data-dir D] [--yes] [--max-gb N] [--json] [--allow-non-unsloth]`
-pub async fn run_pull(args: Vec<String>) -> Result<(), String> {
-    let c = super::common(args)?;
-    let (mut target, mut yes, mut max_gb, mut allow) = (None, false, None::<f64>, false);
-    let mut it = c.rest.into_iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--yes" | "-y" => yes = true,
-            "--allow-non-unsloth" => allow = true,
-            "--max-gb" => {
-                max_gb = Some(
-                    it.next()
-                        .and_then(|v| v.parse().ok())
-                        .ok_or("--max-gb needs a number")?,
-                )
-            }
-            o if !o.starts_with("--") && target.is_none() => target = Some(o.to_string()),
-            o => return Err(format!("unknown argument: {o}")),
-        }
-    }
-    let target = target.ok_or("usage: ndcart ai pull <catalog-id | unsloth/Repo-GGUF:File.gguf> [--yes] [--max-gb N] [--data-dir D]")?;
+/// What the command line chose.
+#[derive(Default, Clone)]
+pub struct FetchOpts {
+    pub yes: bool,
+    pub max_gb: Option<f64>,
+    pub json: bool,
+    pub allow_non_unsloth: bool,
+}
+
+/// Plan, check, confirm, download. Returns the model file relative to `<data>/models`.
+pub async fn fetch(data: &Path, target: &str, o: &FetchOpts) -> Result<String, String> {
     let pull = Pull::from_env();
-    let said = |json: bool, ev: serde_json::Value, text: &str| {
+    let json = o.json;
+    let said = |ev: serde_json::Value, text: &str| {
         if json {
             println!("{ev}");
         } else {
             eprintln!("{text}");
         }
     };
-    let t = parse_target(&target, &catalog::bundled(), allow)?;
+    let t = parse_target(target, &catalog::bundled(), o.allow_non_unsloth)?;
     let plan = pull.plan(&t).await?;
-    let json = c.json;
     said(
-        json,
         serde_json::json!({"event":"plan","repo":plan.repo,"files":plan.files,"total_bytes":plan.total_bytes}),
         &format!(
             "{}: {} file(s), {}",
@@ -970,16 +959,18 @@ pub async fn run_pull(args: Vec<String>) -> Result<(), String> {
             human_bytes(plan.total_bytes)
         ),
     );
-    std::fs::create_dir_all(models_dir(&c.data))
+    std::fs::create_dir_all(models_dir(data))
         .map_err(|e| format!("cannot create the models folder: {e}"))?;
-    let max_bytes = max_gb.map(|g| (g * 1e9) as u64);
-    if let Some(note) = check_budget(&plan, max_bytes, (pull.free_bytes)(&models_dir(&c.data)))? {
+    let max_bytes = o.max_gb.map(|g| (g * 1e9) as u64);
+    if let Some(note) = check_budget(&plan, max_bytes, (pull.free_bytes)(&models_dir(data)))? {
         eprintln!("note: {note}");
     }
     if plan.files.iter().any(|f| f.sha256.is_none()) {
-        eprintln!("note: the Hub gave no SHA-256 for a file; the size is checked and the hash is recorded");
+        eprintln!(
+            "note: the Hub gave no SHA-256 for a file; the size is checked and the hash is recorded"
+        );
     }
-    if !yes {
+    if !o.yes {
         let q = format!(
             "Download {} from huggingface.co/{}?",
             human_bytes(plan.total_bytes),
@@ -1004,16 +995,43 @@ pub async fn run_pull(args: Vec<String>) -> Result<(), String> {
             eprint!("\r{} / {}   ", human_bytes(p.done), human_bytes(p.total));
         }
     };
-    let rel = pull.download(&plan, &c.data, &mut progress, None).await?;
+    let rel = pull.download(&plan, data, &mut progress, None).await?;
     if !json {
         eprintln!();
     }
     said(
-        json,
         serde_json::json!({"event":"done","model_file":rel}),
-        &format!("done: {}", models_dir(&c.data).join(&rel).display()),
+        &format!("done: {}", models_dir(data).join(&rel).display()),
     );
-    Ok(())
+    Ok(rel)
+}
+
+/// `ndcart ai pull <id|repo:File.gguf> [--data-dir D] [--yes] [--max-gb N] [--json] [--allow-non-unsloth]`
+pub async fn run_pull(args: Vec<String>) -> Result<(), String> {
+    let c = super::common(args)?;
+    let mut o = FetchOpts {
+        json: c.json,
+        ..Default::default()
+    };
+    let mut target = None;
+    let mut it = c.rest.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--yes" | "-y" => o.yes = true,
+            "--allow-non-unsloth" => o.allow_non_unsloth = true,
+            "--max-gb" => {
+                o.max_gb = Some(
+                    it.next()
+                        .and_then(|v| v.parse().ok())
+                        .ok_or("--max-gb needs a number")?,
+                )
+            }
+            x if !x.starts_with("--") && target.is_none() => target = Some(x.to_string()),
+            x => return Err(format!("unknown argument: {x}")),
+        }
+    }
+    let target = target.ok_or("usage: ndcart ai pull <catalog-id | unsloth/Repo-GGUF:File.gguf> [--yes] [--max-gb N] [--data-dir D]")?;
+    fetch(&c.data, &target, &o).await.map(|_| ())
 }
 
 /// `ndcart ai import FILE.gguf [--data-dir D]`

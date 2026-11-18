@@ -13,7 +13,10 @@ pub mod catalog;
 pub mod hw;
 pub mod pull;
 pub mod runtime;
+pub mod selftest;
 pub mod serve;
+pub mod setup;
+pub mod status;
 
 use std::path::PathBuf;
 
@@ -101,7 +104,7 @@ pub fn models(args: Vec<String>) -> Result<(), String> {
     let records = catalog::load_records(&c.data);
     let rt = runtime::find(None);
     let machine = hw::detect(rt.as_ref().map(|r| r.path.as_path()));
-    let recs = hw::recommend(&machine, &cat);
+    let recs = hw::recommend_tested(&machine, &cat, &records);
     let mark = |id: &str| {
         recs.iter()
             .find(|r| r.entry.id == id)

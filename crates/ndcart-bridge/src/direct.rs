@@ -229,6 +229,7 @@ fn finish(status: StatusCode, text: &str) -> Result<ChatReply, BridgeError> {
         reasoning,
         finish_reason,
         usage: v.get("usage").cloned(),
+        timings: v.get("timings").cloned(),
     })
 }
 
@@ -310,4 +311,6 @@ pub struct ChatReply {
     /// `stop`, `length`, ...
     pub finish_reason: Option<String>,
     pub usage: Option<Value>,
+    /// llama.cpp's `timings` (`predicted_per_second`, ...), when the server sends it.
+    pub timings: Option<Value>,
 }

@@ -399,6 +399,25 @@ pub fn recommend<'a>(hw: &Hw, cat: &'a [Entry]) -> Vec<Rec<'a>> {
     recs
 }
 
+/// [`recommend`], taking out models whose test here said "too weak" (a tested failure is
+/// never recommended).
+pub fn recommend_tested<'a>(
+    hw: &Hw,
+    cat: &'a [Entry],
+    tested: &std::collections::BTreeMap<String, super::catalog::Record>,
+) -> Vec<Rec<'a>> {
+    let mut recs = recommend(hw, cat);
+    for r in recs.iter_mut() {
+        if tested
+            .get(&r.entry.id)
+            .is_some_and(|t| t.verdict == "too weak")
+        {
+            r.recommended = false;
+        }
+    }
+    recs
+}
+
 /// The memory class a tier name stands for, for messages ("fits a 12 GB card").
 pub fn tier_gb(tier: &str) -> u64 {
     tier_budget(tier) / 1_000_000_000

@@ -374,10 +374,30 @@ async fn chat(State(s): State<St>, Json(body): Json<Value>) -> (StatusCode, Json
     let user = text_of("user", false);
     let repair_turn = msgs.iter().any(|m| m["role"] == "assistant");
     let scripted = s.script.lock().expect("script").pop_front();
+    // The self-test's tiny schema probe (`{"ok": true}`) and its tool-call probe.
+    let wants_ok_probe = body
+        .pointer("/response_format/json_schema/schema/properties/ok")
+        .is_some();
+    let tool_name = body
+        .pointer("/tools/0/function/name")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let content = match (scripted, s.opts.behaviour) {
         (Some(r), _) => r,
         (None, Behaviour::Garbage) => "I am sorry, I cannot help with that.".to_string(),
+        (None, _) if wants_ok_probe => r#"{"ok": true}"#.to_string(),
         (None, b) => pick(&system, &user, repair_turn, b),
+    };
+    let message = match (&tool_name, s.opts.behaviour) {
+        (Some(name), b) if b != Behaviour::Garbage => json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": name, "arguments": "{\"city\": \"Paris\"}"},
+            }],
+        }),
+        _ => json!({"role": "assistant", "content": content}),
     };
     (
         StatusCode::OK,
@@ -387,10 +407,12 @@ async fn chat(State(s): State<St>, Json(body): Json<Value>) -> (StatusCode, Json
             "model": body["model"],
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": "stop",
             }],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            // llama.cpp reports speed like this; a fixed, made-up number here.
+            "timings": {"predicted_n": 100, "predicted_per_second": 42.0},
         })),
     )
 }

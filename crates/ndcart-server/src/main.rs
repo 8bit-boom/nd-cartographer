@@ -611,7 +611,7 @@ async fn main() {
         }
         other => {
             eprintln!(
-                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | import-pack FILE | open-published SLUG | doctor | ai stand-in ... | publish DOC ... | draft PROMPT ...]"
+                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | import-pack FILE | open-published SLUG | doctor | ai models|pull|serve|stop|setup|status|test|stand-in ... | publish DOC ... | draft PROMPT ...]"
             );
             eprintln!("  unknown command: {other}");
             std::process::exit(2);
@@ -619,7 +619,7 @@ async fn main() {
     }
 }
 
-/// `ndcart ai <stand-in|…>`: the local-AI helpers (the group grows in plan batch 4).
+/// `ndcart ai <models|pull|import|serve|stop|setup|status|test|key|stand-in>`: the local-AI helpers.
 async fn run_ai(args: Vec<String>) -> Result<(), String> {
     let mut args = args.into_iter();
     match args.next().as_deref() {
@@ -636,9 +636,23 @@ async fn run_ai(args: Vec<String>) -> Result<(), String> {
         Some("stop") => ai_local::serve::run_stop(args.collect()),
         #[cfg(feature = "bridge")]
         Some("key") => ai_local::serve::run_key(args.collect()),
-        Some(o) => Err(format!("unknown ai command '{o}' (try: models, pull, import, serve, stop, key, stand-in)")),
+        #[cfg(feature = "bridge")]
+        Some("status") => ai_local::status::run_status(args.collect()).await,
+        #[cfg(feature = "bridge")]
+        Some(c @ ("test" | "setup")) => {
+            let code = if c == "test" {
+                ai_local::selftest::run_cli(args.collect()).await?
+            } else {
+                ai_local::setup::run_setup(args.collect()).await?
+            };
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Some(o) => Err(format!("unknown ai command '{o}' (try: models, pull, import, serve, stop, key, status, test, setup, stand-in)")),
         None => Err(
-            "usage: ndcart ai models | stand-in --port N [--behaviour good|fix-once|garbage|slow|no-schema]"
+            "usage: ndcart ai models | pull ID | import FILE | serve | stop | setup | status | test | key | stand-in --port N [--behaviour good|fix-once|garbage|slow|no-schema]"
                 .into(),
         ),
     }
