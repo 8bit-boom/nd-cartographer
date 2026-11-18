@@ -813,6 +813,9 @@ const curFloor = () => state.doc.floors.find(f => f.id === state.floorId) || sta
 async function refresh() {
   state.doc = await api('GET', `/api/docs/${state.docId}`);
   state.rev = state.doc.rev;
+  // A rev the tile bookkeeping did not account for (another window, a
+  // server-side generator...) means any tile may have changed.
+  if (tileKnownRev !== state.rev) tileCache.clear();
   // Keep the selected floor if it still exists; otherwise fall back to the first.
   if (!state.doc.floors.some(f => f.id === state.floorId)) state.floorId = state.doc.floors[0].id;
   const floor = curFloor();
@@ -867,14 +870,14 @@ function render() {
   const [wx1, wy1] = screenToWorld(w, h);
   const tx0 = Math.floor(wx0 / TILE), tx1 = Math.floor(wx1 / TILE);
   const ty0 = Math.floor(wy0 / TILE), ty1 = Math.floor(wy1 / TILE);
-  const cacheBust = `rev=${state.rev}`;
+  if (tileBase === null) { tileBase = state.rev; tileKnownRev = state.rev; }
   const pending = [];
   if (!state.doc.floors.some(f => f.id === state.floorId)) return;   // floor just removed
 
   for (let ty = ty0; ty <= ty1; ty++) {
     for (let tx = tx0; tx <= tx1; tx++) {
       const url =
-        `/tiles/${state.docId}/${state.floorId}/${state.z}/${tx}_${ty}?${cacheBust}${onionParam()}`;
+        `/tiles/${state.docId}/${state.floorId}/${state.z}/${tx}_${ty}?rev=${tileRevFor(state.floorId, state.z, tx, ty)}${onionParam()}`;
       const [sx, sy] = worldToScreen(tx * TILE, ty * TILE);
       pending.push(drawTile(url, sx, sy));
     }
@@ -890,12 +893,51 @@ function render() {
 }
 
 const tileCache = new Map(); // url -> Image (2D path) or {tex} (WebGL path)
+// Tile URLs carry a rev so the browser's own cache is busted exactly when a
+// tile changed. `tileBase` is the rev every tile is known to be current at;
+// `dirtyLog` lists the edits since that touched only a rectangle of cells, so
+// a tile is refetched only when an edit's rectangle covers it. Anything the
+// bookkeeping cannot account for goes through `tileCache.clear()`.
+let tileBase = null;       // null: set to the current rev at the next render
+let tileKnownRev = null;   // the doc rev the bookkeeping is complete up to
+const dirtyLog = [];       // {floor, rev, rect: [x0, y0, x1, y1]} (cells, inclusive)
 // GL textures must be freed when the cache is invalidated; keep every
 // existing `tileCache.clear()` call site working through this override.
 tileCache.clear = function () {
+  tileCache.evict();
+  tileBase = null;
+  tileKnownRev = null;
+  dirtyLog.length = 0;
+};
+// Free the textures and forget the images, keeping the rev bookkeeping (the
+// URLs of tiles in view must not change just because the cache got full).
+tileCache.evict = function () {
   if (gl) for (const t of tileCache.values()) if (t && t.tex) gl.deleteTexture(t.tex);
   Map.prototype.clear.call(tileCache);
 };
+function tileRevFor(floorId, z, tx, ty) {
+  let r = tileBase;
+  const pp = PPC0 * 2 ** z;
+  const cx0 = Math.floor(tx * TILE / pp), cx1 = Math.floor(((tx + 1) * TILE - 1) / pp);
+  const cy0 = Math.floor(ty * TILE / pp), cy1 = Math.floor(((ty + 1) * TILE - 1) / pp);
+  for (const e of dirtyLog) {
+    const [x0, y0, x1, y1] = e.rect;
+    if (e.floor === floorId && e.rev > r && x0 <= cx1 && x1 >= cx0 && y0 <= cy1 && y1 >= cy0) r = e.rev;
+  }
+  return r;
+}
+// Record the outcome of an edit to `floorId` that moved the doc from
+// `prevRev` to `res.rev`, so only the tiles under its dirty rectangle refetch.
+function noteEdit(res, prevRev, floorId) {
+  state.rev = res.rev;
+  if (tileKnownRev === prevRev && res.rev === prevRev + 1 && Array.isArray(res.dirty)) {
+    if (res.dirty.length === 4) dirtyLog.push({ floor: floorId, rev: res.rev, rect: res.dirty });
+    tileKnownRev = res.rev;
+    if (dirtyLog.length > 200) tileCache.clear();
+  } else {
+    tileCache.clear();
+  }
+}
 function drawTile(url, sx, sy) {
   if (gl) return drawTileGL(url, sx, sy);
   return new Promise((resolve) => {
@@ -905,7 +947,7 @@ function drawTile(url, sx, sy) {
       img.onload = () => { ctx.drawImage(img, sx, sy); resolve(); };
       img.onerror = () => resolve();
       img.src = url;
-      if (tileCache.size > 600) tileCache.clear();
+      if (tileCache.size > 600) tileCache.evict();
       tileCache.set(url, img);
     } else if (img.complete && img.naturalWidth > 0) {
       ctx.drawImage(img, sx, sy);
@@ -921,7 +963,7 @@ function drawTileGL(url, sx, sy) {
   return new Promise((resolve) => {
     let rec = tileCache.get(url);
     if (!rec) {
-      if (tileCache.size > 600) tileCache.clear();
+      if (tileCache.size > 600) tileCache.evict();
       rec = { tex: null };
       tileCache.set(url, rec);
       // One decode per URL even if several render passes ask for it.
@@ -1106,9 +1148,9 @@ async function toggleMark(edge, kind) {
 
 async function postOps(ops) {
   try {
-    const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: state.floorId, ops });
-    state.rev = res.rev;
-    tileCache.clear();
+    const prevRev = state.rev, floorId = state.floorId;
+    const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: floorId, ops });
+    noteEdit(res, prevRev, floorId);
     await refresh();
   } catch (e) {
     statusEl.textContent = `Error: ${e.message}`;
@@ -1132,9 +1174,9 @@ async function flushStroke() {
     ],
   }];
   try {
-    const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: state.floorId, ops });
-    state.rev = res.rev;
-    tileCache.clear();
+    const prevRev = state.rev, floorId = state.floorId;
+    const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: floorId, ops });
+    noteEdit(res, prevRev, floorId);
     await refresh();
   } catch (e) {
     statusEl.textContent = `Error: ${e.message}`;
@@ -3277,9 +3319,9 @@ function setExportLinks() {
 
 async function undo() {
   try {
-    const res = await api('POST', `/api/docs/${state.docId}/undo`, { floor: state.floorId });
-    state.rev = res.rev;
-    tileCache.clear();
+    const prevRev = state.rev, floorId = state.floorId;
+    const res = await api('POST', `/api/docs/${state.docId}/undo`, { floor: floorId });
+    noteEdit(res, prevRev, floorId);
     await refresh();
   } catch (err) {
     statusEl.textContent = err.message;
