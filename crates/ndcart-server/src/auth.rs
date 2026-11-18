@@ -53,13 +53,7 @@ pub fn resolve_token(data_dir: Option<&Path>) -> (String, bool) {
         if let Some(parent) = f.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        if std::fs::write(&f, &t).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600));
-            }
-        }
+        let _ = crate::store::write_atomic_private(&f, t.as_bytes());
     }
     (t, true)
 }

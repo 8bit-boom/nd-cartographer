@@ -38,7 +38,7 @@ pub fn save(dir: Option<&std::path::Path>, s: &StoredAiSettings) -> Result<(), S
         Some(d) => {
             std::fs::create_dir_all(d)
                 .map_err(|e| format!("cannot create {}: {e}", d.display()))?;
-            crate::store::write_atomic(&d.join(FILE_NAME), body.as_bytes())
+            crate::store::write_atomic_private(&d.join(FILE_NAME), body.as_bytes())
                 .map_err(|e| format!("cannot save the AI settings: {e}"))
         }
         None => Ok(()), // no data dir: in-memory only (tests)
@@ -145,6 +145,27 @@ mod tests {
         };
         save(Some(&dir), &stored).unwrap();
         assert_eq!(load(Some(&dir)), stored);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_settings_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ndcart-ai-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let stored = StoredAiSettings {
+            key: Some("sk-secret".into()),
+            ..Default::default()
+        };
+        save(Some(&dir), &stored).unwrap();
+        // A second save (replacing an existing file) stays private too.
+        save(Some(&dir), &stored).unwrap();
+        let mode = std::fs::metadata(dir.join(FILE_NAME))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
