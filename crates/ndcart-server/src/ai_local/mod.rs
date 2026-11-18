@@ -6,9 +6,6 @@
 //!
 //! Layout: `catalog` (the model list), then the pieces each command uses.
 
-// Pieces land one command at a time; the last step removes this allowance.
-#![allow(dead_code)]
-
 pub mod catalog;
 pub mod checks;
 pub mod http;

@@ -39,7 +39,33 @@ Optional key: `ND_CARTO_LLM_KEY` or `ND_CARTO_LLM_KEY_FILE`. Environment
 variables win over saved settings per field. Requests go one at a time. A direct
 model writes specs but cannot make pictures or read the world's place names.
 
-**llama.cpp's `llama-server` serving an Unsloth GGUF** (Unsloth publishes the
+**One command: `ndcart ai setup`.** It looks at this computer, finds `llama-server` (it
+prints how to install llama.cpp if missing; the studio never downloads or installs a
+program), offers models that fit, downloads the one you pick after showing its size, starts
+it on `127.0.0.1` with a private key file, saves the settings and runs a self-test. The same
+steps are available one by one, and in **⚙ Settings → Run a model on this computer**:
+
+```bash
+ndcart ai models --data-dir ~/ndcart-data      # the catalog, marked by what fits this computer
+ndcart ai pull qwen3.5-4b                      # size shown first; SHA-256 checked; resumes
+ndcart ai import my-finetune.gguf              # use a GGUF you made (for example with Unsloth)
+ndcart ai serve | stop                         # the managed llama-server (loopback, alias ndcart-local)
+ndcart ai status [--json]                      # runtime, models, server, endpoint, capabilities
+ndcart ai test                                 # good | usable | too weak (exit 0, 0, 3)
+```
+
+`ndcart ai test` runs the same validate, lint and repair loop as a real draft on three
+requests: **good** means all three were valid on the first ask, **usable** that repairs fixed
+them, **too weak** that one failed even so. A model counts as "tested" only on the computer
+where that run was recorded (`<data dir>/ai-verified.json`); the bundled catalog marks every
+model `verified = false`, and its Hugging Face repo and file names were written without live
+Hub access, so the first `ndcart ai pull` is also the first check of those names (it lists
+the repository's files if one is not there). Add `--autostart` to `setup` (or set it in the
+settings) to have `ndcart serve` start and supervise the model. `ndcart doctor` checks the
+runtime, the model file's checksum, the server and the GPU. For Docker and TrueNAS see
+[DOCKER.md](DOCKER.md).
+
+**By hand: llama.cpp's `llama-server` serving an Unsloth GGUF** (Unsloth publishes the
 quantised GGUF files; llama.cpp runs them):
 
 1. Start `llama-server` with a model and a port you choose, for example

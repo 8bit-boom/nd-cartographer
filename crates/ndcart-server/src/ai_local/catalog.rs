@@ -12,19 +12,6 @@ pub const CATALOG_TOML: &str = include_str!("../../assets/ai/models.toml");
 /// Memory classes, smallest first. A model of tier T fits machines of tier T and above.
 pub const TIERS: &[&str] = &["cpu8", "vram12", "apple16", "vram24", "apple32"];
 
-/// A rough usable-memory budget for a tier, in bytes (the tier's name says the class).
-pub fn tier_budget(tier: &str) -> u64 {
-    const G: u64 = 1_000_000_000;
-    match tier {
-        "cpu8" => 6 * G,
-        "vram12" => 12 * G,
-        "apple16" => 11 * G,
-        "vram24" => 24 * G,
-        "apple32" => 22 * G,
-        _ => 0,
-    }
-}
-
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct Entry {
     pub id: String,

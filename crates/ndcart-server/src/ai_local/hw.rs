@@ -2,7 +2,7 @@
 //! outputs); the runners call fixed programs with fixed arguments, never a shell, and give up
 //! after a short timeout. Nothing here needs a GPU or a runtime to compile or test.
 
-use super::catalog::{tier_budget, Entry};
+use super::catalog::Entry;
 use serde::Serialize;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -416,11 +416,6 @@ pub fn recommend_tested<'a>(
         }
     }
     recs
-}
-
-/// The memory class a tier name stands for, for messages ("fits a 12 GB card").
-pub fn tier_gb(tier: &str) -> u64 {
-    tier_budget(tier) / 1_000_000_000
 }
 
 #[cfg(test)]
