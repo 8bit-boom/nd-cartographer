@@ -11,6 +11,7 @@
 
 pub mod catalog;
 pub mod hw;
+pub mod runtime;
 
 use std::path::PathBuf;
 
@@ -96,7 +97,8 @@ pub fn models(args: Vec<String>) -> Result<(), String> {
     }
     let cat = catalog::bundled();
     let records = catalog::load_records(&c.data);
-    let machine = hw::detect(None);
+    let rt = runtime::find(None);
+    let machine = hw::detect(rt.as_ref().map(|r| r.path.as_path()));
     let recs = hw::recommend(&machine, &cat);
     let mark = |id: &str| {
         recs.iter()
