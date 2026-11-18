@@ -3302,8 +3302,12 @@ async fn doc_events(
             id,
             0u64,
             tokio::time::interval(std::time::Duration::from_millis(400)),
+            false, // `gone` has been sent: end the stream
         ),
-        |(app, id, mut last, mut tick)| async move {
+        |(app, id, mut last, mut tick, gone)| async move {
+            if gone {
+                return None;
+            }
             tick.tick().await;
             let rev = app.store.read().await.docs.get(&id).map(|d| d.rev);
             match rev {
@@ -3312,15 +3316,18 @@ async fn doc_events(
                     let ev = axum::response::sse::Event::default()
                         .event("rev")
                         .data(r.to_string());
-                    Some((Ok::<_, std::convert::Infallible>(ev), (app, id, last, tick)))
+                    Some((
+                        Ok::<_, std::convert::Infallible>(ev),
+                        (app, id, last, tick, false),
+                    ))
                 }
                 Some(_) => {
                     let ping = axum::response::sse::Event::default().comment("ping");
-                    Some((Ok(ping), (app, id, last, tick)))
+                    Some((Ok(ping), (app, id, last, tick, false)))
                 }
                 None => Some((
                     Ok(axum::response::sse::Event::default().event("gone").data("")),
-                    (app, id, last, tick),
+                    (app, id, last, tick, true),
                 )),
             }
         },
@@ -7639,5 +7646,22 @@ mod tests {
             entries >= 1 && entries <= floors,
             "{entries} entries, {floors} floors"
         );
+    }
+
+    #[tokio::test]
+    async fn the_event_stream_ends_after_gone_for_a_missing_doc() {
+        let router = build_router(test_app());
+        let r = router
+            .oneshot(
+                Request::get("/api/docs/nope/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), body_string(r))
+            .await
+            .expect("the stream must end, not run forever");
+        assert_eq!(body.matches("event: gone").count(), 1, "{body}");
     }
 }
