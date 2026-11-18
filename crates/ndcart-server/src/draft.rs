@@ -627,6 +627,17 @@ pub async fn refine(
     instruction: &str,
     ctx: &Context,
 ) -> Result<MapSpec, String> {
+    Ok(refine_with(cfg, current, pins, instruction, ctx).await?.0)
+}
+
+/// [`refine`], also saying how many asks it took.
+pub async fn refine_with(
+    cfg: &Config,
+    current: &ndcart_core::mapspec::FloorSpec,
+    pins: &[String],
+    instruction: &str,
+    ctx: &Context,
+) -> Result<(MapSpec, usize), String> {
     too_long(instruction)?;
     let backend = Backend::connect(cfg).await?;
     let system = with_context(
@@ -635,7 +646,7 @@ pub async fn refine(
     );
     let first = refine_user_turn(current, pins, instruction)?;
     let judge = judge_refine(current, pins.to_vec());
-    Ok(solve(
+    let out = solve(
         &backend,
         Task {
             cache: &cfg.cache,
@@ -648,8 +659,8 @@ pub async fn refine(
         &|_| {},
         judge,
     )
-    .await?
-    .value)
+    .await?;
+    Ok((out.value, out.attempts))
 }
 
 /// Clean a list of tags: lowercase, 1-24 characters of letters, digits, spaces and

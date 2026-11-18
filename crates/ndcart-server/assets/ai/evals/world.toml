@@ -1,0 +1,33 @@
+# Eval set "world": overland maps (a WorldSpec). Coordinates are 0 to 1 across the map.
+
+[[case]]
+id = "archipelago"
+kind = "world"
+prompt = "An archipelago of five islands with a port town on the largest and a lighthouse on the smallest."
+[case.expect]
+places_min = 2
+must_have_names_any = ["port", "lighthouse"]
+
+[[case]]
+id = "river-kingdom"
+kind = "world"
+prompt = "A river kingdom with a capital at the river mouth, two farming regions and a mountain border region."
+[case.expect]
+places_min = 1
+regions_min = 2
+
+[[case]]
+id = "desert"
+kind = "world"
+prompt = "A dry desert continent with an oasis town, a ruined temple and a salt flat region."
+[case.expect]
+places_min = 2
+must_have_names_any = ["oasis", "temple"]
+
+[[case]]
+id = "frozen-coast"
+kind = "world"
+prompt = "A frozen northern coast with two fortresses and a forest region inland."
+[case.expect]
+places_min = 2
+regions_min = 1

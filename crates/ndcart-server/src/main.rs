@@ -13,6 +13,8 @@ mod ai_settings;
 mod ai_standin;
 #[cfg(feature = "bridge")]
 mod aicache;
+#[cfg(feature = "bridge")]
+mod aieval;
 mod aijobs;
 mod aipack;
 mod ask;
@@ -643,20 +645,20 @@ async fn run_ai(args: Vec<String>) -> Result<(), String> {
         #[cfg(feature = "bridge")]
         Some("status") => ai_local::status::run_status(args.collect()).await,
         #[cfg(feature = "bridge")]
-        Some(c @ ("test" | "setup")) => {
-            let code = if c == "test" {
-                ai_local::selftest::run_cli(args.collect()).await?
-            } else {
-                ai_local::setup::run_setup(args.collect()).await?
+        Some(c @ ("test" | "setup" | "eval")) => {
+            let code = match c {
+                "test" => ai_local::selftest::run_cli(args.collect()).await?,
+                "eval" => aieval::run_cli(args.collect()).await?,
+                _ => ai_local::setup::run_setup(args.collect()).await?,
             };
             if code != 0 {
                 std::process::exit(code);
             }
             Ok(())
         }
-        Some(o) => Err(format!("unknown ai command '{o}' (try: models, pull, import, serve, stop, key, status, test, setup, stand-in)")),
+        Some(o) => Err(format!("unknown ai command '{o}' (try: models, pull, import, serve, stop, key, status, test, eval, setup, stand-in)")),
         None => Err(
-            "usage: ndcart ai models | pull ID | import FILE | serve | stop | setup | status | test | key | stand-in --port N [--behaviour good|fix-once|garbage|slow|no-schema]"
+            "usage: ndcart ai models | pull ID | import FILE | serve | stop | setup | status | test | eval | key | stand-in --port N [--behaviour good|fix-once|garbage|slow|no-schema]"
                 .into(),
         ),
     }

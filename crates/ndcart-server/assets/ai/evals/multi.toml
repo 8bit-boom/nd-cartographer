@@ -1,0 +1,39 @@
+# Eval set "multi": requests for more than one floor. The studio plans first, then draws each
+# floor (the stepwise path), so a draft takes more than one ask even when nothing goes wrong.
+
+[[case]]
+id = "tower-two"
+kind = "map"
+prompt = "A two-floor wizard's tower: a ground-floor hall and a library upstairs, joined by stairs."
+[case.expect]
+floors = 2
+rooms_min = 4
+stairs = true
+must_have_names_any = ["hall", "library"]
+
+[[case]]
+id = "dungeon-three"
+kind = "map"
+prompt = "A three-level dungeon: guard cells at the top, a crypt in the middle and a flooded cistern at the bottom."
+[case.expect]
+floors = 3
+rooms_min = 6
+stairs = true
+must_have_names_any = ["cell", "crypt", "cistern"]
+
+[[case]]
+id = "ship-two"
+kind = "map"
+prompt = "A sailing ship with two decks: a cargo hold below and the captain's cabin and crew quarters above."
+[case.expect]
+floors = 2
+stairs = true
+must_have_names_any = ["cargo", "cabin", "quarters"]
+
+[[case]]
+id = "metro-three"
+kind = "map"
+prompt = "An abandoned metro station, 3 levels, the bottom level flooded."
+[case.expect]
+floors = 3
+stairs = true

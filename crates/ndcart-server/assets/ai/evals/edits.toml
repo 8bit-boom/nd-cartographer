@@ -1,0 +1,66 @@
+# Eval set "edits": changes to a floor that already exists.
+#
+# kind = "refine": the model rewrites one floor, keeping the pinned rooms exactly. `base` is the
+#   pack example whose first floor is the current floor; `pins` are room ids that must come
+#   back unchanged. The prompt is the change request.
+# kind = "edit": the model returns a typed edit plan (rename, light, link, material,
+#   furnish, note) for the floor the base example lays out.
+
+[[case]]
+id = "refine-barracks"
+kind = "refine"
+base = "map-refine"
+pins = ["hall", "armory"]
+prompt = "Add a barracks next to the entrance hall."
+[case.expect]
+rooms_min = 3
+must_have_names_any = ["barracks"]
+pinned_kept = true
+
+[[case]]
+id = "refine-kitchen"
+kind = "refine"
+base = "map-refine"
+pins = ["hall"]
+prompt = "Add a kitchen and a pantry on the side of the entrance hall; keep the armory as it is."
+[case.expect]
+rooms_min = 4
+must_have_names_any = ["kitchen", "pantry"]
+pinned_kept = true
+
+[[case]]
+id = "refine-secret"
+kind = "refine"
+base = "map-refine"
+pins = []
+prompt = "Add a hidden room reached only through a secret door from the armory."
+[case.expect]
+rooms_min = 3
+secret_links_min = 1
+
+[[case]]
+id = "edit-rename"
+kind = "edit"
+base = "map-shop"
+prompt = "Rename the first room to The Old Counting House."
+[case.expect]
+edits_min = 1
+edit_ops_any = ["rename_room"]
+
+[[case]]
+id = "edit-dark"
+kind = "edit"
+base = "map-crypt"
+prompt = "Put out the lights in every room and leave a note on the first room saying the torches were stolen."
+[case.expect]
+edits_min = 2
+edit_ops_any = ["set_lit", "note"]
+
+[[case]]
+id = "edit-furnish"
+kind = "edit"
+base = "map-tower"
+prompt = "Furnish the first room and give it a wood plank floor."
+[case.expect]
+edits_min = 1
+edit_ops_any = ["furnish", "set_material"]

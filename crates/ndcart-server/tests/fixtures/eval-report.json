@@ -1,0 +1,35 @@
+{
+  "ndcart": "0.1.0",
+  "pack": "1.3.0",
+  "date": "2026-11-18",
+  "endpoint": "http://127.0.0.1:8391/v1",
+  "model": "ndcart-local",
+  "set": "all",
+  "repeat": 1,
+  "verdict": "good",
+  "summary": {
+    "runs": 1,
+    "valid_pct": 100.0,
+    "first_try_pct": 100.0,
+    "mean_checks_pct": 100.0,
+    "median_secs": 1.5,
+    "mean_lint_warnings": 0.0,
+    "mean_attempts": 1.0,
+    "tokens_per_second": 30.0
+  },
+  "cases": [
+    {
+      "id": "shop",
+      "kind": "map",
+      "run": 1,
+      "valid": true,
+      "first_try": true,
+      "checks_passed": 1,
+      "checks_total": 1,
+      "failed_checks": [],
+      "lint_warnings": 0,
+      "attempts": 1,
+      "secs": 1.5
+    }
+  ]
+}

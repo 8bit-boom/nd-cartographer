@@ -1,0 +1,79 @@
+# Eval set "map": single-floor drafts. The first three are the self-test's golden prompts
+# (`ndcart ai test`); the rest widen the range. `expect` lists what the request asked for;
+# each key is one check, and a key left out is not checked.
+
+[[case]]
+id = "shop"
+kind = "map"
+prompt = "A small shop: a sales floor and a stockroom, linked by a door."
+[case.expect]
+floors = 1
+rooms_min = 2
+rooms_max = 6
+must_have_names_any = ["shop", "sales", "store", "stock"]
+stairs = false
+
+[[case]]
+id = "crypt"
+kind = "map"
+prompt = "A crypt with a nave, an ossuary behind a secret door, and a side chapel."
+[case.expect]
+floors = 1
+rooms_min = 3
+must_have_names_any = ["nave", "ossuary", "chapel"]
+secret_links_min = 1
+
+[[case]]
+id = "inn"
+kind = "map"
+prompt = "A riverside inn: common room, kitchen, cellar and three guest rooms off a corridor."
+[case.expect]
+floors = 1
+rooms_min = 6
+must_have_names_any = ["common", "kitchen", "cellar"]
+
+[[case]]
+id = "jail"
+kind = "map"
+prompt = "A small jail: a guard room, four cells and a corridor between them."
+[case.expect]
+floors = 1
+rooms_min = 5
+must_have_names_any = ["cell", "guard"]
+
+[[case]]
+id = "temple"
+kind = "map"
+prompt = "A temple with an entrance hall, a shrine, a priests' dormitory and a hidden vault."
+[case.expect]
+floors = 1
+rooms_min = 4
+must_have_names_any = ["shrine", "temple", "altar", "vault"]
+secret_links_min = 1
+
+[[case]]
+id = "cave"
+kind = "map"
+prompt = "A cave system: three chambers joined by narrow tunnels, and one hidden chamber behind a secret passage."
+[case.expect]
+floors = 1
+rooms_min = 4
+secret_links_min = 1
+
+[[case]]
+id = "throne"
+kind = "map"
+prompt = "A throne room with two guard rooms flanking it and a treasury reached by a secret door."
+[case.expect]
+floors = 1
+rooms_min = 4
+must_have_names_any = ["throne", "treasury"]
+secret_links_min = 1
+
+[[case]]
+id = "market"
+kind = "map"
+prompt = "A market square with six small shops around it, open to the square."
+[case.expect]
+floors = 1
+rooms_min = 6

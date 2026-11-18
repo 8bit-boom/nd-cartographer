@@ -12,8 +12,8 @@ use ndcart_bridge::{ChatOptions, DirectChat, Msg};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
-/// Single-floor requests, so "first try" means one ask. (Batch 5's evaluation suite holds the
-/// full prompt set; these three are the quick check.)
+/// Single-floor requests, so "first try" means one ask. (`ndcart ai eval` holds the full prompt
+/// set; these three are its first cases and the quick check; a test keeps them in step.)
 pub const GOLDEN: [&str; 3] = [
     "A small shop: a sales floor and a stockroom, linked by a door.",
     "A crypt with a nave, an ossuary behind a secret door, and a side chapel.",
@@ -112,7 +112,7 @@ fn step(name: &str, status: &'static str, detail: impl Into<String>, t: Instant)
 }
 
 /// Generation speed: llama.cpp's own `timings`, else completion tokens over wall time.
-fn speed(reply: &ndcart_bridge::ChatReply, secs: f64) -> Option<f64> {
+pub(crate) fn speed(reply: &ndcart_bridge::ChatReply, secs: f64) -> Option<f64> {
     if let Some(v) = reply
         .timings
         .as_ref()
