@@ -61,19 +61,25 @@ impl DirectChat {
 
     /// One non-streaming turn: `system` then `user`; returns the reply text.
     pub async fn chat(&self, system: &str, user: &str) -> Result<String, BridgeError> {
+        let msgs = [Msg::system(system), Msg::user(user)];
+        Ok(self
+            .chat_messages(&msgs, &ChatOptions::default())
+            .await?
+            .content)
+    }
+
+    /// One non-streaming turn over any message list, with optional request options.
+    pub async fn chat_messages(
+        &self,
+        msgs: &[Msg],
+        opts: &ChatOptions,
+    ) -> Result<ChatReply, BridgeError> {
         let _turn = self
             .gate
             .acquire()
             .await
             .map_err(|e| BridgeError::Protocol(e.to_string()))?;
-        let body = json!({
-            "model": self.model,
-            "stream": false,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        });
+        let body = opts.body(&self.model, msgs);
         let mut req = self
             .http
             .post(format!("{}/chat/completions", self.base))
@@ -101,17 +107,120 @@ impl DirectChat {
         }
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| BridgeError::Protocol(format!("chat answer: {e}")))?;
-        let out = v
+        let content = v
             .pointer("/choices/0/message/content")
             .and_then(Value::as_str)
             .ok_or_else(|| {
                 BridgeError::Protocol("the model's answer had no choices[0].message.content".into())
             })?;
-        if out.trim().is_empty() {
-            return Err(BridgeError::Rejected(
-                "the model returned an empty reply".into(),
-            ));
+        let reasoning = v
+            .pointer("/choices/0/message/reasoning_content")
+            .and_then(Value::as_str)
+            .filter(|r| !r.trim().is_empty())
+            .map(str::to_string);
+        let finish_reason = v
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if content.trim().is_empty() {
+            let cut = if finish_reason.as_deref() == Some("length") {
+                " (reply cut off: max_tokens)"
+            } else {
+                ""
+            };
+            return Err(BridgeError::Rejected(if reasoning.is_some() {
+                format!(
+                    "the model used its whole reply for thinking; turn thinking off or raise max_tokens{cut}"
+                )
+            } else {
+                format!("the model returned an empty reply{cut}")
+            }));
         }
-        Ok(out.to_string())
+        Ok(ChatReply {
+            content: content.to_string(),
+            reasoning,
+            finish_reason,
+            usage: v.get("usage").cloned(),
+        })
     }
+}
+
+/// One chat message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Msg {
+    pub role: String,
+    pub content: String,
+}
+
+impl Msg {
+    pub fn new(role: &str, content: impl Into<String>) -> Msg {
+        Msg {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+    pub fn system(content: impl Into<String>) -> Msg {
+        Msg::new("system", content)
+    }
+    pub fn user(content: impl Into<String>) -> Msg {
+        Msg::new("user", content)
+    }
+    pub fn assistant(content: impl Into<String>) -> Msg {
+        Msg::new("assistant", content)
+    }
+}
+
+/// Optional request fields; each is sent only when set.
+#[derive(Clone, Debug, Default)]
+pub struct ChatOptions {
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+    pub seed: Option<i64>,
+    /// The OpenAI `response_format` object (JSON mode or a JSON schema).
+    pub response_format: Option<Value>,
+    /// Server-specific extras (llama.cpp's `chat_template_kwargs`, ...), merged at the top
+    /// level of the request body. Fill only for endpoints known to understand them.
+    pub extra: serde_json::Map<String, Value>,
+}
+
+impl ChatOptions {
+    /// The request body: `model`, `stream:false`, `messages`, then whatever is set.
+    pub fn body(&self, model: &str, msgs: &[Msg]) -> Value {
+        let mut body = json!({
+            "model": model,
+            "stream": false,
+            "messages": msgs
+                .iter()
+                .map(|m| json!({"role": m.role, "content": m.content}))
+                .collect::<Vec<_>>(),
+        });
+        let o = body.as_object_mut().expect("object");
+        if let Some(t) = self.temperature {
+            o.insert("temperature".into(), json!(t));
+        }
+        if let Some(n) = self.max_tokens {
+            o.insert("max_tokens".into(), json!(n));
+        }
+        if let Some(n) = self.seed {
+            o.insert("seed".into(), json!(n));
+        }
+        if let Some(f) = &self.response_format {
+            o.insert("response_format".into(), f.clone());
+        }
+        for (k, v) in &self.extra {
+            o.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        body
+    }
+}
+
+/// A successful answer.
+#[derive(Clone, Debug)]
+pub struct ChatReply {
+    pub content: String,
+    /// `reasoning_content`, when the server separates thinking from the answer.
+    pub reasoning: Option<String>,
+    /// `stop`, `length`, ...
+    pub finish_reason: Option<String>,
+    pub usage: Option<Value>,
 }

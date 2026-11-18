@@ -9,4 +9,4 @@ pub use client::{
     Bridge, BridgeError, ImageJob, ImageRequest, Probe, PublishMap, PublishRegion, PublishReport,
     Published,
 };
-pub use direct::{plain_client, DirectChat};
+pub use direct::{plain_client, ChatOptions, ChatReply, DirectChat, Msg};

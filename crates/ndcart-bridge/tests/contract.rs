@@ -595,6 +595,88 @@ async fn direct_chat_speaks_the_openai_shape_and_never_overlaps_two_requests() {
 }
 
 #[tokio::test]
+async fn direct_chat_sends_options_only_when_set_and_reports_the_finish_reason() {
+    use ndcart_bridge::{ChatOptions, Msg};
+    let s = MockServer::start().await;
+    // The plain request carries none of the optional fields (exact body match).
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "m", "stream": false,
+            "messages": [{"role": "user", "content": "hi"}],
+        })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"choices": [{"message": {"content": "plain"}}]})),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
+    // The full request carries every option.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_json(json!({
+            "model": "m", "stream": false,
+            "messages": [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}, {"role": "assistant", "content": "a"}],
+            "temperature": 0.25, "max_tokens": 99, "seed": 7,
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {"enable_thinking": false},
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": "{}"}, "finish_reason": "length"}],
+            "usage": {"completion_tokens": 99},
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let d = DirectChat::new(&format!("{}/v1", s.uri()), "m", None).unwrap();
+    let plain = d
+        .chat_messages(&[Msg::user("hi")], &ChatOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(plain.content, "plain");
+    assert!(plain.finish_reason.is_none() && plain.usage.is_none());
+    let mut opts = ChatOptions {
+        temperature: Some(0.25),
+        max_tokens: Some(99),
+        seed: Some(7),
+        response_format: Some(json!({"type": "json_object"})),
+        ..Default::default()
+    };
+    opts.extra.insert(
+        "chat_template_kwargs".into(),
+        json!({"enable_thinking": false}),
+    );
+    let r = d
+        .chat_messages(
+            &[Msg::system("s"), Msg::user("hi"), Msg::assistant("a")],
+            &opts,
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.finish_reason.as_deref(), Some("length"));
+    assert_eq!(r.usage.unwrap()["completion_tokens"], 99);
+}
+
+#[tokio::test]
+async fn direct_chat_names_a_thinking_only_reply() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"choices": [{
+                "message": {"content": "", "reasoning_content": "let me think..."},
+                "finish_reason": "length",
+            }]})),
+        )
+        .mount(&s)
+        .await;
+    let d = DirectChat::new(&s.uri(), "m", None).unwrap();
+    let e = d.chat("s", "u").await.unwrap_err().to_string();
+    assert!(e.contains("used its whole reply for thinking"), "{e}");
+    assert!(e.contains("cut off"), "{e}");
+}
+
+#[tokio::test]
 async fn direct_chat_failures_are_told_apart() {
     for (status, body, want) in [
         (401, json!({}), "not logged in"),
