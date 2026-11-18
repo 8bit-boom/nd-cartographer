@@ -285,7 +285,10 @@ A 400 x 280-cell floor (112,000 squares of picture material) with 14,800 props:
 Not measured: 60 fps pan/zoom with 100,000 objects (the browser viewport is
 Canvas2D over baked tiles; a floor holds at most 20,000 props), tiles on a
 slow machine, and big terrain. An edit appends to `journal.ndjson` (synced); `snapshot.json` is
-rewritten every 200 edits or a minute, and a reload replays the journal's tail
+rewritten every 200 edits or a minute (the state is copied under the store lock, about
+9 ms on the large floor; encoding and writing happen after the lock is released, on a
+blocking thread, and a snapshot that a newer full save has overtaken is dropped; it was
+about 130 ms with the lock held), and a reload replays the journal's tail
 over it (so a crash loses nothing that was acknowledged: checked by killing a running
 studio with SIGKILL after 120 acknowledged edits and reopening it).
 

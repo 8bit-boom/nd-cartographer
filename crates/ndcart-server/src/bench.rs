@@ -123,6 +123,26 @@ pub(crate) async fn run_large(json: bool) {
         doc.apply_ops(&fid, std::slice::from_ref(&batch)).unwrap();
     });
 
+    // Saving: the periodic snapshot used to be written whole under the store
+    // lock (`save_doc`); now only its serialization is, and the writes follow
+    // after the lock is released (`save_doc_edit` + `SnapshotJob::write`).
+    let dir = std::env::temp_dir().join(format!("ndcart-bench-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let t = Instant::now();
+    store::save_doc(Some(&dir), &doc);
+    let save_full_ms = ms_since(t);
+    doc.apply_ops(&fid, std::slice::from_ref(&one)).unwrap();
+    doc.persisted
+        .snapshot_at
+        .store(0, std::sync::atomic::Ordering::Relaxed); // a snapshot is due
+    let t = Instant::now();
+    let job = store::save_doc_edit(Some(&dir), &doc);
+    let snapshot_lock_ms = ms_since(t);
+    let t = Instant::now();
+    job.expect("a snapshot is due").write();
+    let snapshot_write_ms = ms_since(t);
+    let _ = std::fs::remove_dir_all(&dir);
+
     // GET /api/docs/{id}: floor_view plus JSON.
     let app: App = Arc::new(AppState {
         store: tokio::sync::RwLock::new(store::Store::default()),
@@ -193,6 +213,9 @@ pub(crate) async fn run_large(json: bool) {
             "floor_clone_ms": r(clone_ms),
             "edit_1_cell_ms": r(edit_ms),
             "edit_1_cell_batch_ms": r(edit_batch_ms),
+            "snapshot_save_under_lock_before_ms": r(save_full_ms),
+            "snapshot_copy_under_lock_ms": r(snapshot_lock_ms),
+            "snapshot_write_off_lock_ms": r(snapshot_write_ms),
             "tile_z0_centre_ms": r(tile_centre_ms),
             "tile_z0_far_ms": r(tile_far_ms),
             "tile_z0_sun_ms": r(tile_sun_ms),
@@ -210,6 +233,11 @@ pub(crate) async fn run_large(json: bool) {
         println!("  floor clone:            {clone_ms:>8.2} ms");
         println!("  edit, 1-cell paint:     {edit_ms:>8.2} ms   (budget {EDIT_BUDGET_MS})");
         println!("  edit, 1-cell batch:     {edit_batch_ms:>8.2} ms");
+        println!(
+            "  snapshot save, whole:   {save_full_ms:>8.2} ms   (was all under the store lock)"
+        );
+        println!("  snapshot, under lock:   {snapshot_lock_ms:>8.2} ms   (state copy only)");
+        println!("  snapshot, off the lock: {snapshot_write_ms:>8.2} ms   (encode + disk writes)");
         println!("  tile z0 centre (bake):  {tile_centre_ms:>8.2} ms   (budget {TILE_BUDGET_MS})");
         println!("  tile z0 far (bake):     {tile_far_ms:>8.2} ms");
         println!("  tile z0 centre, sun on: {tile_sun_ms:>8.2} ms");

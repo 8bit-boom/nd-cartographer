@@ -4143,6 +4143,14 @@ async fn convert_image(
         .into_response())
 }
 
+/// Write a periodic snapshot after the store lock is released, on a blocking
+/// thread (the journal append already happened; this is the slow part).
+fn write_snapshot_later(job: Option<store::SnapshotJob>) {
+    if let Some(job) = job {
+        tokio::task::spawn_blocking(move || job.write());
+    }
+}
+
 #[derive(Deserialize)]
 struct OpsBody {
     floor: String,
@@ -4168,10 +4176,11 @@ async fn post_ops(
     let old_rev = doc.rev;
     doc.apply_ops(&b.floor, &b.ops)?;
     let rev = doc.rev;
-    store::save_doc_fast(app.data_dir.as_deref(), doc);
+    let snapshot = store::save_doc_edit(app.data_dir.as_deref(), doc);
     // Tiles that the edit cannot have touched carry over to the new rev.
     invalidate_dirty(&app, &id, &b.floor, old_rev, rev, dirty);
     drop(store);
+    write_snapshot_later(snapshot);
     Ok(Json(
         serde_json::json!({"ok": true, "rev": rev, "dirty": dirty_json(dirty)}),
     ))
@@ -4200,9 +4209,10 @@ async fn post_undo(
     let old_rev = doc.rev;
     doc.undo_last(&b.floor)?;
     let rev = doc.rev;
-    store::save_doc_fast(app.data_dir.as_deref(), doc);
+    let snapshot = store::save_doc_edit(app.data_dir.as_deref(), doc);
     invalidate_dirty(&app, &id, &b.floor, old_rev, rev, dirty);
     drop(store);
+    write_snapshot_later(snapshot);
     Ok(Json(
         serde_json::json!({"ok": true, "rev": rev, "dirty": dirty_json(dirty)}),
     ))
@@ -7829,6 +7839,65 @@ mod tests {
         assert_eq!(st, StatusCode::NOT_FOUND);
         let (st, _) = call(&router, "GET", &format!("/api/docs/{id}?lite=1"), vec![]).await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_edits_with_periodic_snapshots_reload_to_the_live_state() {
+        let dir = std::env::temp_dir().join(format!("ndcart-snap-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = Arc::new(AppState {
+            store: tokio::sync::RwLock::new(store::Store::default()),
+            data_dir: Some(dir.clone()),
+            ai: Mutex::new(ai_settings::load(None)),
+            wall_cache: Mutex::new(HashMap::new()),
+            tile_cache: Mutex::new(cache::Lru::new(TILE_CACHE_BYTES)),
+            heavy: tokio::sync::Semaphore::new(heavy_permits()),
+            table_tokens: Default::default(),
+        });
+        let router = build_router(app.clone());
+        let (id, f) = new_doc(&router, "Race").await;
+        // 600 edits from 8 concurrent writers: several snapshots fall due.
+        let mut tasks = Vec::new();
+        for w in 0..8 {
+            let (router, id, f) = (router.clone(), id.clone(), f.clone());
+            tasks.push(tokio::spawn(async move {
+                for i in 0..75 {
+                    let st = post_ops_json(
+                        &router,
+                        &id,
+                        serde_json::json!({"floor": f, "ops": [
+                            {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                            {"t":"paint_cells","space":"sp_a","cells":[{"x": w * 100 + i, "y": 0}]}]}),
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+                }
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        // Let the last background snapshot finish, then "crash and restart".
+        for _ in 0..200 {
+            let busy = {
+                let store = app.store.read().await;
+                store.docs[&id]
+                    .persisted
+                    .snapshot_in_flight
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            };
+            if !busy {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut back = store::Store::default();
+        back.load_dir(&dir).unwrap();
+        let live = app.store.read().await;
+        assert_eq!(back.docs[&id].floors, live.docs[&id].floors);
+        assert_eq!(back.docs[&id].floors[0].grid.cell_count(), 600);
+        assert_eq!(back.docs[&id].journal.len(), live.docs[&id].journal.len());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

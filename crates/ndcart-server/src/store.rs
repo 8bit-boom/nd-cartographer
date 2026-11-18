@@ -13,7 +13,8 @@ use ndcart_core::ids::new_id;
 use ndcart_core::journal::{apply_op, Journal, Op};
 use ndcart_core::{CoreResult, DocOp, StructJournal};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// A named save point: every floor as it was. Restoring replaces the floors
 /// and starts a fresh undo history (the state before is itself saved first).
@@ -61,6 +62,16 @@ pub struct Proposal {
 /// contains. Atomics so saving can take `&StoredDoc`.
 #[derive(Default)]
 pub struct Persisted {
+    /// Serializes writes to a project's files: a snapshot written off the
+    /// store lock (see [`SnapshotJob`]) must not interleave with a full save.
+    io: std::sync::Mutex<()>,
+    /// Write tickets, handed out under the store lock in state order. A
+    /// snapshot job holding an older ticket than the last write is stale
+    /// and is dropped instead of overwriting newer files.
+    next_gen: std::sync::atomic::AtomicU64,
+    written_gen: std::sync::atomic::AtomicU64,
+    /// A snapshot job has been prepared and has not finished yet.
+    pub snapshot_in_flight: std::sync::atomic::AtomicBool,
     /// Journal entries written to `journal.ndjson`.
     pub appended: std::sync::atomic::AtomicUsize,
     /// Journal length the snapshot (`snapshot.json`) reflects.
@@ -118,7 +129,7 @@ pub struct StoredDoc {
     /// The shared table view, if the GM turned it on.
     pub table: Option<TableState>,
     pub rev: u64,
-    pub persisted: Persisted,
+    pub persisted: Arc<Persisted>,
 }
 
 impl StoredDoc {
@@ -147,7 +158,7 @@ impl StoredDoc {
             world_proposals: Vec::new(),
             table: None,
             rev: 0,
-            persisted: Persisted::default(),
+            persisted: Arc::new(Persisted::default()),
         }
     }
 
@@ -607,7 +618,7 @@ impl Store {
                 world_proposals: Vec::new(),
                 table: None,
                 rev,
-                persisted: {
+                persisted: Arc::new({
                     let p = Persisted::default();
                     p.appended.store(jlen, std::sync::atomic::Ordering::Relaxed);
                     // The snapshot is older than the journal when a tail was replayed.
@@ -616,7 +627,7 @@ impl Store {
                     p.snapshot_at
                         .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
                     p
-                },
+                }),
             },
         );
         Ok(())
@@ -625,9 +636,13 @@ impl Store {
 
 /// Persist one document (snapshot + journal). No-op without a data dir.
 pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
-    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::atomic::Ordering::{Relaxed, SeqCst};
     let Some(root) = data_dir else { return };
     let dir = root.join(&doc.manifest.id);
+    // The ticket is taken under the store lock (the caller holds it); the io
+    // lock then waits out a snapshot job that is writing right now.
+    let gen = doc.persisted.next_gen.fetch_add(1, SeqCst) + 1;
+    let _io = doc.persisted.io.lock().unwrap_or_else(|e| e.into_inner());
     if std::fs::create_dir_all(&dir).is_err() {
         eprintln!("ndcart: cannot create {}", dir.display());
         return;
@@ -677,6 +692,67 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
         doc.persisted.appended.store(journal_len, Relaxed);
         doc.persisted.snapshot_len.store(journal_len, Relaxed);
         doc.persisted.snapshot_at.store(now_secs(), Relaxed);
+        doc.persisted.written_gen.store(gen, SeqCst);
+    }
+}
+
+/// The periodic snapshot of a project: the state is cloned under the store
+/// lock (about a tenth of the cost of serializing it) and serialized and
+/// written to disk after the lock is released, so neither the JSON encoding
+/// nor the writes and fsyncs hold up other requests.
+///
+/// Only `manifest.json` and `snapshot.json` are written. The journal file is
+/// not touched (edits keep appending to it under the lock), and the snapshot
+/// records how many journal entries it contains, so a reload replays the rest.
+pub struct SnapshotJob {
+    dir: PathBuf,
+    manifest: Manifest,
+    floors: Vec<FloorDoc>,
+    journal_len: usize,
+    gen: u64,
+    persisted: Arc<Persisted>,
+}
+
+impl SnapshotJob {
+    /// Write the files (each crash-safe: temp file, fsync, rename). A job that
+    /// a newer write has overtaken is dropped, never allowed to overwrite it.
+    pub fn write(self) {
+        use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+        // The encoding is the expensive part: do it before taking the io lock.
+        let bodies = match (
+            serde_json::to_string_pretty(&self.manifest),
+            serde_json::to_string(
+                &serde_json::json!({ "journal_len": self.journal_len, "floors": &self.floors }),
+            ),
+        ) {
+            (Ok(m), Ok(f)) => Some((m, f)),
+            _ => {
+                eprintln!("ndcart: cannot serialize {}", self.manifest.id);
+                None
+            }
+        };
+        if let Some((manifest, snapshot)) = bodies {
+            let _io = self.persisted.io.lock().unwrap_or_else(|e| e.into_inner());
+            if self.gen > self.persisted.written_gen.load(SeqCst) {
+                let ok = [("manifest.json", &manifest), ("snapshot.json", &snapshot)]
+                    .iter()
+                    .all(|(name, body)| {
+                        match write_atomic(&self.dir.join(name), body.as_bytes()) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                eprintln!("ndcart: cannot save {name}: {e}");
+                                false
+                            }
+                        }
+                    });
+                if ok {
+                    self.persisted.snapshot_len.store(self.journal_len, Relaxed);
+                    self.persisted.snapshot_at.store(now_secs(), Relaxed);
+                    self.persisted.written_gen.store(self.gen, SeqCst);
+                }
+            }
+        }
+        self.persisted.snapshot_in_flight.store(false, SeqCst);
     }
 }
 
@@ -684,10 +760,21 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
 /// entries are appended (and synced), and the big snapshot is rewritten only
 /// every few hundred edits or minute. Anything that is not a plain edit (floors
 /// added, a checkpoint restored…) uses [`save_doc`], which rewrites everything.
+#[cfg(test)]
 pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
+    if let Some(job) = save_doc_edit(data_dir, doc) {
+        job.write();
+    }
+}
+
+/// [`save_doc_fast`], except that a due snapshot is handed back as a
+/// [`SnapshotJob`] for the caller to write after releasing the store lock
+/// (the journal append still happens here, so no edit waits on the snapshot).
+#[must_use = "a snapshot job that is dropped is never written (and blocks the next one)"]
+pub fn save_doc_edit(data_dir: Option<&Path>, doc: &StoredDoc) -> Option<SnapshotJob> {
     use std::io::Write;
-    use std::sync::atomic::Ordering::Relaxed;
-    let Some(root) = data_dir else { return };
+    use std::sync::atomic::Ordering::{Relaxed, SeqCst};
+    let root = data_dir?;
     let dir = root.join(&doc.manifest.id);
     let (appended, snap) = (
         doc.persisted.appended.load(Relaxed),
@@ -699,7 +786,8 @@ pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
         || !dir.join("journal.ndjson").is_file()
         || !dir.join("snapshot.json").is_file()
     {
-        return save_doc(data_dir, doc);
+        save_doc(data_dir, doc);
+        return None;
     }
     if len > appended {
         let mut text = String::new();
@@ -711,7 +799,8 @@ pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
                 }
                 Err(e) => {
                     eprintln!("ndcart: cannot serialize a journal entry: {e}");
-                    return save_doc(data_dir, doc);
+                    save_doc(data_dir, doc);
+                    return None;
                 }
             }
         }
@@ -731,15 +820,27 @@ pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
             Ok(()) => doc.persisted.appended.store(len, Relaxed),
             Err(e) => {
                 eprintln!("ndcart: cannot append to the journal: {e}");
-                return save_doc(data_dir, doc);
+                save_doc(data_dir, doc);
+                return None;
             }
         }
     }
     let age = now_secs().saturating_sub(doc.persisted.snapshot_at.load(Relaxed));
-    if len.saturating_sub(snap) >= SNAPSHOT_EVERY_OPS || (len > snap && age >= SNAPSHOT_EVERY_SECS)
-    {
-        save_doc(data_dir, doc);
+    let due = len.saturating_sub(snap) >= SNAPSHOT_EVERY_OPS
+        || (len > snap && age >= SNAPSHOT_EVERY_SECS);
+    if !due || doc.persisted.snapshot_in_flight.swap(true, SeqCst) {
+        return None; // not due, or one is already on its way
     }
+    // Copy the state now, under the caller's lock (it must be consistent);
+    // encoding and writing happen in `SnapshotJob::write`.
+    Some(SnapshotJob {
+        dir,
+        manifest: doc.manifest.clone(),
+        floors: doc.floors.clone(),
+        journal_len: len,
+        gen: doc.persisted.next_gen.fetch_add(1, SeqCst) + 1,
+        persisted: doc.persisted.clone(),
+    })
 }
 
 /// Prefabs live in `<data dir>/prefabs/<id>.json`, one file each.
@@ -867,6 +968,101 @@ mod persistence_tests {
         let mut st = Store::default();
         st.load_dir(dir).unwrap();
         st
+    }
+
+    #[test]
+    fn a_snapshot_written_after_the_lock_is_released_keeps_the_files_consistent() {
+        let dir = tmpdir("deferred");
+        let mut d = StoredDoc::new("Deferred", DocKind::Battle);
+        let (id, fid) = (d.manifest.id.clone(), d.floors[0].id.clone());
+        save_doc(Some(&dir), &d);
+        d.persisted
+            .snapshot_at
+            .store(u64::MAX / 2, std::sync::atomic::Ordering::Relaxed);
+        // The 200th edit makes a snapshot due: it comes back as a job.
+        let mut job = None;
+        for x in 0..SNAPSHOT_EVERY_OPS as i32 {
+            d.apply_ops(&fid, &paint(x)).unwrap();
+            assert!(job.is_none(), "no job before the snapshot is due");
+            job = save_doc_edit(Some(&dir), &d);
+        }
+        let job = job.expect("a snapshot is due");
+        let snap_before = std::fs::read(dir.join(&id).join("snapshot.json")).unwrap();
+        // The write has not happened yet. More edits land meanwhile: their
+        // journal entries are appended at once, and no second job is made.
+        for x in 1000..1030 {
+            d.apply_ops(&fid, &paint(x)).unwrap();
+            assert!(save_doc_edit(Some(&dir), &d).is_none());
+        }
+        assert_eq!(
+            std::fs::read(dir.join(&id).join("snapshot.json")).unwrap(),
+            snap_before,
+            "nothing was written to the snapshot under the lock"
+        );
+        // Crash right now: snapshot + journal still reproduce the live state.
+        assert_eq!(reload(&dir).docs[&id].floors, d.floors);
+        job.write();
+        assert_ne!(
+            std::fs::read(dir.join(&id).join("snapshot.json")).unwrap(),
+            snap_before
+        );
+        assert_eq!(
+            d.persisted
+                .snapshot_len
+                .load(std::sync::atomic::Ordering::Relaxed),
+            SNAPSHOT_EVERY_OPS
+        );
+        // The snapshot is 30 entries behind the journal; a reload replays them.
+        let back = reload(&dir);
+        assert_eq!(back.docs[&id].floors, d.floors);
+        assert_eq!(back.docs[&id].journal.len(), d.journal.len());
+        // And the next due snapshot can be made again.
+        for x in 2000..2000 + SNAPSHOT_EVERY_OPS as i32 {
+            d.apply_ops(&fid, &paint(x)).unwrap();
+            if let Some(j) = save_doc_edit(Some(&dir), &d) {
+                j.write();
+            }
+        }
+        assert_eq!(reload(&dir).docs[&id].floors, d.floors);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_snapshot_job_never_overwrites_a_newer_full_save() {
+        let dir = tmpdir("stale-job");
+        let mut d = StoredDoc::new("Stale", DocKind::Battle);
+        let (id, fid) = (d.manifest.id.clone(), d.floors[0].id.clone());
+        save_doc(Some(&dir), &d);
+        d.persisted
+            .snapshot_at
+            .store(u64::MAX / 2, std::sync::atomic::Ordering::Relaxed);
+        let mut job = None;
+        for x in 0..SNAPSHOT_EVERY_OPS as i32 {
+            d.apply_ops(&fid, &paint(x)).unwrap();
+            job = save_doc_edit(Some(&dir), &d);
+        }
+        let job = job.expect("a snapshot is due");
+        // A structural change rewrites everything before the job gets to run.
+        d.add_floor("Up", None).unwrap();
+        d.apply_ops(&fid, &paint(5000)).unwrap();
+        save_doc(Some(&dir), &d);
+        let newer = std::fs::read(dir.join(&id).join("snapshot.json")).unwrap();
+        job.write();
+        assert_eq!(
+            std::fs::read(dir.join(&id).join("snapshot.json")).unwrap(),
+            newer,
+            "the older snapshot must not replace the newer one"
+        );
+        assert!(
+            !d.persisted
+                .snapshot_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "a dropped job still releases the in-flight flag"
+        );
+        let back = reload(&dir);
+        assert_eq!(back.docs[&id].floors, d.floors);
+        assert_eq!(back.docs[&id].floors.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
