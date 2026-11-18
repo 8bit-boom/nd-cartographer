@@ -194,6 +194,31 @@ pub(crate) struct DraftBody {
     #[serde(default)]
     #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
     pub(crate) background: bool,
+    /// With no AI set up, answer 404 instead of a keyword-built layout.
+    #[serde(default)]
+    pub(crate) strict_ai: bool,
+}
+
+/// The no-model answer: a layout built from the prompt's keywords, valid and linted.
+fn template_draft(prompt: &str) -> Result<Json<serde_json::Value>, ApiError> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() || prompt.chars().count() > 2_000 {
+        return Err(ApiError(CoreError::Invalid(
+            "describe the map in 1-2000 characters".into(),
+        )));
+    }
+    // A stable seed from the words, so the same prompt gives the same layout.
+    let seed = prompt.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    let spec = ndcart_core::template::template_from_prompt(prompt, seed);
+    let warnings = ndcart_core::speclint::lint_spec(&spec, 1).unwrap_or_default();
+    Ok(Json(serde_json::json!({
+        "spec": spec,
+        "warnings": warnings,
+        "source": "template",
+        "note": "No AI is set up; this layout came from keywords.",
+    })))
 }
 
 /// Queue a draft as a background job and answer with its id.
@@ -256,9 +281,11 @@ pub(crate) async fn draft_spec(
         body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
     #[cfg(feature = "bridge")]
     {
-        let cfg = app
-            .resolve_ai()
-            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let cfg = match app.resolve_ai() {
+            Ok(c) => c,
+            Err(_) if !b.strict_ai => return template_draft(&b.prompt),
+            Err(m) => return Err(ApiError(CoreError::NotFound(m))),
+        };
         let ctx = draft_context(&app, &b.doc, b.lore).await;
         if b.background {
             return start_draft_job(cfg, &b.prompt, ctx, false);
@@ -267,13 +294,16 @@ pub(crate) async fn draft_spec(
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;
         Ok(Json(
-            serde_json::json!({ "spec": d.spec, "warnings": d.warnings, "attempts": d.attempts, "seconds": d.seconds }),
+            serde_json::json!({ "spec": d.spec, "warnings": d.warnings, "attempts": d.attempts, "seconds": d.seconds, "source": "ai" }),
         ))
     }
     #[cfg(not(feature = "bridge"))]
     {
-        let _ = (app, b);
-        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+        let _ = app;
+        if b.strict_ai {
+            return Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())));
+        }
+        template_draft(&b.prompt)
     }
 }
 

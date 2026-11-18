@@ -2285,8 +2285,9 @@ async function showAiStatus() {
     const st = await api('GET', '/api/ai/status');
     const icon = st.mode === 'nd-world' ? '🌐' : st.mode === 'standalone' ? '🏠' : '⛔';
     el.textContent = `${icon} AI: ${st.mode === 'off' ? 'not set up. ' : ''}${st.detail}`;
-    btn.disabled = st.mode === 'off';
-    btn.title = st.mode === 'off' ? st.detail : 'Ask the AI for a spec';
+    // With no AI a battle-map draft still works: the server builds it from keywords.
+    btn.disabled = st.mode === 'off' && specMode() === 'world';
+    btn.title = st.mode === 'off' ? 'No AI is set up: this builds a layout from keywords' : 'Ask the AI for a spec';
     document.getElementById('spec-lore').disabled = st.mode !== 'nd-world';
   } catch { el.textContent = ''; }
 }
@@ -2324,9 +2325,10 @@ document.getElementById('spec-draft').onclick = async () => {
   const btn = document.getElementById('spec-draft');
   btn.disabled = true; msg.textContent = 'Asking the AI (this can take a minute)…';
   try {
-    const { spec } = await draftInBackground(specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt, doc: state.docId, lore: document.getElementById('spec-lore').checked }, msg);
-    document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
+    const out = await draftInBackground(specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt, doc: state.docId, lore: document.getElementById('spec-lore').checked }, msg);
+    document.getElementById('spec-text').value = JSON.stringify(out.spec, null, 2);
     await runSpec(Math.floor(Math.random() * 1e6));
+    if (out.source === 'template') msg.textContent = `📐 From keywords. ${msg.textContent}`;
   } catch (e) { msg.textContent = e.message; }
   finally { btn.disabled = false; }
 };

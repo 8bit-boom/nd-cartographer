@@ -13,6 +13,7 @@ use tower::ServiceExt;
 mod ai_loop;
 mod ai_pack;
 mod spec_problems;
+mod template_draft;
 
 fn test_app() -> App {
     Arc::new(AppState {
@@ -1134,7 +1135,7 @@ async fn drafting_without_nd_world_configured_says_what_to_set() {
         &router,
         "POST",
         "/api/draft",
-        br#"{"prompt":"a crypt"}"#.to_vec(),
+        br#"{"prompt":"a crypt","strict_ai":true}"#.to_vec(),
     )
     .await;
     assert_eq!(st, StatusCode::NOT_FOUND);

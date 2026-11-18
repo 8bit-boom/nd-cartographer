@@ -29,6 +29,7 @@ pub mod stamp;
 pub mod stats;
 pub mod stroke;
 pub mod structure;
+pub mod template;
 pub mod terrain;
 pub mod units;
 pub mod view;
