@@ -8,7 +8,6 @@ use axum::extract::Request;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use std::io::Read;
 use std::path::Path;
 
 pub fn is_loopback(listen: &str) -> bool {
@@ -20,11 +19,10 @@ pub fn is_loopback(listen: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
+    use rand::RngCore;
     let mut buf = [0u8; 24];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .expect("cannot read /dev/urandom for the access token");
+    rand::rngs::OsRng.fill_bytes(&mut buf);
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -205,6 +203,16 @@ mod tests {
         assert_eq!(host_name("127.0.0.1"), "127.0.0.1");
         assert_eq!(host_name("[::1]:8300"), "[::1]");
         assert_eq!(host_name("evil.example:1"), "evil.example");
+    }
+
+    #[test]
+    fn tokens_are_48_hex_chars_and_differ() {
+        let (a, b) = (random_token(), random_token());
+        assert_eq!(a.len(), 48);
+        assert!(a
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
+        assert_ne!(a, b);
     }
 
     #[test]
