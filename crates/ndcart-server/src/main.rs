@@ -7,6 +7,8 @@
 //! every route in [`build_router`] and holds the CLI entry points. The module
 //! map is in docs/ARCHITECTURE.md.
 
+#[cfg(feature = "bridge")]
+mod ai_local;
 mod ai_settings;
 mod ai_standin;
 #[cfg(feature = "bridge")]
@@ -614,9 +616,11 @@ async fn run_ai(args: Vec<String>) -> Result<(), String> {
     let mut args = args.into_iter();
     match args.next().as_deref() {
         Some("stand-in") => ai_standin::run(args.collect()).await,
-        Some(o) => Err(format!("unknown ai command '{o}' (try: stand-in)")),
+        #[cfg(feature = "bridge")]
+        Some("models") => ai_local::models(args.collect()),
+        Some(o) => Err(format!("unknown ai command '{o}' (try: models, stand-in)")),
         None => Err(
-            "usage: ndcart ai stand-in --port N [--behaviour good|fix-once|garbage|slow|no-schema]"
+            "usage: ndcart ai models | stand-in --port N [--behaviour good|fix-once|garbage|slow|no-schema]"
                 .into(),
         ),
     }

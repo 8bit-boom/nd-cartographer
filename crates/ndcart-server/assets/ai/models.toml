@@ -1,0 +1,152 @@
+# The local-model catalog for `ndcart ai models | pull | setup` (plan item 4.1).
+#
+# This file is NOT part of the instruction pack. It describes GGUF files the studio may
+# download from the Hugging Face Hub, after the user confirms the size.
+#
+# Honesty rules, enforced by tests:
+#   - `verified = false` on every entry until `ndcart ai test` has passed for it. A pass is
+#     recorded per machine in <data>/ai-verified.json, never in this file, so nothing here is
+#     ever shown as "tested" on the strength of the catalog alone.
+#   - `listing_checked` is the date the repo and file name were last seen on the Hub (empty:
+#     never). Names below were written from documentation and third-party tables and could not
+#     be fetched when the catalog was written (the Hub was unreachable), so they are
+#     unchecked. `ndcart ai pull` reads the live file list and size, and if `file` is not
+#     there it picks the one .gguf whose name contains `quant`, or lists the candidates.
+#   - `approx_bytes` is for choosing a model that fits; the real size, and the SHA-256, come
+#     from the Hub at download time. No checksum is stored here. A pinned `sha256` is optional
+#     and wins when present.
+#   - `kv_kib_per_token` is a rough allowance for the context memory (a heuristic).
+#
+# Tiers: cpu8 (about 8 GB of RAM, no GPU), vram12 (12-16 GB of VRAM), vram24 (24 GB or more of
+# VRAM), apple16 (Apple Silicon with 16 GB), apple32 (Apple Silicon with 32 GB or more).
+# A model in tier T fits machines of tier T and above.
+
+version = 1
+
+[[model]]
+id = "qwen3.5-4b"
+label = "Qwen3.5 4B (small, fast, good first choice)"
+tier = "cpu8"
+hf_repo = "unsloth/Qwen3.5-4B-GGUF"
+file = "Qwen3.5-4B-UD-Q4_K_XL.gguf"
+quant = "UD-Q4_K_XL"
+approx_bytes = 3000000000
+ctx_default = 16384
+ctx_native = 262144
+kv_kib_per_token = 48
+license = "apache-2.0"
+notes = "Strong instruction following for its size. Thinking is off by default, which suits JSON."
+verified = false
+listing_checked = ""
+
+[[model]]
+id = "qwen3.5-2b"
+label = "Qwen3.5 2B (smallest; old laptops)"
+tier = "cpu8"
+hf_repo = "unsloth/Qwen3.5-2B-GGUF"
+file = "Qwen3.5-2B-Q4_K_M.gguf"
+quant = "Q4_K_M"
+approx_bytes = 1600000000
+ctx_default = 16384
+ctx_native = 262144
+kv_kib_per_token = 32
+license = "apache-2.0"
+notes = "Last resort for weak machines. Expect 'usable', not 'good'."
+verified = false
+listing_checked = ""
+
+[[model]]
+id = "gemma-4-e4b"
+label = "Gemma 4 E4B (a different family to compare)"
+tier = "cpu8"
+hf_repo = "unsloth/gemma-4-E4B-it-GGUF"
+file = "gemma-4-E4B-it-Q8_0.gguf"
+quant = "Q8_0"
+approx_bytes = 5000000000
+ctx_default = 16384
+ctx_native = 131072
+kv_kib_per_token = 48
+license = "gemma"
+notes = "Unsloth suggests 8-bit for the E models. The Gemma license has terms of use."
+verified = false
+listing_checked = ""
+
+[[model]]
+id = "qwen3.5-9b"
+label = "Qwen3.5 9B (best quality per GB for 12-16 GB cards or a 16 GB Mac)"
+tier = "vram12"
+hf_repo = "unsloth/Qwen3.5-9B-GGUF"
+file = "Qwen3.5-9B-UD-Q4_K_XL.gguf"
+quant = "UD-Q4_K_XL"
+approx_bytes = 5900000000
+ctx_default = 16384
+ctx_native = 262144
+kv_kib_per_token = 64
+license = "apache-2.0"
+notes = "Leaves room for a 32K context on a 12 GB card."
+verified = false
+listing_checked = ""
+
+[[model]]
+id = "gpt-oss-20b"
+label = "gpt-oss 20B (native tool calling; reasoning model)"
+tier = "vram12"
+hf_repo = "unsloth/gpt-oss-20b-GGUF"
+file = "gpt-oss-20b-UD-Q4_K_XL.gguf"
+quant = "UD-Q4_K_XL"
+approx_bytes = 12000000000
+ctx_default = 16384
+ctx_native = 131072
+kv_kib_per_token = 24
+license = "apache-2.0"
+notes = "Needs about 16 GB. Its reasoning goes to reasoning_content, so keep the effort low."
+verified = false
+listing_checked = ""
+
+[[model]]
+id = "qwen3.6-35b-a3b"
+label = "Qwen3.6 35B-A3B (mixture of experts: fast, good at multi-floor specs)"
+tier = "vram24"
+hf_repo = "unsloth/Qwen3.6-35B-A3B-GGUF"
+file = "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+quant = "UD-Q4_K_XL"
+approx_bytes = 22400000000
+ctx_default = 16384
+ctx_native = 262144
+kv_kib_per_token = 24
+license = "apache-2.0"
+notes = "About 3B parameters are active, so it decodes fast. On 24 GB keep the context at 16-32K."
+verified = false
+listing_checked = ""
+
+[[model]]
+id = "qwen3.8-27b"
+label = "Qwen3.8 27B (dense; best at long rule sets and refines)"
+tier = "vram24"
+hf_repo = "unsloth/Qwen3.8-27B-GGUF"
+file = "Qwen3.8-27B-UD-Q4_K_XL.gguf"
+quant = "UD-Q4_K_XL"
+approx_bytes = 17800000000
+ctx_default = 16384
+ctx_native = 262144
+kv_kib_per_token = 64
+license = "apache-2.0"
+notes = "Newest dense Qwen in the list."
+verified = false
+listing_checked = ""
+
+[[model]]
+id = "gemma-4-31b"
+label = "Gemma 4 31B (a second family for comparison)"
+tier = "vram24"
+hf_repo = "unsloth/gemma-4-31B-it-GGUF"
+file = "gemma-4-31B-it-UD-Q4_K_XL.gguf"
+quant = "UD-Q4_K_XL"
+approx_bytes = 18000000000
+ctx_default = 16384
+ctx_native = 262144
+kv_kib_per_token = 64
+license = "gemma"
+notes = "The Gemma license has terms of use."
+verified = false
+listing_checked = ""
