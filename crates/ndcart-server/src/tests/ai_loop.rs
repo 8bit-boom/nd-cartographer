@@ -10,7 +10,7 @@ async fn app_for(opts: Options) -> (Router, ai_standin::Handle) {
     *app.ai.lock().unwrap() = ai_settings::StoredAiSettings {
         direct_url: Some(h.base.clone()),
         direct_model: Some("ndcart-local".into()),
-        key: None,
+        ..Default::default()
     };
     (build_router(app), h)
 }
@@ -106,4 +106,80 @@ async fn a_model_that_never_gets_it_right_ends_in_a_plain_error_after_three_asks
         "{v}"
     );
     assert_eq!(h.stats.chats(), 3);
+}
+
+#[tokio::test]
+async fn a_llama_cpp_shaped_server_gets_the_schema_and_is_told_not_to_think() {
+    let (router, h) = app_for(Options::default()).await;
+    post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a crypt"}),
+    )
+    .await;
+    let b = &h.stats.bodies()[0];
+    assert_eq!(b["response_format"]["json_schema"]["name"], "map_spec");
+    assert_eq!(
+        b["response_format"]["json_schema"]["schema"]["title"],
+        "MapSpec"
+    );
+    assert_eq!(b["chat_template_kwargs"]["enable_thinking"], false);
+}
+
+#[tokio::test]
+async fn a_server_without_schema_support_succeeds_on_the_fallback_and_is_not_asked_again() {
+    let (router, h) = app_for(Options {
+        behaviour: Behaviour::NoSchema,
+        ..Options::default()
+    })
+    .await;
+    let (st, v) = post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a crypt"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // One refused try with the schema, one plain.
+    assert_eq!(h.stats.chats(), 2);
+    assert_eq!(
+        h.stats
+            .with_schema
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let (st, _) = post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a shop"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(h.stats.chats(), 3);
+    assert_eq!(
+        h.stats
+            .with_schema
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn the_thinking_setting_lifts_the_no_think_request() {
+    let (router, h) = app_for(Options::default()).await;
+    let (st, v) = post_json(
+        &router,
+        "/api/ai-settings",
+        serde_json::json!({"thinking": true}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["settings"]["thinking"], true);
+    post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a crypt"}),
+    )
+    .await;
+    assert!(h.stats.bodies()[0].get("chat_template_kwargs").is_none());
 }

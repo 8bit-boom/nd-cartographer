@@ -79,6 +79,8 @@ pub struct Config {
     pub direct: Option<(String, String)>,
     /// Bearer key for the direct endpoint (from the same two sources).
     pub key: Option<String>,
+    /// Let reasoning models think on JSON tasks (default off).
+    pub thinking: bool,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -107,6 +109,7 @@ impl Config {
             model: env("ND_CARTO_MODEL"),
             direct,
             key,
+            thinking: stored.thinking.unwrap_or(false),
         };
         if cfg.direct.is_none() && (cfg.server.is_none() || cfg.email.is_none()) {
             return Err("to draft with AI set ND_CARTO_SERVER and ND_CARTO_EMAIL (nd-world), or ND_CARTO_LLM_URL and ND_CARTO_LLM_MODEL (a model you run yourself)".into());
@@ -135,7 +138,8 @@ impl Backend {
         if let Some((url, model)) = &cfg.direct {
             return Ok(Backend::Direct(
                 ndcart_bridge::DirectChat::new(url, model, cfg.key.clone())
-                    .map_err(|e| e.to_string())?,
+                    .map_err(|e| e.to_string())?
+                    .with_thinking(cfg.thinking),
             ));
         }
         let (server, email) = (
@@ -165,9 +169,15 @@ impl Backend {
     /// One request over the turns so far (the pack's system prompt first). A direct model
     /// gets the whole conversation; nd-world takes one user text, so the earlier turns are
     /// folded into it.
-    pub async fn ask(&self, system: &str, turns: &[Turn]) -> Result<String, String> {
+    pub async fn ask(
+        &self,
+        system: &str,
+        turns: &[Turn],
+        shape: Option<&Shape>,
+    ) -> Result<String, String> {
         match self {
             Backend::World(b, model) => {
+                // nd-world's queue takes no schema; the judge and the repair loop still apply.
                 let user = match turns {
                     [only] => only.content.clone(),
                     [first, rest @ ..] => {
@@ -195,10 +205,14 @@ impl Backend {
                         .iter()
                         .map(|t| ndcart_bridge::Msg::new(t.role, &t.content)),
                 );
-                d.chat_messages(&msgs, &ndcart_bridge::ChatOptions::default())
-                    .await
-                    .map(|r| r.content)
-                    .map_err(|e| e.to_string())
+                d.chat_structured(
+                    &msgs,
+                    shape.map(|s| (s.name, &s.schema)),
+                    &ndcart_bridge::ChatOptions::default(),
+                )
+                .await
+                .map(|r| r.content)
+                .map_err(|e| e.to_string())
             }
         }
     }
@@ -262,10 +276,89 @@ fn too_long(prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A JSON schema a structured reply must follow, and the name the API gives it.
+pub struct Shape {
+    pub name: &'static str,
+    pub schema: serde_json::Value,
+}
+
+fn from_pack(text: &str) -> serde_json::Value {
+    let mut v: serde_json::Value = serde_json::from_str(text).expect("pack schema is JSON");
+    if let Some(o) = v.as_object_mut() {
+        o.remove("$schema");
+    }
+    v
+}
+
+/// The schema sent with the request of `kind` (item 2.1's for maps and worlds, small ones for
+/// tags and theme packs). Servers that enforce it make an invented field impossible; the judge
+/// still checks everything a schema cannot say.
+pub fn shape(kind: Kind) -> &'static Shape {
+    use std::sync::LazyLock;
+    static SHAPES: LazyLock<[Shape; 4]> = LazyLock::new(|| {
+        let hex = serde_json::json!({"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"});
+        let named = |placed: bool| {
+            let mut props = serde_json::json!({
+                "name": {"type": "string"},
+                "prompt": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 4},
+            });
+            let mut req = vec!["name", "prompt", "tags"];
+            if placed {
+                props["placement"] =
+                    serde_json::json!({"type": "string", "enum": ["floor", "wall"]});
+                req.push("placement");
+            }
+            serde_json::json!({"type": "object", "properties": props, "required": req, "additionalProperties": false})
+        };
+        [
+            Shape {
+                name: "map_spec",
+                schema: from_pack(aipack::MAPSPEC_SCHEMA),
+            },
+            Shape {
+                name: "world_spec",
+                schema: from_pack(aipack::WORLDSPEC_SCHEMA),
+            },
+            Shape {
+                name: "tags",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {"tags": {"type": "array", "items": {"type": "string", "maxLength": 24}, "minItems": 2, "maxItems": 8}},
+                    "required": ["tags"],
+                    "additionalProperties": false,
+                }),
+            },
+            Shape {
+                name: "theme_pack",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "maxLength": 60},
+                        "style": {"type": "string", "maxLength": 120},
+                        "palette": {"type": "array", "items": hex, "minItems": 4, "maxItems": 8},
+                        "materials": {"type": "array", "items": named(false), "minItems": 4, "maxItems": 6},
+                        "props": {"type": "array", "items": named(true), "minItems": 6, "maxItems": 12},
+                    },
+                    "required": ["name", "style", "palette", "materials", "props"],
+                    "additionalProperties": false,
+                }),
+            },
+        ]
+    });
+    match kind {
+        Kind::Map | Kind::Refine => &SHAPES[0],
+        Kind::World => &SHAPES[1],
+        Kind::Tags => &SHAPES[2],
+        Kind::ThemePack => &SHAPES[3],
+    }
+}
+
 /// Run the shared repair loop against a connected model.
 async fn solve<T>(
     backend: &Backend,
     system: &str,
+    kind: Kind,
     first_user: String,
     rounds: usize,
     what: &str,
@@ -279,7 +372,7 @@ async fn solve<T>(
     repair::run(
         &job,
         &|_| {},
-        |turns| async move { backend.ask(system, &turns).await },
+        |turns| async move { backend.ask(system, &turns, Some(shape(kind))).await },
         judge,
     )
     .await
@@ -293,6 +386,7 @@ pub async fn draft(cfg: &Config, prompt: &str, ctx: &Context) -> Result<Drafted,
     let out = solve(
         &backend,
         &system,
+        Kind::Map,
         format!("Design this map: {}", prompt.trim()),
         2,
         "spec",
@@ -320,6 +414,7 @@ pub async fn draft_world(
     Ok(solve(
         &backend,
         &system,
+        Kind::World,
         format!("Design this map: {}", prompt.trim()),
         2,
         "spec",
@@ -397,9 +492,11 @@ pub async fn refine(
     );
     let first = refine_user_turn(current, pins, instruction)?;
     let judge = judge_refine(current, pins.to_vec());
-    Ok(solve(&backend, &system, first, 3, "revision", judge)
-        .await?
-        .value)
+    Ok(
+        solve(&backend, &system, Kind::Refine, first, 3, "revision", judge)
+            .await?
+            .value,
+    )
 }
 
 /// Clean a list of tags: lowercase, 1-24 characters of letters, digits, spaces and
@@ -463,6 +560,7 @@ pub async fn suggest_tags(cfg: &Config, name: &str, prompt: &str) -> Result<Vec<
     Ok(solve(
         &backend,
         aipack::system(Kind::Tags),
+        Kind::Tags,
         subject,
         1,
         "tag list",
@@ -548,6 +646,7 @@ pub async fn theme_pack(cfg: &Config, theme: &str) -> Result<serde_json::Value, 
     Ok(solve(
         &backend,
         aipack::system(Kind::ThemePack),
+        Kind::ThemePack,
         format!("Theme: {theme}"),
         2,
         "plan",
@@ -597,6 +696,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         model,
         direct,
         key,
+        thinking: false,
     };
     let spec = draft(
         &cfg,

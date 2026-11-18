@@ -19,6 +19,10 @@ pub struct StoredAiSettings {
     /// Sent as `Authorization: Bearer`; many local servers need none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Let reasoning models think on JSON tasks. Unset means off: a spec wants the answer,
+    /// not a monologue (sent to llama.cpp servers as `enable_thinking: false`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<bool>,
 }
 
 pub const FILE_NAME: &str = "ai-settings.json";
@@ -73,6 +77,7 @@ pub struct AiSettingsView {
     pub direct_url: Option<String>,
     pub direct_model: Option<String>,
     pub key_set: bool,
+    pub thinking: bool,
     pub source: &'static str,
 }
 
@@ -96,6 +101,7 @@ pub fn view(stored: &StoredAiSettings) -> AiSettingsView {
         direct_url: env_url.or_else(|| stored.direct_url.clone()),
         direct_model: env_model.or_else(|| stored.direct_model.clone()),
         key_set: std::env::var("ND_CARTO_LLM_KEY").is_ok() || stored.key.is_some(),
+        thinking: stored.thinking.unwrap_or(false),
         source,
     }
 }
@@ -110,6 +116,7 @@ mod tests {
             direct_url: Some("http://file:1/v1".into()),
             direct_model: Some("file-model".into()),
             key: Some("file-key".into()),
+            ..Default::default()
         };
         // Both from the file.
         assert_eq!(
@@ -142,6 +149,7 @@ mod tests {
             direct_url: Some("http://127.0.0.1:8391/v1".into()),
             direct_model: Some("unsloth/Qwen3-4B-GGUF".into()),
             key: None,
+            thinking: Some(true),
         };
         save(Some(&dir), &stored).unwrap();
         assert_eq!(load(Some(&dir)), stored);

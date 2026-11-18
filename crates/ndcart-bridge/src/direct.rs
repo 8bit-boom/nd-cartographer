@@ -18,6 +18,8 @@ pub struct DirectChat {
     /// Sent as `Authorization: Bearer …`; local servers need none.
     key: Option<String>,
     gate: Arc<Semaphore>,
+    /// Ask llama.cpp servers not to think (`enable_thinking: false`) on structured calls.
+    thinking_off: bool,
 }
 
 /// A plain reqwest client with the same timeout profile the chat client
@@ -52,6 +54,7 @@ impl DirectChat {
             model: model.to_string(),
             key,
             gate: Arc::new(Semaphore::new(1)),
+            thinking_off: true,
         })
     }
 
@@ -68,12 +71,72 @@ impl DirectChat {
             .content)
     }
 
+    /// Let reasoning models think on structured calls (off by default: a JSON task wants
+    /// the answer, not a monologue).
+    pub fn with_thinking(mut self, on: bool) -> Self {
+        self.thinking_off = !on;
+        self
+    }
+
+    /// The endpoint's address (without `/chat/completions`).
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     /// One non-streaming turn over any message list, with optional request options.
     pub async fn chat_messages(
         &self,
         msgs: &[Msg],
         opts: &ChatOptions,
     ) -> Result<ChatReply, BridgeError> {
+        let (status, text) = self.post_raw(msgs, opts).await?;
+        finish(status, &text)
+    }
+
+    /// A turn whose answer must be one JSON object of the given schema (`name`, `schema`).
+    /// Where the endpoint is known to enforce schemas (llama.cpp, Ollama) or might (unknown,
+    /// tried once), the request carries `response_format`; a server that refuses it with a
+    /// 400 or 422 is asked again without, and remembered. llama.cpp is also told not to
+    /// think, unless [`with_thinking`](Self::with_thinking) turned that on.
+    pub async fn chat_structured(
+        &self,
+        msgs: &[Msg],
+        schema: Option<(&str, &Value)>,
+        base_opts: &ChatOptions,
+    ) -> Result<ChatReply, BridgeError> {
+        let caps = crate::caps::probe(&self.base, self.key.as_deref()).await;
+        let mut opts = base_opts.clone();
+        if caps.kind == crate::caps::EndpointKind::LlamaCpp && self.thinking_off {
+            opts.extra
+                .entry("chat_template_kwargs".to_string())
+                .or_insert_with(|| json!({"enable_thinking": false}));
+        }
+        let sent_schema = match schema {
+            Some((name, schema)) if caps.wants_schema() => {
+                opts.response_format = Some(json!({
+                    "type": "json_schema",
+                    "json_schema": {"name": name, "strict": true, "schema": schema},
+                }));
+                true
+            }
+            _ => false,
+        };
+        let (mut status, mut text) = self.post_raw(msgs, &opts).await?;
+        if sent_schema && refused_schema(status, &text) {
+            crate::caps::remember_json_schema(&self.base, false);
+            opts.response_format = None;
+            (status, text) = self.post_raw(msgs, &opts).await?;
+        } else if sent_schema && status.is_success() && caps.json_schema.is_none() {
+            crate::caps::remember_json_schema(&self.base, true);
+        }
+        finish(status, &text)
+    }
+
+    async fn post_raw(
+        &self,
+        msgs: &[Msg],
+        opts: &ChatOptions,
+    ) -> Result<(StatusCode, String), BridgeError> {
         let _turn = self
             .gate
             .acquire()
@@ -96,53 +159,67 @@ impl DirectChat {
             .text()
             .await
             .map_err(|e| BridgeError::Protocol(e.to_string()))?;
-        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-            return Err(BridgeError::AuthRequired);
-        }
-        if !status.is_success() {
-            return Err(BridgeError::Rejected(format!(
-                "{status}: {}",
-                text.chars().take(300).collect::<String>()
-            )));
-        }
-        let v: Value = serde_json::from_str(&text)
-            .map_err(|e| BridgeError::Protocol(format!("chat answer: {e}")))?;
-        let content = v
-            .pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                BridgeError::Protocol("the model's answer had no choices[0].message.content".into())
-            })?;
-        let reasoning = v
-            .pointer("/choices/0/message/reasoning_content")
-            .and_then(Value::as_str)
-            .filter(|r| !r.trim().is_empty())
-            .map(str::to_string);
-        let finish_reason = v
-            .pointer("/choices/0/finish_reason")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        if content.trim().is_empty() {
-            let cut = if finish_reason.as_deref() == Some("length") {
-                " (reply cut off: max_tokens)"
-            } else {
-                ""
-            };
-            return Err(BridgeError::Rejected(if reasoning.is_some() {
-                format!(
-                    "the model used its whole reply for thinking; turn thinking off or raise max_tokens{cut}"
-                )
-            } else {
-                format!("the model returned an empty reply{cut}")
-            }));
-        }
-        Ok(ChatReply {
-            content: content.to_string(),
-            reasoning,
-            finish_reason,
-            usage: v.get("usage").cloned(),
-        })
+        Ok((status, text))
     }
+}
+
+/// Did the server say no to `response_format` (rather than to the request as a whole)?
+fn refused_schema(status: StatusCode, body: &str) -> bool {
+    if status != StatusCode::BAD_REQUEST && status != StatusCode::UNPROCESSABLE_ENTITY {
+        return false;
+    }
+    let b = body.to_lowercase();
+    b.contains("response_format") || b.contains("json_schema")
+}
+
+/// Turn one HTTP answer into a reply or the plain-words error.
+fn finish(status: StatusCode, text: &str) -> Result<ChatReply, BridgeError> {
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return Err(BridgeError::AuthRequired);
+    }
+    if !status.is_success() {
+        return Err(BridgeError::Rejected(format!(
+            "{status}: {}",
+            text.chars().take(300).collect::<String>()
+        )));
+    }
+    let v: Value = serde_json::from_str(text)
+        .map_err(|e| BridgeError::Protocol(format!("chat answer: {e}")))?;
+    let content = v
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            BridgeError::Protocol("the model's answer had no choices[0].message.content".into())
+        })?;
+    let reasoning = v
+        .pointer("/choices/0/message/reasoning_content")
+        .and_then(Value::as_str)
+        .filter(|r| !r.trim().is_empty())
+        .map(str::to_string);
+    let finish_reason = v
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if content.trim().is_empty() {
+        let cut = if finish_reason.as_deref() == Some("length") {
+            " (reply cut off: max_tokens)"
+        } else {
+            ""
+        };
+        return Err(BridgeError::Rejected(if reasoning.is_some() {
+            format!(
+                "the model used its whole reply for thinking; turn thinking off or raise max_tokens{cut}"
+            )
+        } else {
+            format!("the model returned an empty reply{cut}")
+        }));
+    }
+    Ok(ChatReply {
+        content: content.to_string(),
+        reasoning,
+        finish_reason,
+        usage: v.get("usage").cloned(),
+    })
 }
 
 /// One chat message.

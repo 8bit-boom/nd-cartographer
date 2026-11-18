@@ -412,6 +412,7 @@ mod tests {
                 direct_url: Some(url.into()),
                 direct_model: Some(model.into()),
                 key: Some(KEY.into()),
+                ..Default::default()
             }
         }
 

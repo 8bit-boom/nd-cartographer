@@ -475,6 +475,7 @@ pub(crate) struct AiSettingsBody {
     pub(crate) direct_url: Option<String>,
     pub(crate) direct_model: Option<String>,
     pub(crate) key: Option<String>,
+    pub(crate) thinking: Option<bool>,
 }
 
 pub(crate) async fn post_ai_settings(
@@ -503,6 +504,9 @@ pub(crate) async fn post_ai_settings(
     if let Some(m) = b.direct_model {
         let m = m.trim().to_string();
         stored.direct_model = (!m.is_empty()).then_some(m);
+    }
+    if let Some(t) = b.thinking {
+        stored.thinking = Some(t);
     }
     if let Some(k) = b.key {
         let k = k.trim().to_string();
