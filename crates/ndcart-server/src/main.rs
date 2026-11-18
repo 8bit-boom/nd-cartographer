@@ -4082,19 +4082,20 @@ async fn get_tile(
     let idx = floors_by_id(&doc.floors, &floor_id)?;
     let cell_size = doc.manifest.cell_size;
     let rev = doc.rev;
-    let floor = doc.floors[idx].clone();
     // The floor's active era changes what a tile looks like; the era id (or
     // its absence) is part of the cache key, and the op that set it bumped
-    // the rev, which busts the browser's copy.
-    let era_id = floor.active_era.clone();
+    // the rev, which busts the browser's copy. Look in the cache before
+    // cloning the floor: a hit must not pay for the clone.
+    let era_id = doc.floors[idx].active_era.as_deref();
     let key = format!(
         "{doc_id}/{floor_id}/{z}/{x}_{y}/{}/{}",
         onion_id.as_deref().unwrap_or("-"),
-        era_id.as_deref().unwrap_or("-")
+        era_id.unwrap_or("-")
     );
     if let Some(bytes) = app.tile_cache.lock().expect("tile cache").get(&key) {
         return Ok(png_response(bytes));
     }
+    let floor = doc.floors[idx].clone();
     let walls = walls_for(&app, &doc_id, &floor, cell_size, rev);
     // The optional floor shown faintly underneath (must be a floor of this document).
     let ghost = match &onion_id {
@@ -4106,7 +4107,11 @@ async fn get_tile(
         }
         None => None,
     };
-    let era = era_id.as_deref().and_then(|id| floor.era(id)).cloned();
+    let era = floor
+        .active_era
+        .as_deref()
+        .and_then(|id| floor.era(id))
+        .cloned();
     let bytes = tokio::task::spawn_blocking(move || {
         let onion = ghost.as_ref().map(|(f, w)| (f, w.as_slice()));
         tiles::bake_tile_era(&floor, &walls, cell_size, z, x, y, onion, era.as_ref(), 0.0)
@@ -7500,6 +7505,33 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(floor_digest(&router, &id).await, before);
+    }
+
+    #[tokio::test]
+    async fn warm_tile_hits_the_cache_without_cloning() {
+        let router = build_router(test_app());
+        let (id, f) = new_doc(&router, "T").await;
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","space":"sp_a","cells":[{"x":0,"y":0},{"x":1,"y":0}]}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let uri = format!("/tiles/{id}/{f}/0/0_0");
+        let (_, cold) = call(&router, "GET", &uri, vec![]).await;
+        let t = std::time::Instant::now();
+        for _ in 0..100 {
+            let (st, warm) = call(&router, "GET", &uri, vec![]).await;
+            assert_eq!(st, StatusCode::OK);
+            assert_eq!(warm, cold, "a cached tile is byte-identical to the bake");
+        }
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        println!("100 warm tile GETs: {ms:.1} ms");
+        #[cfg(not(debug_assertions))]
+        assert!(ms < 50.0, "100 cached GETs took {ms:.1} ms");
     }
 
     #[tokio::test]
