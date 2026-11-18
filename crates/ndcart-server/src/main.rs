@@ -9,6 +9,8 @@
 
 mod ai_settings;
 mod ai_standin;
+#[cfg(feature = "bridge")]
+mod aicache;
 mod aijobs;
 mod aipack;
 mod ask;

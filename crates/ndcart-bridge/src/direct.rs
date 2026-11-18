@@ -78,6 +78,16 @@ impl DirectChat {
         self
     }
 
+    /// The model id sent with every request.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// What the endpoint can do (cached; see [`crate::caps`]).
+    pub async fn caps(&self) -> crate::caps::Caps {
+        crate::caps::probe(&self.base, self.key.as_deref()).await
+    }
+
     /// The endpoint's address (without `/chat/completions`).
     pub fn base(&self) -> &str {
         &self.base

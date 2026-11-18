@@ -2318,6 +2318,7 @@ async function draftInBackground(path, body, msg) {
     }
   } finally { stop.hidden = true; }
 }
+let lastDraftPrompt = null;   // asking the same thing again is "Ask again": skip the server's cache
 document.getElementById('spec-draft').onclick = async () => {
   const prompt = document.getElementById('spec-prompt').value.trim();
   const msg = document.getElementById('spec-msg');
@@ -2325,7 +2326,8 @@ document.getElementById('spec-draft').onclick = async () => {
   const btn = document.getElementById('spec-draft');
   btn.disabled = true; msg.textContent = 'Asking the AI (this can take a minute)…';
   try {
-    const out = await draftInBackground(specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt, doc: state.docId, lore: document.getElementById('spec-lore').checked }, msg);
+    const out = await draftInBackground(specMode() === 'world' ? '/api/draft-world' : '/api/draft', { prompt, doc: state.docId, lore: document.getElementById('spec-lore').checked, nocache: prompt === lastDraftPrompt }, msg);
+    lastDraftPrompt = prompt;
     document.getElementById('spec-text').value = JSON.stringify(out.spec, null, 2);
     await runSpec(Math.floor(Math.random() * 1e6));
     if (out.source === 'template') msg.textContent = `📐 From keywords. ${msg.textContent}`;

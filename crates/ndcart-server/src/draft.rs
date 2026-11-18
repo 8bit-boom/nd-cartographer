@@ -81,6 +81,8 @@ pub struct Config {
     pub key: Option<String>,
     /// Let reasoning models think on JSON tasks (default off).
     pub thinking: bool,
+    /// Reuse accepted results (set when the settings turn the cache on).
+    pub cache: crate::aicache::Use,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -110,6 +112,7 @@ impl Config {
             direct,
             key,
             thinking: stored.thinking.unwrap_or(false),
+            cache: Default::default(),
         };
         if cfg.direct.is_none() && (cfg.server.is_none() || cfg.email.is_none()) {
             return Err("to draft with AI set ND_CARTO_SERVER and ND_CARTO_EMAIL (nd-world), or ND_CARTO_LLM_URL and ND_CARTO_LLM_MODEL (a model you run yourself)".into());
@@ -361,9 +364,10 @@ struct Task<'a> {
     first_user: String,
     rounds: usize,
     what: &'a str,
+    cache: &'a crate::aicache::Use,
 }
 
-async fn solve<T>(
+async fn solve<T: serde::Serialize + serde::de::DeserializeOwned>(
     backend: &Backend,
     task: Task<'_>,
     progress: &(dyn Fn(Progress) + Sync),
@@ -375,19 +379,57 @@ async fn solve<T>(
         first_user,
         rounds,
         what,
+        cache,
     } = task;
+    // Only a direct model is cached: its id is known, and its answers are what we pay for.
+    let cache_key = match (&cache.dir, backend) {
+        (Some(_), Backend::Direct(d)) => {
+            let schema = match d.caps().await.json_schema {
+                Some(true) => "schema:yes",
+                Some(false) => "schema:no",
+                None => "schema:unknown",
+            };
+            Some(crate::aicache::key(&[
+                d.model(),
+                aipack::version(),
+                system,
+                &first_user,
+                shape(kind).name,
+                &rounds.to_string(),
+                schema,
+            ]))
+        }
+        _ => None,
+    };
+    if let (Some(dir), Some(k), false) = (&cache.dir, &cache_key, cache.skip_read) {
+        if let Some(hit) = crate::aicache::get(dir, k) {
+            if let Ok(value) = serde_json::from_value::<T>(hit) {
+                return Ok(Outcome {
+                    value,
+                    attempts: 0,
+                    seconds: 0.0,
+                });
+            }
+        }
+    }
     let job = Job {
         first_user,
         rounds,
         what,
     };
-    repair::run(
+    let out = repair::run(
         &job,
         progress,
         |turns| async move { backend.ask(system, &turns, Some(shape(kind))).await },
         judge,
     )
-    .await
+    .await?;
+    if let (Some(dir), Some(k)) = (&cache.dir, &cache_key) {
+        if let Ok(v) = serde_json::to_value(&out.value) {
+            crate::aicache::put(dir, k, &v);
+        }
+    }
+    Ok(out)
 }
 
 /// Draft a battle-map spec from `prompt`.
@@ -408,6 +450,7 @@ pub async fn draft_with_progress(
     let out = solve(
         &backend,
         Task {
+            cache: &cfg.cache,
             system: &system,
             kind: Kind::Map,
             first_user: format!("Design this map: {}", prompt.trim()),
@@ -449,6 +492,7 @@ pub async fn draft_world_with(
     let out = solve(
         &backend,
         Task {
+            cache: &cfg.cache,
             system: &system,
             kind: Kind::World,
             first_user: format!("Design this map: {}", prompt.trim()),
@@ -533,6 +577,7 @@ pub async fn refine(
     Ok(solve(
         &backend,
         Task {
+            cache: &cfg.cache,
             system: &system,
             kind: Kind::Refine,
             first_user: first,
@@ -607,6 +652,7 @@ pub async fn suggest_tags(cfg: &Config, name: &str, prompt: &str) -> Result<Vec<
     Ok(solve(
         &backend,
         Task {
+            cache: &cfg.cache,
             system: aipack::system(Kind::Tags),
             kind: Kind::Tags,
             first_user: subject,
@@ -696,6 +742,7 @@ pub async fn theme_pack(cfg: &Config, theme: &str) -> Result<serde_json::Value, 
     Ok(solve(
         &backend,
         Task {
+            cache: &cfg.cache,
             system: aipack::system(Kind::ThemePack),
             kind: Kind::ThemePack,
             first_user: format!("Theme: {theme}"),
@@ -750,6 +797,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         direct,
         key,
         thinking: false,
+        cache: Default::default(),
     };
     let spec = draft(
         &cfg,

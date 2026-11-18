@@ -23,6 +23,9 @@ pub struct StoredAiSettings {
     /// not a monologue (sent to llama.cpp servers as `enable_thinking: false`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<bool>,
+    /// Keep accepted AI results and reuse them for the same request (default off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<bool>,
 }
 
 pub const FILE_NAME: &str = "ai-settings.json";
@@ -78,6 +81,7 @@ pub struct AiSettingsView {
     pub direct_model: Option<String>,
     pub key_set: bool,
     pub thinking: bool,
+    pub cache: bool,
     pub source: &'static str,
 }
 
@@ -102,6 +106,7 @@ pub fn view(stored: &StoredAiSettings) -> AiSettingsView {
         direct_model: env_model.or_else(|| stored.direct_model.clone()),
         key_set: std::env::var("ND_CARTO_LLM_KEY").is_ok() || stored.key.is_some(),
         thinking: stored.thinking.unwrap_or(false),
+        cache: stored.cache.unwrap_or(false),
         source,
     }
 }
@@ -150,6 +155,7 @@ mod tests {
             direct_model: Some("unsloth/Qwen3-4B-GGUF".into()),
             key: None,
             thinking: Some(true),
+            cache: Some(true),
         };
         save(Some(&dir), &stored).unwrap();
         assert_eq!(load(Some(&dir)), stored);

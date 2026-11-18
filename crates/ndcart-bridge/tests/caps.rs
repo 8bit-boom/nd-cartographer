@@ -156,6 +156,7 @@ async fn an_openai_like_endpoint_never_gets_chat_template_kwargs() {
 #[tokio::test]
 async fn ollama_and_unsloth_studio_are_told_apart() {
     let server = MockServer::start().await;
+    caps::forget(&format!("{}/v1", server.uri()));
     models(&server, "ollama").await;
     Mock::given(method("GET"))
         .and(path("/api/version"))
@@ -166,6 +167,8 @@ async fn ollama_and_unsloth_studio_are_told_apart() {
     assert_eq!((c.kind, c.json_schema), (EndpointKind::Ollama, Some(true)));
     let server = MockServer::start().await;
     models(&server, "Unsloth").await;
+    // A freed port can be handed out again; forget what the last server there was.
+    caps::forget(&format!("{}/v1", server.uri()));
     let c = caps::probe(&format!("{}/v1", server.uri()), None).await;
     assert_eq!((c.kind, c.json_schema), (EndpointKind::UnslothStudio, None));
     // Nothing answering is Unknown, not an error.

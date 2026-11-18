@@ -350,6 +350,8 @@ pub async fn spawn(opts: Options) -> Handle {
     tokio::spawn(async move {
         let _ = axum::serve(l, app).await;
     });
+    // A freed port can be handed out again; forget what the last server there taught us.
+    ndcart_bridge::caps::forget(&format!("http://{addr}/v1"));
     Handle {
         base: format!("http://{addr}/v1"),
         origin: format!("http://{addr}"),

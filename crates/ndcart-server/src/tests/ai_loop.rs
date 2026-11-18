@@ -281,3 +281,48 @@ async fn a_background_draft_that_needs_repair_reports_the_second_try() {
         "{done}"
     );
 }
+
+#[tokio::test]
+async fn with_the_cache_on_the_same_request_twice_asks_the_model_once() {
+    let h = ai_standin::spawn(Options::default()).await;
+    let dir = std::env::temp_dir().join(format!("ndcart-cache-route-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut app = test_app();
+    Arc::get_mut(&mut app).unwrap().data_dir = Some(dir.clone());
+    *app.ai.lock().unwrap() = ai_settings::StoredAiSettings {
+        direct_url: Some(h.base.clone()),
+        direct_model: Some("ndcart-local".into()),
+        cache: Some(true),
+        ..Default::default()
+    };
+    let router = build_router(app);
+    let body = serde_json::json!({"prompt":"a crypt"});
+    let (_, first) = post_json(&router, "/api/draft", body.clone()).await;
+    let (_, second) = post_json(&router, "/api/draft", body.clone()).await;
+    assert_eq!(h.stats.chats(), 1, "the second answer came from the cache");
+    assert_eq!(first["spec"], second["spec"]);
+    assert_eq!(second["attempts"], 0);
+    // A different request misses; "Ask again" skips the read and refreshes the entry.
+    post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a shop"}),
+    )
+    .await;
+    assert_eq!(h.stats.chats(), 2);
+    let mut again = body.clone();
+    again["nocache"] = true.into();
+    post_json(&router, "/api/draft", again).await;
+    assert_eq!(h.stats.chats(), 3);
+    // Cache off (the default) never reads: another app on the same dir without the setting.
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_cache_is_off_by_default() {
+    let (router, h) = app_for(Options::default()).await;
+    let body = serde_json::json!({"prompt":"a crypt"});
+    post_json(&router, "/api/draft", body.clone()).await;
+    post_json(&router, "/api/draft", body).await;
+    assert_eq!(h.stats.chats(), 2);
+}

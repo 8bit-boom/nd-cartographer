@@ -197,6 +197,10 @@ pub(crate) struct DraftBody {
     /// With no AI set up, answer 404 instead of a keyword-built layout.
     #[serde(default)]
     pub(crate) strict_ai: bool,
+    /// "Ask again": skip the cache for this request (the new answer is still stored).
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    pub(crate) nocache: bool,
 }
 
 /// The no-model answer: a layout built from the prompt's keywords, valid and linted.
@@ -281,11 +285,12 @@ pub(crate) async fn draft_spec(
         body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
     #[cfg(feature = "bridge")]
     {
-        let cfg = match app.resolve_ai() {
+        let mut cfg = match app.resolve_ai() {
             Ok(c) => c,
             Err(_) if !b.strict_ai => return template_draft(&b.prompt),
             Err(m) => return Err(ApiError(CoreError::NotFound(m))),
         };
+        cfg.cache.skip_read = b.nocache;
         let ctx = draft_context(&app, &b.doc, b.lore).await;
         if b.background {
             return start_draft_job(cfg, &b.prompt, ctx, false);
@@ -316,9 +321,10 @@ pub(crate) async fn draft_world_spec(
         body.map_err(|_| ApiError(CoreError::Invalid("body must be {\"prompt\": ...}".into())))?;
     #[cfg(feature = "bridge")]
     {
-        let cfg = app
+        let mut cfg = app
             .resolve_ai()
             .map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        cfg.cache.skip_read = b.nocache;
         let ctx = draft_context(&app, &b.doc, b.lore).await;
         if b.background {
             return start_draft_job(cfg, &b.prompt, ctx, true);
@@ -521,7 +527,11 @@ impl AppState {
     #[cfg(feature = "bridge")]
     pub(crate) fn resolve_ai(&self) -> Result<draft::Config, String> {
         let stored = self.ai.lock().expect("ai settings").clone();
-        draft::Config::from_env_and(&stored)
+        let mut cfg = draft::Config::from_env_and(&stored)?;
+        if stored.cache == Some(true) {
+            cfg.cache.dir = self.data_dir.as_ref().map(|d| d.join("ai-cache"));
+        }
+        Ok(cfg)
     }
 }
 
@@ -542,6 +552,7 @@ pub(crate) struct AiSettingsBody {
     pub(crate) direct_model: Option<String>,
     pub(crate) key: Option<String>,
     pub(crate) thinking: Option<bool>,
+    pub(crate) cache: Option<bool>,
 }
 
 pub(crate) async fn post_ai_settings(
@@ -573,6 +584,9 @@ pub(crate) async fn post_ai_settings(
     }
     if let Some(t) = b.thinking {
         stored.thinking = Some(t);
+    }
+    if let Some(c) = b.cache {
+        stored.cache = Some(c);
     }
     if let Some(k) = b.key {
         let k = k.trim().to_string();
