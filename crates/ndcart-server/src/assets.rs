@@ -4,8 +4,8 @@
 //! directory is configured, and kept in memory otherwise. Decoded pixmaps are
 //! cached for the baker.
 
+use crate::cache::Lru;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -45,8 +45,20 @@ pub struct Custom {
 pub struct Assets {
     dir: Option<PathBuf>,
     custom: Mutex<Vec<Custom>>,
-    bytes: Mutex<HashMap<String, Arc<Vec<u8>>>>,
-    decoded: Mutex<HashMap<String, Arc<tiny_skia::Pixmap>>>,
+    bytes: Mutex<Lru<Arc<Vec<u8>>>>,
+    decoded: Mutex<Lru<Arc<tiny_skia::Pixmap>>>,
+}
+
+/// Budget of the decoded-pixmap cache (`w * h * 4` bytes each).
+const DECODED_BUDGET: usize = 256 << 20;
+/// Budget of the raw-bytes cache. Without a data directory the cache *is* the
+/// store, so nothing may be evicted.
+fn bytes_budget(has_dir: bool) -> usize {
+    if has_dir {
+        128 << 20
+    } else {
+        usize::MAX
+    }
 }
 
 static GLOBAL: OnceLock<Assets> = OnceLock::new();
@@ -62,11 +74,12 @@ pub fn init(dir: Option<PathBuf>) -> &'static Assets {
             .and_then(|d| std::fs::read_to_string(d.join("custom.json")).ok())
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
+        let has_dir = dir.is_some();
         Assets {
             dir,
             custom: Mutex::new(custom),
-            bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            bytes: Mutex::new(Lru::new(bytes_budget(has_dir))),
+            decoded: Mutex::new(Lru::new(DECODED_BUDGET)),
         }
     })
 }
@@ -77,8 +90,8 @@ pub(crate) fn new_for_tests() -> Assets {
     Assets {
         dir: None,
         custom: Mutex::new(Vec::new()),
-        bytes: Mutex::new(HashMap::new()),
-        decoded: Mutex::new(HashMap::new()),
+        bytes: Mutex::new(Lru::new(bytes_budget(false))),
+        decoded: Mutex::new(Lru::new(DECODED_BUDGET)),
     }
 }
 
@@ -103,7 +116,7 @@ impl Assets {
         self.bytes
             .lock()
             .expect("assets")
-            .insert(id.clone(), Arc::new(data.to_vec()));
+            .insert(id.clone(), Arc::new(data.to_vec()), data.len());
         Ok(id)
     }
 
@@ -194,10 +207,11 @@ impl Assets {
         }
         let data = std::fs::read(self.dir.as_ref()?.join(id)).ok()?;
         let data = Arc::new(data);
+        let len = data.len();
         self.bytes
             .lock()
             .expect("assets")
-            .insert(id.to_string(), data.clone());
+            .insert(id.to_string(), data.clone(), len);
         Some(data)
     }
 
@@ -214,11 +228,11 @@ impl Assets {
             *dst = tiny_skia::ColorU8::from_rgba(px[0], px[1], px[2], px[3]).premultiply();
         }
         let pm = Arc::new(pm);
-        let mut cache = self.decoded.lock().expect("assets");
-        if cache.len() >= 24 {
-            cache.clear();
-        }
-        cache.insert(id.to_string(), pm.clone());
+        let size = w as usize * h as usize * 4;
+        self.decoded
+            .lock()
+            .expect("assets")
+            .insert(id.to_string(), pm.clone(), size);
         Some(pm)
     }
 }
@@ -238,8 +252,8 @@ mod tests {
         let a = Assets {
             dir: None,
             custom: Mutex::new(Vec::new()),
-            bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            bytes: Mutex::new(Lru::new(bytes_budget(false))),
+            decoded: Mutex::new(Lru::new(DECODED_BUDGET)),
         };
         let png = red_png(4, 3);
         let id = a.put(&png).unwrap();
@@ -256,8 +270,8 @@ mod tests {
         let a = Assets {
             dir: None,
             custom: Mutex::new(Vec::new()),
-            bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            bytes: Mutex::new(Lru::new(bytes_budget(false))),
+            decoded: Mutex::new(Lru::new(DECODED_BUDGET)),
         };
         assert!(a.put(b"not an image").is_err());
         assert!(a.put(b"").is_err());
@@ -279,15 +293,15 @@ mod tests {
         let a = Assets {
             dir: Some(dir.clone()),
             custom: Mutex::new(Vec::new()),
-            bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            bytes: Mutex::new(Lru::new(bytes_budget(true))),
+            decoded: Mutex::new(Lru::new(DECODED_BUDGET)),
         };
         let id = a.put(&red_png(2, 2)).unwrap();
         let b = Assets {
             dir: Some(dir.clone()),
             custom: Mutex::new(Vec::new()),
-            bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            bytes: Mutex::new(Lru::new(bytes_budget(true))),
+            decoded: Mutex::new(Lru::new(DECODED_BUDGET)),
         };
         assert!(
             b.get_bytes(&id).is_some(),

@@ -8,6 +8,7 @@ mod ask;
 mod assets;
 mod auth;
 mod bench;
+mod cache;
 mod convert;
 mod doctor;
 #[cfg(feature = "bridge")]
