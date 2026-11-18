@@ -11,6 +11,7 @@
 
 pub mod catalog;
 pub mod hw;
+pub mod pull;
 pub mod runtime;
 
 use std::path::PathBuf;
