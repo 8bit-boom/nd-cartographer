@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "WorldSpec",
+  "description": "An overland map. Every coordinate is 0..1 across the map (x left to right, y top to bottom). Rules a schema cannot say: biomes grow only on dry land, and a place in the sea is moved or refused.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "cols": { "type": "integer", "minimum": 16, "maximum": 512 },
+    "rows": { "type": "integer", "minimum": 16, "maximum": 512 },
+    "land": { "type": "number", "minimum": 0.05, "maximum": 0.95 },
+    "continent": { "type": "number", "minimum": 0, "maximum": 1 },
+    "ridges": { "type": "number", "minimum": 0, "maximum": 1 },
+    "rivers": { "type": "integer", "minimum": 0, "maximum": 40 },
+    "biomes": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["biome", "x", "y", "rx", "ry"],
+        "properties": {
+          "biome": { "type": "string", "enum": ["forest", "meadow", "rocky", "swamp", "desert"] },
+          "x": { "type": "number", "minimum": 0, "maximum": 1 },
+          "y": { "type": "number", "minimum": 0, "maximum": 1 },
+          "rx": { "type": "number", "minimum": 0.02, "maximum": 0.5 },
+          "ry": { "type": "number", "minimum": 0.02, "maximum": 0.5 },
+          "density": { "type": "number", "minimum": 0.5, "maximum": 4 }
+        }
+      }
+    },
+    "places": {
+      "type": "array",
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "x", "y"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "note": { "type": "string", "maxLength": 500 },
+          "x": { "type": "number", "minimum": 0, "maximum": 1 },
+          "y": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "regions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "points"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "points": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 100,
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          },
+          "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
+        }
+      }
+    }
+  }
+}

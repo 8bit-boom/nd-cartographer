@@ -9,6 +9,7 @@
 
 mod ai_settings;
 mod aijobs;
+mod aipack;
 mod ask;
 mod assets;
 mod auth;
