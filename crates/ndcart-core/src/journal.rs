@@ -192,28 +192,32 @@ impl Op {
     pub fn inverse_against(&self, floor: &FloorDoc) -> CoreResult<Op> {
         match self {
             Op::PaintCells { cells, .. } => {
-                let prev: Vec<_> = cells
-                    .iter()
-                    .filter_map(|c| floor.grid.cell_space(*c).map(|s| (*c, s.to_string())))
+                // One op per previous space (not one per cell), plus one that
+                // un-paints the cells that were empty: a 20k-cell paint
+                // journals a handful of ops instead of 20k.
+                let mut by_space: std::collections::BTreeMap<&str, Vec<CellKey>> =
+                    std::collections::BTreeMap::new();
+                let mut empty: Vec<CellKey> = Vec::new();
+                for c in cells {
+                    match floor.grid.cell_space(*c) {
+                        Some(s) => by_space.entry(s).or_default().push(*c),
+                        None => empty.push(*c),
+                    }
+                }
+                let mut ops: Vec<Op> = by_space
+                    .into_iter()
+                    .map(|(s, cells)| Op::PaintCells {
+                        cells,
+                        space: Some(s.to_string()),
+                    })
                     .collect();
-                Ok(Op::Batch {
-                    ops: prev
-                        .into_iter()
-                        .map(|(c, s)| Op::PaintCells {
-                            cells: vec![c],
-                            space: Some(s),
-                        })
-                        .chain(
-                            cells
-                                .iter()
-                                .filter(|c| floor.grid.cell_space(**c).is_none())
-                                .map(|c| Op::PaintCells {
-                                    cells: vec![*c],
-                                    space: None,
-                                }),
-                        )
-                        .collect(),
-                })
+                if !empty.is_empty() {
+                    ops.push(Op::PaintCells {
+                        cells: empty,
+                        space: None,
+                    });
+                }
+                Ok(Op::Batch { ops })
             }
             Op::UpsertSpace { space } => {
                 if let Some(prev) = floor.grid.spaces.get(&space.id) {
@@ -960,6 +964,51 @@ mod tests {
         assert_ne!(floor, before);
         apply_op(&mut floor, &inv).unwrap();
         assert_eq!(floor, before);
+    }
+
+    #[test]
+    fn paint_inverse_is_compact_and_exact_on_a_mixed_grid() {
+        let (mut floor, mut journal) = painted_floor();
+        let mut b = space_a();
+        b.id = "b".into();
+        b.name = "B".into();
+        journal
+            .push(&mut floor, &Op::UpsertSpace { space: b })
+            .unwrap();
+        // Half the box painted with a, a quarter with b, the rest empty.
+        let key = |x, y| CellKey::new(x, y);
+        let box_cells: Vec<CellKey> = (0..200)
+            .flat_map(|x| (0..100).map(move |y| key(x, y)))
+            .collect();
+        let a: Vec<_> = box_cells.iter().copied().filter(|c| c.x < 100).collect();
+        let bb: Vec<_> = box_cells
+            .iter()
+            .copied()
+            .filter(|c| c.x >= 100 && c.y < 50)
+            .collect();
+        floor.grid.paint(&a, Some("a")).unwrap();
+        floor.grid.paint(&bb, Some("b")).unwrap();
+        let before = floor.clone();
+        let op = Op::PaintCells {
+            cells: box_cells.clone(),
+            space: Some("b".into()),
+        };
+        let inv = apply_with_inverse(&mut floor, &op).unwrap();
+        assert_ne!(floor, before);
+        let json = serde_json::to_string(&inv).unwrap();
+        // Each cell is `{"x":..,"y":..}` (about 16 bytes), so 20k cells cannot
+        // go under ~320 KB without changing the op shape; it was 1.2 MB.
+        assert!(json.len() < 400_000, "{} bytes", json.len());
+        apply_op(&mut floor, &inv).unwrap();
+        assert_eq!(floor, before);
+        let ops = match &inv {
+            Op::Batch { ops } => ops.len(),
+            _ => panic!("batch"),
+        };
+        assert_eq!(
+            ops, 3,
+            "one op per previous space plus one for the empty cells"
+        );
     }
 
     #[test]
