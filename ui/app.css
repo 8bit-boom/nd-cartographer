@@ -272,6 +272,7 @@ button.danger { border-color: #a33; }
 
 /* Lore sync (plan 21.2) and pacing stats (21.6). */
 #lore-body { max-height: 260px; overflow-y: auto; }
+.lore-frame { width: 100%; height: 40vh; border: 0; display: block; }
 #stats-body table { border-collapse: collapse; width: 100%; }
 #stats-body td, #stats-body th { padding: 3px 8px; text-align: left; border-bottom: 1px solid var(--line); }
 #stats-body td.num { text-align: right; }

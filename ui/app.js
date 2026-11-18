@@ -590,11 +590,15 @@ async function openLoreFor(space) {
     const body = document.getElementById('lore-body');
     body.textContent = '';
     if (preview.body_html) {
-      const div = document.createElement('div');
-      // body_html comes from our own proxy of nd-world's markdown renderer
-      // for the linked entity - the same text nd-world shows the GM.
-      div.innerHTML = preview.body_html;
-      body.appendChild(div);
+      // nd-world's HTML is not ours to trust: a sandboxed iframe (no
+      // allow-scripts, unique origin) shows the text but runs nothing.
+      const frame = document.createElement('iframe');
+      frame.setAttribute('sandbox', '');
+      frame.title = 'Lore text';
+      frame.className = 'lore-frame';
+      frame.srcdoc = '<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="light dark">' +
+        '<style>body{font:14px/1.45 system-ui,sans-serif;margin:6px}img{max-width:100%}</style>' + preview.body_html;
+      body.appendChild(frame);
     }
     const open = document.getElementById('lore-open');
     if (server) {
