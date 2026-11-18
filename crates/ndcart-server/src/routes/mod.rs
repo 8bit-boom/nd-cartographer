@@ -4,6 +4,7 @@
 pub(crate) mod ai;
 pub(crate) mod assets;
 pub(crate) mod export;
+pub(crate) mod import;
 pub(crate) mod proposals;
 pub(crate) mod system;
 pub(crate) mod table;
