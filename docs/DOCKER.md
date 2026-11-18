@@ -55,3 +55,5 @@ Build it yourself: `docker build -t nd-cartographer .`
 - Not yet verified: the image has not been built or run on a real TrueNAS
   machine (the development sandbox has no Docker daemon). The CI job
   `docker` builds it and runs the health check on every push.
+
+`ND_CARTO_ALLOWED_HOSTS` (comma-separated host names) only matters when the server listens on loopback behind a proxy; the container listens on all interfaces and uses the token instead, so no host allow-list applies there.

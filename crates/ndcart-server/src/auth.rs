@@ -116,6 +116,48 @@ pub async fn same_origin_guard(req: Request, next: Next) -> Response {
     (StatusCode::FORBIDDEN, "ndcart: cross-site request refused").into_response()
 }
 
+/// Hostnames (any port) accepted in loopback mode, plus the comma-separated
+/// extras in `ND_CARTO_ALLOWED_HOSTS`.
+pub fn allowed_hosts() -> Vec<String> {
+    let mut v: Vec<String> = ["localhost", "127.0.0.1", "[::1]"].map(String::from).into();
+    if let Ok(extra) = std::env::var("ND_CARTO_ALLOWED_HOSTS") {
+        v.extend(
+            extra
+                .split(',')
+                .map(|h| h.trim().to_ascii_lowercase())
+                .filter(|h| !h.is_empty()),
+        );
+    }
+    v
+}
+
+fn host_name(host: &str) -> &str {
+    if host.starts_with('[') {
+        return host.find(']').map_or(host, |i| &host[..=i]);
+    }
+    host.split(':').next().unwrap_or(host)
+}
+
+/// DNS-rebinding guard for loopback mode: a page on `evil.example` that
+/// re-resolves to 127.0.0.1 still sends `Host: evil.example`, so refuse any
+/// Host that is not on the allow-list. A request with no Host header passes.
+pub async fn host_guard(
+    allowed: std::sync::Arc<Vec<String>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if let Some(h) = req.headers().get(header::HOST) {
+        let ok = h.to_str().is_ok_and(|h| {
+            let name = host_name(h).to_ascii_lowercase();
+            allowed.contains(&name)
+        });
+        if !ok {
+            return (StatusCode::MISDIRECTED_REQUEST, "unknown host").into_response();
+        }
+    }
+    next.run(req).await
+}
+
 pub async fn gate(token: String, req: Request, next: Next) -> Response {
     if req.uri().path() == "/health" {
         return next.run(req).await;
@@ -161,6 +203,14 @@ mod tests {
         assert!(is_loopback("[::1]:8300"));
         assert!(!is_loopback("0.0.0.0:8300"));
         assert!(!is_loopback("192.168.1.5:8300"));
+    }
+
+    #[test]
+    fn host_names_are_split_from_ports() {
+        assert_eq!(host_name("localhost:8300"), "localhost");
+        assert_eq!(host_name("127.0.0.1"), "127.0.0.1");
+        assert_eq!(host_name("[::1]:8300"), "[::1]");
+        assert_eq!(host_name("evil.example:1"), "evil.example");
     }
 
     #[test]

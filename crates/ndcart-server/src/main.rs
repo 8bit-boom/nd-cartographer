@@ -4556,7 +4556,12 @@ async fn main() {
                 tile_cache: Mutex::new(HashMap::new()),
             });
             let mut router = build_router(app);
-            if !auth::is_loopback(&listen) {
+            if auth::is_loopback(&listen) {
+                let allowed = Arc::new(auth::allowed_hosts());
+                router = router.layer(axum::middleware::from_fn(move |req, next| {
+                    auth::host_guard(allowed.clone(), req, next)
+                }));
+            } else {
                 let (token, fresh) = auth::resolve_token(app_data_dir.as_deref());
                 if fresh {
                     println!("ndcart: access token (shown once): {token}");
@@ -7715,5 +7720,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn host_guard_refuses_unknown_hosts_in_loopback_mode() {
+        let allowed = Arc::new(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+            "[::1]".to_string(),
+        ]);
+        let router = build_router(test_app()).layer(axum::middleware::from_fn(move |req, next| {
+            auth::host_guard(allowed.clone(), req, next)
+        }));
+        let get = |host: Option<&str>| {
+            let mut b = Request::get("/api/docs");
+            if let Some(h) = host {
+                b = b.header("host", h);
+            }
+            router.clone().oneshot(b.body(Body::empty()).unwrap())
+        };
+        let r = get(Some("evil.example:8300")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::MISDIRECTED_REQUEST);
+        assert_eq!(body_string(r).await, "unknown host");
+        for ok in [
+            "localhost:8300",
+            "127.0.0.1:8300",
+            "[::1]:8300",
+            "LOCALHOST",
+        ] {
+            assert_eq!(
+                get(Some(ok)).await.unwrap().status(),
+                StatusCode::OK,
+                "{ok}"
+            );
+        }
+        assert_eq!(get(None).await.unwrap().status(), StatusCode::OK);
     }
 }

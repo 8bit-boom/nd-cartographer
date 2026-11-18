@@ -158,6 +158,11 @@ Listening off loopback requires a token: `Authorization: Bearer T`, cookie
 `ND_CARTO_TOKEN`, `ND_CARTO_TOKEN_FILE`, or `<data-dir>/token` (generated 0600 on
 first run, printed once). 401 without it.
 
+Host allow-list (loopback listeners only): the `Host` header must be `localhost`,
+`127.0.0.1` or `[::1]` (any port), or one of the comma-separated names in
+`ND_CARTO_ALLOWED_HOSTS`; anything else gets 421 `unknown host` (blocks DNS
+rebinding). A request with no `Host` header passes.
+
 Cross-site guard (always on): a POST/PUT/PATCH/DELETE is refused with 403 when
 `Sec-Fetch-Site` is present and is not `same-origin` or `none`, or when an `Origin`
 header is present and differs from the request's `Host`. Requests with neither header
