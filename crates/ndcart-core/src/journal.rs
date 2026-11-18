@@ -240,17 +240,23 @@ impl Op {
                     .filter(|(_, s)| *s == id)
                     .map(|(c, _)| c)
                     .collect();
-                Ok(Op::Batch {
-                    ops: vec![
-                        Op::PaintCells {
-                            cells,
-                            space: Some(id.clone()),
-                        },
-                        Op::UpsertSpace {
-                            space: space.clone(),
-                        },
-                    ],
-                })
+                // The space must exist again before cells can point at it.
+                let upsert = Op::UpsertSpace {
+                    space: space.clone(),
+                };
+                if cells.is_empty() {
+                    Ok(upsert)
+                } else {
+                    Ok(Op::Batch {
+                        ops: vec![
+                            upsert,
+                            Op::PaintCells {
+                                cells,
+                                space: Some(id.clone()),
+                            },
+                        ],
+                    })
+                }
             }
             Op::SetMark { edge, .. } => Ok(Op::SetMark {
                 edge: *edge,
@@ -890,6 +896,30 @@ mod tests {
             .push(&mut floor, &Op::UpsertSpace { space: space_a() })
             .unwrap();
         (floor, journal)
+    }
+
+    #[test]
+    fn undo_remove_space_restores_space_and_cells() {
+        let (mut floor, mut journal) = painted_floor();
+        let cells: Vec<CellKey> = (0..10).map(|i| CellKey::new(i, 0)).collect();
+        journal
+            .push(
+                &mut floor,
+                &Op::PaintCells {
+                    cells,
+                    space: Some("a".into()),
+                },
+            )
+            .unwrap();
+        let before = floor.clone();
+        journal
+            .push(&mut floor, &Op::RemoveSpace { id: "a".into() })
+            .unwrap();
+        assert!(!floor.grid.spaces.contains_key("a"));
+        journal.undo_last(&mut floor).unwrap();
+        assert_eq!(floor.grid.cell_count(), 10);
+        assert!(floor.grid.spaces.contains_key("a"));
+        assert_eq!(floor, before);
     }
 
     #[test]

@@ -7325,4 +7325,76 @@ mod tests {
         let text = body_string(resp).await;
         assert!(text.contains("\"rev\":0"), "{text}");
     }
+
+    // ---- batch 1 helpers and tests ----
+
+    fn jv(b: &[u8]) -> serde_json::Value {
+        serde_json::from_slice(b).unwrap_or_default()
+    }
+
+    async fn new_doc(router: &Router, name: &str) -> (String, String) {
+        let (_, b) = call(
+            router,
+            "POST",
+            "/api/docs",
+            format!(r#"{{"name":"{name}"}}"#).into_bytes(),
+        )
+        .await;
+        let id = jv(&b)["id"].as_str().unwrap().to_string();
+        let (_, d) = call(router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let floor = jv(&d)["floors"][0]["id"].as_str().unwrap().to_string();
+        (id, floor)
+    }
+
+    async fn post_ops_json(router: &Router, id: &str, v: serde_json::Value) -> StatusCode {
+        call(
+            router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            v.to_string().into_bytes(),
+        )
+        .await
+        .0
+    }
+
+    async fn floor_digest(router: &Router, id: &str) -> String {
+        let (_, d) = call(router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        jv(&d)["floors"][0]["digest"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn undoing_a_revert_brings_back_the_pre_revert_floor() {
+        let router = build_router(test_app());
+        let (id, f) = new_doc(&router, "R").await;
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","space":"sp_a","cells":[{"x":1,"y":1},{"x":2,"y":1}]}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let before = floor_digest(&router, &id).await;
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/revert"),
+            serde_json::json!({"floor": f, "index": 0})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_ne!(floor_digest(&router, &id).await, before);
+        let (st, body) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/undo"),
+            serde_json::json!({"floor": f}).to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(floor_digest(&router, &id).await, before);
+    }
 }
