@@ -8,6 +8,7 @@
 //! map is in docs/ARCHITECTURE.md.
 
 mod ai_settings;
+mod ai_standin;
 mod aijobs;
 mod aipack;
 mod ask;
@@ -456,6 +457,12 @@ async fn main() {
                 run_bench(rest);
             }
         }
+        "ai" => {
+            if let Err(m) = run_ai(args.collect()).await {
+                eprintln!("ndcart: {m}");
+                std::process::exit(1);
+            }
+        }
         "healthcheck" => {
             if !run_healthcheck() {
                 std::process::exit(1);
@@ -587,11 +594,24 @@ async fn main() {
         }
         other => {
             eprintln!(
-                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | import-pack FILE | open-published SLUG | doctor | publish DOC ... | draft PROMPT ...]"
+                "usage: ndcart [serve --listen ADDR --data-dir DIR | bench | convert IN OUT | import-pack FILE | open-published SLUG | doctor | ai stand-in ... | publish DOC ... | draft PROMPT ...]"
             );
             eprintln!("  unknown command: {other}");
             std::process::exit(2);
         }
+    }
+}
+
+/// `ndcart ai <stand-in|…>`: the local-AI helpers (the group grows in plan batch 4).
+async fn run_ai(args: Vec<String>) -> Result<(), String> {
+    let mut args = args.into_iter();
+    match args.next().as_deref() {
+        Some("stand-in") => ai_standin::run(args.collect()).await,
+        Some(o) => Err(format!("unknown ai command '{o}' (try: stand-in)")),
+        None => Err(
+            "usage: ndcart ai stand-in --port N [--behaviour good|fix-once|garbage|slow|no-schema]"
+                .into(),
+        ),
     }
 }
 

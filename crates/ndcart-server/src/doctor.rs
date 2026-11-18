@@ -393,40 +393,18 @@ mod tests {
     #[cfg(feature = "bridge")]
     mod ai {
         use super::*;
-        use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
-
         const KEY: &str = "sk-secret-do-not-print";
 
         /// A stand-in model server: /health answers 503 for the first `loading` calls, and
         /// /v1/models serves `ids`.
         async fn stand_in(loading: usize, ids: &'static [&'static str]) -> String {
-            let hits = Arc::new(AtomicUsize::new(0));
-            let app = Router::new()
-                .route(
-                    "/health",
-                    get(move |State(h): State<Arc<AtomicUsize>>| async move {
-                        if h.fetch_add(1, Ordering::SeqCst) < loading {
-                            StatusCode::SERVICE_UNAVAILABLE
-                        } else {
-                            StatusCode::OK
-                        }
-                    }),
-                )
-                .route(
-                    "/v1/models",
-                    get(move || async move {
-                        Json(serde_json::json!({
-                            "data": ids.iter().map(|i| serde_json::json!({"id": i})).collect::<Vec<_>>()
-                        }))
-                    }),
-                )
-                .with_state(hits);
-            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = l.local_addr().unwrap();
-            tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
-            format!("http://{addr}/v1")
+            crate::ai_standin::spawn(crate::ai_standin::Options {
+                loading,
+                models: ids.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            })
+            .await
+            .base
         }
 
         fn settings(url: &str, model: &str) -> crate::ai_settings::StoredAiSettings {
