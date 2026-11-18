@@ -614,8 +614,7 @@ document.getElementById('bk-stock').onclick = async () => {
   try {
     const { tables } = await api('GET', '/api/world/tables');
     if (!tables.length) { statusEl.textContent = 'Your nd-world has no tables yet.'; return; }
-    const list = tables.map((t, i) => `${i + 1}) ${t.name} (${t.entries.length} entries)`).join('
-');
+    const list = tables.map((t, i) => `${i + 1}) ${t.name} (${t.entries.length} entries)`).join('\n');
     const pick = Number(window.prompt(`Stock from which table?
 ${list}`, '1'));
     const tbl = tables[pick - 1];
@@ -2394,10 +2393,8 @@ async function askMaps() {
     const answer = (await api('POST', '/api/ask', { question: q })).answer;
     // Cited rooms (SEE: project | floor | room) become Go buttons that jump.
     out.textContent = '';
-    const lines = answer.split('
-');
-    const body = lines.filter(l => !l.startsWith('SEE:')).join('
-').trim();
+    const lines = answer.split('\n');
+    const body = lines.filter(l => !l.startsWith('SEE:')).join('\n').trim();
     out.append(document.createTextNode(body));
     for (const line of lines.filter(l => l.startsWith('SEE:'))) {
       const [, proj, fl, room] = line.slice(4).split('|').map(s => s.trim());
@@ -3177,7 +3174,7 @@ document.getElementById('bk-move').onclick = async () => {
 };
 document.getElementById('bk-resize').onclick = async () => {
   if (!state.sel.size) { statusEl.textContent = 'Select rooms to resize.'; return; }
-  const d = window.prompt('Scale selected rooms by fx,fy (whole factors 1-10, about each room's top-left; e.g. "2,2")', '2,2');
+  const d = window.prompt('Scale selected rooms by fx,fy (whole factors 1-10, about each room top-left; e.g. "2,2")', '2,2');
   if (d === null || !d.trim()) return;
   const [fx, fy] = d.split(',').map(v => parseInt(v.trim(), 10));
   if (!(fx >= 1 && fx <= 10 && fy >= 1 && fy <= 10)) { statusEl.textContent = 'Factors must be 1-10.'; return; }
