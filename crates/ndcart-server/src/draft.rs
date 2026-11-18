@@ -170,14 +170,8 @@ fn env(k: &str) -> Option<String> {
 }
 
 impl Config {
-    /// The studio's own configuration, from the environment. A direct model
-    /// (`ND_CARTO_LLM_URL` + `ND_CARTO_LLM_MODEL`) wins over nd-world.
-    pub fn from_env() -> Result<Config, String> {
-        Self::from_env_and(&crate::ai_settings::StoredAiSettings::default())
-    }
-
     /// The studio's configuration: environment variables keep the final word
-    /// per field; the saved AI settings (Unsloth, Ollama, ...) fill the rest.
+    /// per field (a direct model, `ND_CARTO_LLM_URL` + `ND_CARTO_LLM_MODEL`, wins over nd-world); the saved AI settings (Unsloth, Ollama, ...) fill the rest.
     pub fn from_env_and(stored: &crate::ai_settings::StoredAiSettings) -> Result<Config, String> {
         let direct = match (
             env("ND_CARTO_LLM_URL").or_else(|| stored.direct_url.clone()),

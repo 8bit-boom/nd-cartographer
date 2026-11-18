@@ -36,7 +36,10 @@ pub(crate) async fn doctor_checks(State(app): State<App>) -> Json<serde_json::Va
             .await
             .unwrap_or_default();
     #[cfg(feature = "bridge")]
-    checks.extend(doctor::ai_checks().await);
+    {
+        let stored = app.ai.lock().expect("ai settings").clone();
+        checks.extend(doctor::ai_checks_with(&stored).await);
+    }
     let skipped = app.store.read().await.skipped.clone();
     if !skipped.is_empty() {
         checks.push(doctor::Check {

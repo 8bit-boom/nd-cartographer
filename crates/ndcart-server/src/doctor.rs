@@ -145,11 +145,18 @@ pub fn local_checks_with(data: Option<&Path>, listen: Option<&str>) -> Vec<Check
     v
 }
 
-/// The AI and nd-world configuration, as much as can be known without a password.
+/// The AI and nd-world configuration, as much as can be known without a password. Reads the
+/// saved AI settings from `data` (environment variables still win per field).
 #[cfg(feature = "bridge")]
-pub async fn ai_checks() -> Vec<Check> {
+pub async fn ai_checks(data: Option<&Path>) -> Vec<Check> {
+    ai_checks_with(&crate::ai_settings::load(data)).await
+}
+
+/// The same checks for settings already in memory (the running studio's live copy).
+#[cfg(feature = "bridge")]
+pub async fn ai_checks_with(stored: &crate::ai_settings::StoredAiSettings) -> Vec<Check> {
     let mut v = Vec::new();
-    let cfg = match crate::draft::Config::from_env() {
+    let cfg = match crate::draft::Config::from_env_and(stored) {
         Ok(c) => c,
         Err(m) => {
             v.push(warn(
@@ -160,14 +167,8 @@ pub async fn ai_checks() -> Vec<Check> {
         }
     };
     v.push(ok("AI", cfg.describe()));
-    if let Some((url, _)) = &cfg.direct {
-        match reqwest_head(&format!("{}/models", url.trim_end_matches('/'))).await {
-            Ok(code) => v.push(ok("model server", format!("{url} answered ({code})"))),
-            Err(e) => v.push(warn(
-                "model server",
-                format!("{url} did not answer: {e}. Is it running?"),
-            )),
-        }
+    if let Some((url, model)) = &cfg.direct {
+        v.extend(probe_model_server(url, model, cfg.key.as_deref()).await);
     } else if let Some(server) = &cfg.server {
         match ndcart_bridge::Bridge::new(server, cfg.world.as_deref()) {
             Ok(b) => match b.probe().await {
@@ -189,45 +190,97 @@ pub async fn ai_checks() -> Vec<Check> {
     v
 }
 
+/// `scheme://host[:port]` of an endpoint address (what `/health` hangs off).
 #[cfg(feature = "bridge")]
-async fn reqwest_head(url: &str) -> Result<u16, String> {
-    // A plain TCP/HTTP probe through the bridge's own client crate would need a new API; a tiny
-    // connect-and-status check keeps this dependency-free.
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or("only plain http:// addresses are probed")?;
-    let (host, path) = rest
-        .split_once('/')
-        .map(|(h, p)| (h, format!("/{p}")))
-        .unwrap_or((rest, "/".into()));
-    let host = if host.contains(':') {
-        host.to_string()
-    } else {
-        format!("{host}:80")
+fn origin_of(url: &str) -> &str {
+    let after = url.find("://").map(|i| i + 3).unwrap_or(0);
+    match url[after..].find('/') {
+        Some(i) => &url[..after + i],
+        None => url,
+    }
+}
+
+/// Probe a model server the way a client would: `/health` (llama.cpp: 503 while the model
+/// loads, 200 when ready), then `{base}/models` with the key, checking the configured id is
+/// served. The key is sent but never printed.
+#[cfg(feature = "bridge")]
+async fn probe_model_server(url: &str, model: &str, key: Option<&str>) -> Vec<Check> {
+    let mut v = Vec::new();
+    let client = ndcart_bridge::plain_client();
+    let base = url.trim_end_matches('/');
+    let get = |u: String, with_key: bool| {
+        let mut r = client.get(u);
+        if with_key {
+            if let Some(k) = key {
+                r = r.bearer_auth(k);
+            }
+        }
+        r
     };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut s = tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        tokio::net::TcpStream::connect(&host),
-    )
-    .await
-    .map_err(|_| "timed out".to_string())?
-    .map_err(|e| e.to_string())?;
-    s.write_all(
-        format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes(),
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let mut buf = [0u8; 64];
-    let n = tokio::time::timeout(std::time::Duration::from_secs(4), s.read(&mut buf))
+    match get(format!("{}/health", origin_of(base)), false)
+        .send()
         .await
-        .map_err(|_| "timed out".to_string())?
-        .map_err(|e| e.to_string())?;
-    let line = String::from_utf8_lossy(&buf[..n]);
-    line.split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .ok_or_else(|| "not an HTTP answer".into())
+    {
+        Ok(r) => match r.status().as_u16() {
+            200 => v.push(ok("model server", format!("{base} is ready"))),
+            503 => {
+                v.push(warn(
+                    "model server",
+                    format!("{base} is still loading the model; wait a moment and try again"),
+                ));
+                return v;
+            }
+            // Not every server has /health (Ollama does not): the model list decides.
+            _ => {}
+        },
+        Err(e) => {
+            v.push(warn(
+                "model server",
+                format!("{base} did not answer: {e}. Is it running?"),
+            ));
+            return v;
+        }
+    }
+    let models_url = if base.ends_with("/v1") {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    };
+    match get(models_url, true).send().await {
+        Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => v.push(warn(
+            "model list",
+            "the server refused the API key (or wants one); set it in Settings or ND_CARTO_LLM_KEY",
+        )),
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await.unwrap_or_default();
+            let ids: Vec<String> = body
+                .get("data")
+                .and_then(|d| d.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if ids.is_empty() || ids.iter().any(|i| i == model) {
+                v.push(ok("model", format!("'{model}' is served")));
+            } else {
+                v.push(warn(
+                    "model",
+                    format!("model '{model}' is not served; served: {}", ids.join(", ")),
+                ));
+            }
+        }
+        Ok(r) => v.push(warn(
+            "model list",
+            format!("{base}/models answered {}", r.status()),
+        )),
+        Err(e) => v.push(warn(
+            "model list",
+            format!("cannot read the model list: {e}"),
+        )),
+    }
+    v
 }
 
 pub fn render(checks: &[Check]) -> String {
@@ -271,7 +324,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
     #[allow(unused_mut)]
     let mut checks = local_checks(data.as_deref(), &listen);
     #[cfg(feature = "bridge")]
-    checks.extend(ai_checks().await);
+    checks.extend(ai_checks(data.as_deref()).await);
     print!("{}", render(&checks));
     if checks.iter().any(|c| c.level == Level::Fail) {
         Err("doctor found problems".into())
@@ -338,24 +391,108 @@ mod tests {
     }
 
     #[cfg(feature = "bridge")]
-    #[tokio::test]
-    async fn the_model_probe_reads_a_status_line_and_never_prints_a_secret() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = l.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            let (mut s, _) = l.accept().await.unwrap();
-            let mut b = [0u8; 256];
-            let _ = s.read(&mut b).await;
-            s.write_all(b"HTTP/1.0 200 OK\r\n\r\n{}").await.unwrap();
-        });
-        assert_eq!(
-            reqwest_head(&format!("http://127.0.0.1:{port}/v1/models"))
-                .await
-                .unwrap(),
-            200
-        );
-        assert!(reqwest_head("https://x/y").await.is_err());
-        assert!(reqwest_head("http://127.0.0.1:9/v1/models").await.is_err());
+    mod ai {
+        use super::*;
+        use axum::{extract::State, http::StatusCode, routing::get, Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        const KEY: &str = "sk-secret-do-not-print";
+
+        /// A stand-in model server: /health answers 503 for the first `loading` calls, and
+        /// /v1/models serves `ids`.
+        async fn stand_in(loading: usize, ids: &'static [&'static str]) -> String {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let app = Router::new()
+                .route(
+                    "/health",
+                    get(move |State(h): State<Arc<AtomicUsize>>| async move {
+                        if h.fetch_add(1, Ordering::SeqCst) < loading {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::OK
+                        }
+                    }),
+                )
+                .route(
+                    "/v1/models",
+                    get(move || async move {
+                        Json(serde_json::json!({
+                            "data": ids.iter().map(|i| serde_json::json!({"id": i})).collect::<Vec<_>>()
+                        }))
+                    }),
+                )
+                .with_state(hits);
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+            format!("http://{addr}/v1")
+        }
+
+        fn settings(url: &str, model: &str) -> crate::ai_settings::StoredAiSettings {
+            crate::ai_settings::StoredAiSettings {
+                direct_url: Some(url.into()),
+                direct_model: Some(model.into()),
+                key: Some(KEY.into()),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_loading_server_warns_then_is_ok() {
+            let url = stand_in(1, &["ndcart-local"]).await;
+            let first = ai_checks_with(&settings(&url, "ndcart-local")).await;
+            assert!(
+                first
+                    .iter()
+                    .any(|c| c.level == Level::Warn && c.detail.contains("loading")),
+                "{}",
+                render(&first)
+            );
+            let second = ai_checks_with(&settings(&url, "ndcart-local")).await;
+            assert!(
+                second.iter().all(|c| c.level == Level::Ok),
+                "{}",
+                render(&second)
+            );
+        }
+
+        #[tokio::test]
+        async fn an_unserved_model_id_names_what_is_served() {
+            let url = stand_in(0, &["alpha", "beta"]).await;
+            let c = ai_checks_with(&settings(&url, "ndcart-local")).await;
+            let w = c
+                .iter()
+                .find(|c| c.level == Level::Warn)
+                .expect("a warning");
+            assert!(
+                w.detail.contains("'ndcart-local' is not served")
+                    && w.detail.contains("alpha, beta"),
+                "{}",
+                w.detail
+            );
+        }
+
+        #[tokio::test]
+        async fn saved_settings_alone_make_the_ai_check_ok_and_the_key_is_never_printed() {
+            let url = stand_in(0, &["ndcart-local"]).await;
+            let d = tmp("saved-ai");
+            crate::ai_settings::save(Some(&d), &settings(&url, "ndcart-local")).unwrap();
+            let c = ai_checks(Some(&d)).await;
+            let text = render(&c);
+            assert!(c.iter().all(|c| c.level == Level::Ok), "{text}");
+            assert!(text.contains("standalone"), "{text}");
+            assert!(!text.contains(KEY), "{text}");
+            // A dead endpoint is a warning that still hides the key.
+            let dead = ai_checks_with(&settings("http://127.0.0.1:9/v1", "m")).await;
+            assert!(dead.iter().any(|c| c.level == Level::Warn));
+            assert!(!render(&dead).contains(KEY));
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        #[test]
+        fn the_origin_drops_the_path() {
+            assert_eq!(origin_of("http://h:1/v1"), "http://h:1");
+            assert_eq!(origin_of("https://h"), "https://h");
+        }
     }
 }
