@@ -11,22 +11,29 @@
 //! into a prompt or an argument).
 
 use crate::aipack::{self, Kind};
+use crate::repair::{self, Failure, Job, Outcome, Turn};
 use ndcart_bridge::Bridge;
 use ndcart_core::mapspec::MapSpec;
-use std::future::Future;
 
 pub use crate::speccheck::extract_json;
 
-/// Parse and validate one reply. The error text is what is sent back to the model.
-pub fn parse_reply(reply: &str) -> Result<MapSpec, String> {
-    let json = extract_json(reply)
-        .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
+const NO_JSON: &str = "The reply contained no JSON object. Reply with only the JSON object.";
+
+/// Judge one map reply: every complaint (JSON, unknown fields, rules, layout, lint errors).
+pub fn parse_reply_all(reply: &str) -> Result<MapSpec, Vec<String>> {
+    let json = extract_json(reply).ok_or_else(|| vec![NO_JSON.to_string()])?;
     let c = crate::speccheck::check_map(json);
-    match (c.errors.into_iter().next(), c.spec) {
-        (Some(e), _) => Err(e),
-        (None, Some(spec)) => Ok(spec),
-        (None, None) => Err("The spec could not be read.".into()),
+    if !c.errors.is_empty() {
+        return Err(c.errors);
     }
+    c.spec
+        .ok_or_else(|| vec!["The spec could not be read.".into()])
+}
+
+/// Parse and validate one reply; the first complaint (tests and the CLI check).
+#[cfg(test)]
+pub fn parse_reply(reply: &str) -> Result<MapSpec, String> {
+    parse_reply_all(reply).map_err(|mut e| e.swap_remove(0))
 }
 
 /// A drafted map and what the linter noticed about it (shown beside the preview; none of it
@@ -34,6 +41,9 @@ pub fn parse_reply(reply: &str) -> Result<MapSpec, String> {
 pub struct Drafted {
     pub spec: MapSpec,
     pub warnings: Vec<ndcart_core::speclint::SpecProblem>,
+    /// How many asks it took (1 = right the first time).
+    pub attempts: usize,
+    pub seconds: f64,
 }
 
 /// The linter's non-error findings for a spec that passed [`parse_reply`].
@@ -41,57 +51,21 @@ pub fn warnings_of(spec: &MapSpec) -> Vec<ndcart_core::speclint::SpecProblem> {
     ndcart_core::speclint::lint_spec(spec, 1).unwrap_or_default()
 }
 
-/// Ask until a valid spec comes back (the first try plus `repairs` corrections).
-pub async fn draft_with<F, Fut>(prompt: &str, repairs: usize, ask: F) -> Result<MapSpec, String>
-where
-    F: FnMut(String) -> Fut,
-    Fut: Future<Output = Result<String, String>>,
-{
-    draft_loop(prompt, repairs, ask, parse_reply).await
-}
-
-/// The ask/judge/repair loop, for any kind of spec.
-pub async fn draft_loop<T, F, Fut>(
-    prompt: &str,
-    repairs: usize,
-    mut ask: F,
-    judge: impl Fn(&str) -> Result<T, String>,
-) -> Result<T, String>
-where
-    F: FnMut(String) -> Fut,
-    Fut: Future<Output = Result<String, String>>,
-{
-    let mut user = format!("Design this map: {}", prompt.trim());
-    let mut last = String::new();
-    for _ in 0..=repairs {
-        let reply = ask(user.clone()).await?;
-        match judge(&reply) {
-            Ok(spec) => return Ok(spec),
-            Err(problem) => {
-                user = format!(
-                    "Design this map: {}\n\nYour previous reply was refused. {problem}\nReply again with the corrected JSON object only.",
-                    prompt.trim()
-                );
-                last = problem;
-            }
-        }
-    }
-    Err(format!(
-        "the model did not produce a usable spec after {} tries; last problem: {last}",
-        repairs + 1
-    ))
-}
-
-/// Parse and validate one world reply (the error goes back to the model).
-pub fn parse_world_reply(reply: &str) -> Result<crate::worldspec::WorldSpec, String> {
-    let json = extract_json(reply)
-        .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
+/// Judge one world reply (every complaint goes back to the model).
+pub fn parse_world_reply_all(reply: &str) -> Result<crate::worldspec::WorldSpec, Vec<String>> {
+    let json = extract_json(reply).ok_or_else(|| vec![NO_JSON.to_string()])?;
     let c = crate::speccheck::check_world(json);
-    match (c.errors.into_iter().next(), c.spec) {
-        (Some(e), _) => Err(e),
-        (None, Some(spec)) => Ok(spec),
-        (None, None) => Err("The spec could not be read.".into()),
+    if !c.errors.is_empty() {
+        return Err(c.errors);
     }
+    c.spec
+        .ok_or_else(|| vec!["The spec could not be read.".into()])
+}
+
+/// Parse and validate one world reply (the first complaint).
+#[cfg(test)]
+pub fn parse_world_reply(reply: &str) -> Result<crate::worldspec::WorldSpec, String> {
+    parse_world_reply_all(reply).map_err(|mut e| e.swap_remove(0))
 }
 
 /// Where the model lives: nd-world's AI queue, or a direct OpenAI-compatible endpoint.
@@ -188,6 +162,47 @@ impl Backend {
         }
     }
 
+    /// One request over the turns so far (the pack's system prompt first). A direct model
+    /// gets the whole conversation; nd-world takes one user text, so the earlier turns are
+    /// folded into it.
+    pub async fn ask(&self, system: &str, turns: &[Turn]) -> Result<String, String> {
+        match self {
+            Backend::World(b, model) => {
+                let user = match turns {
+                    [only] => only.content.clone(),
+                    [first, rest @ ..] => {
+                        let mut u = first.content.clone();
+                        for t in rest {
+                            let label = if t.role == "assistant" {
+                                "Your previous reply"
+                            } else {
+                                "Feedback"
+                            };
+                            u.push_str(&format!("\n\n{label}:\n{}", t.content));
+                        }
+                        u
+                    }
+                    [] => String::new(),
+                };
+                b.chat(system, &user, model.as_deref())
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            Backend::Direct(d) => {
+                let mut msgs = vec![ndcart_bridge::Msg::system(system)];
+                msgs.extend(
+                    turns
+                        .iter()
+                        .map(|t| ndcart_bridge::Msg::new(t.role, &t.content)),
+                );
+                d.chat_messages(&msgs, &ndcart_bridge::ChatOptions::default())
+                    .await
+                    .map(|r| r.content)
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+
     /// The world's location names for lore-grounded naming (nd-world only).
     pub async fn locations(&self) -> Result<Vec<String>, String> {
         match self {
@@ -247,18 +262,50 @@ fn too_long(prompt: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Run the shared repair loop against a connected model.
+async fn solve<T>(
+    backend: &Backend,
+    system: &str,
+    first_user: String,
+    rounds: usize,
+    what: &str,
+    judge: impl Fn(&str) -> Result<T, Vec<String>>,
+) -> Result<Outcome<T>, Failure> {
+    let job = Job {
+        first_user,
+        rounds,
+        what,
+    };
+    repair::run(
+        &job,
+        &|_| {},
+        |turns| async move { backend.ask(system, &turns).await },
+        judge,
+    )
+    .await
+}
+
 /// Draft a battle-map spec from `prompt`.
 pub async fn draft(cfg: &Config, prompt: &str, ctx: &Context) -> Result<Drafted, String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
     let system = with_context(aipack::system(Kind::Map), &ctx.with_lore(&backend).await?);
-    let spec = draft_with(prompt, 2, |user| {
-        let (backend, system) = (&backend, system.clone());
-        async move { backend.chat(&system, &user).await }
-    })
+    let out = solve(
+        &backend,
+        &system,
+        format!("Design this map: {}", prompt.trim()),
+        2,
+        "spec",
+        parse_reply_all,
+    )
     .await?;
-    let warnings = warnings_of(&spec);
-    Ok(Drafted { spec, warnings })
+    let warnings = warnings_of(&out.value);
+    Ok(Drafted {
+        spec: out.value,
+        warnings,
+        attempts: out.attempts,
+        seconds: out.seconds,
+    })
 }
 
 /// Draft a WORLD spec from `prompt`.
@@ -270,16 +317,16 @@ pub async fn draft_world(
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
     let system = with_context(aipack::system(Kind::World), &ctx.with_lore(&backend).await?);
-    draft_loop(
-        prompt,
+    Ok(solve(
+        &backend,
+        &system,
+        format!("Design this map: {}", prompt.trim()),
         2,
-        |user| {
-            let (backend, system) = (&backend, system.clone());
-            async move { backend.chat(&system, &user).await }
-        },
-        parse_world_reply,
+        "spec",
+        parse_world_reply_all,
     )
-    .await
+    .await?
+    .value)
 }
 
 /// The user turn for a refinement: the current floor, the pins, the request.
@@ -308,24 +355,29 @@ pub fn refine_user_turn(
 pub fn judge_refine(
     current: &ndcart_core::mapspec::FloorSpec,
     pins: Vec<String>,
-) -> impl Fn(&str) -> Result<MapSpec, String> {
+) -> impl Fn(&str) -> Result<MapSpec, Vec<String>> {
     let current = current.clone();
     move |reply: &str| {
-        let spec = parse_reply(reply)?;
+        let spec = parse_reply_all(reply)?;
         if spec.floors.len() != 1 {
-            return Err("The spec must have exactly one floor.".into());
+            return Err(vec!["The spec must have exactly one floor.".into()]);
         }
+        let mut complaints = Vec::new();
         for id in &pins {
             let before = current.rooms.iter().find(|r| &r.id == id);
             let after = spec.floors[0].rooms.iter().find(|r| &r.id == id);
             match (before, after) {
                 (Some(b), Some(a)) if a.name == b.name && a.w == b.w && a.h == b.h && a.kind == b.kind => {}
-                (Some(_), Some(_)) => return Err(format!("Pinned room '{id}' was changed; pinned rooms must keep their id, name, w, h and kind.")),
-                (Some(_), None) => return Err(format!("Pinned room '{id}' was dropped; pinned rooms must stay.")),
-                (None, _) => return Err(format!("'{id}' is not a room of the current map and cannot be pinned.")),
+                (Some(_), Some(_)) => complaints.push(format!("Pinned room '{id}' was changed; pinned rooms must keep their id, name, w, h and kind.")),
+                (Some(_), None) => complaints.push(format!("Pinned room '{id}' was dropped; pinned rooms must stay.")),
+                (None, _) => complaints.push(format!("'{id}' is not a room of the current map and cannot be pinned.")),
             }
         }
-        Ok(spec)
+        if complaints.is_empty() {
+            Ok(spec)
+        } else {
+            Err(complaints)
+        }
     }
 }
 
@@ -345,22 +397,9 @@ pub async fn refine(
     );
     let first = refine_user_turn(current, pins, instruction)?;
     let judge = judge_refine(current, pins.to_vec());
-    // The repair rounds quote the complaint after the same current map and request.
-    let mut turn = first.clone();
-    let mut last = String::new();
-    for _ in 0..3 {
-        let reply = backend.chat(&system, &turn).await?;
-        match judge(&reply) {
-            Ok(spec) => return Ok(spec),
-            Err(problem) => {
-                turn = format!("{first}\n\nYour previous reply was refused. {problem}\nReply again with the corrected JSON object only.");
-                last = problem;
-            }
-        }
-    }
-    Err(format!(
-        "the model did not produce a usable revision after 3 tries; last problem: {last}"
-    ))
+    Ok(solve(&backend, &system, first, 3, "revision", judge)
+        .await?
+        .value)
 }
 
 /// Clean a list of tags: lowercase, 1-24 characters of letters, digits, spaces and
@@ -383,7 +422,11 @@ pub fn clean_tags(raw: &[String]) -> Vec<String> {
     out
 }
 
-fn judge_tags(reply: &str) -> Result<Vec<String>, String> {
+fn judge_tags(reply: &str) -> Result<Vec<String>, Vec<String>> {
+    judge_tags_one(reply).map_err(|e| vec![e])
+}
+
+fn judge_tags_one(reply: &str) -> Result<Vec<String>, String> {
     let json = extract_json(reply)
         .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
     let v: serde_json::Value =
@@ -417,16 +460,101 @@ pub async fn suggest_tags(cfg: &Config, name: &str, prompt: &str) -> Result<Vec<
             prompt
         }
     );
-    draft_loop(
-        &subject,
+    Ok(solve(
+        &backend,
+        aipack::system(Kind::Tags),
+        subject,
         1,
-        |user| {
-            let backend = &backend;
-            async move { backend.chat(aipack::system(Kind::Tags), &user).await }
-        },
+        "tag list",
         judge_tags,
     )
-    .await
+    .await?
+    .value)
+}
+
+fn hex_colour(c: &str) -> bool {
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|h| h.is_ascii_hexdigit())
+}
+
+/// A theme-pack plan is good when it has a name, a style, 4-8 hex colours, 4-6 materials and
+/// 6-12 props, each with a prompt, 1-4 tags, and (props) a placement.
+pub fn judge_theme_pack(reply: &str) -> Result<serde_json::Value, Vec<String>> {
+    let json = extract_json(reply).ok_or_else(|| vec![NO_JSON.to_string()])?;
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| vec![format!("That was not valid JSON: {e}.")])?;
+    let mut bad: Vec<String> = Vec::new();
+    let text = |k: &str, max: usize| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .is_some_and(|t| !t.trim().is_empty() && t.chars().count() <= max)
+    };
+    if !text("name", 60) {
+        bad.push("\"name\" must be a string of 1-60 characters.".into());
+    }
+    if !text("style", 120) {
+        bad.push("\"style\" must be a string of 1-120 characters.".into());
+    }
+    match v.get("palette").and_then(|p| p.as_array()) {
+        Some(p) if (4..=8).contains(&p.len()) => {
+            for c in p {
+                if !c.as_str().is_some_and(hex_colour) {
+                    bad.push(format!("palette entry {c} must be a \"#rrggbb\" colour."));
+                }
+            }
+        }
+        _ => bad.push("\"palette\" must be an array of 4-8 \"#rrggbb\" colours.".into()),
+    }
+    for (key, lo, hi, placed) in [("materials", 4, 6, false), ("props", 6, 12, true)] {
+        match v.get(key).and_then(|m| m.as_array()) {
+            Some(items) if (lo..=hi).contains(&items.len()) => {
+                for (i, it) in items.iter().enumerate() {
+                    let s = |k: &str| {
+                        it.get(k)
+                            .and_then(|x| x.as_str())
+                            .is_some_and(|t| !t.trim().is_empty())
+                    };
+                    let tags = it
+                        .get("tags")
+                        .and_then(|t| t.as_array())
+                        .map_or(0, |t| t.len());
+                    if !s("name") || !s("prompt") || !(1..=4).contains(&tags) {
+                        bad.push(format!("{key}[{i}] needs a name, a prompt and 1-4 tags."));
+                    }
+                    if placed
+                        && !matches!(
+                            it.get("placement").and_then(|p| p.as_str()),
+                            Some("floor" | "wall")
+                        )
+                    {
+                        bad.push(format!(
+                            "{key}[{i}].placement must be \"floor\" or \"wall\"."
+                        ));
+                    }
+                }
+            }
+            _ => bad.push(format!("\"{key}\" must be an array of {lo}-{hi} items.")),
+        }
+    }
+    if bad.is_empty() {
+        Ok(v)
+    } else {
+        Err(bad)
+    }
+}
+
+/// Turn a theme into an art-pack plan (the GM makes the pictures).
+pub async fn theme_pack(cfg: &Config, theme: &str) -> Result<serde_json::Value, String> {
+    let backend = Backend::connect(cfg).await?;
+    Ok(solve(
+        &backend,
+        aipack::system(Kind::ThemePack),
+        format!("Theme: {theme}"),
+        2,
+        "plan",
+        judge_theme_pack,
+    )
+    .await?
+    .value)
 }
 
 pub async fn run(args: Vec<String>) -> Result<(), String> {
@@ -496,6 +624,40 @@ mod tests {
 
     const GOOD: &str = r#"{"name":"Crypt","floors":[{"name":"G","rooms":[{"id":"a","name":"Nave","w":8,"h":6},{"id":"b","name":"Ossuary","w":5,"h":5}],"links":[{"a":"a","b":"b","kind":"secret"}]}]}"#;
 
+    /// Drive the repair loop with canned replies (the last repeats); returns the result and
+    /// the turns each ask carried.
+    async fn drive<T>(
+        first: &str,
+        rounds: usize,
+        replies: &[&str],
+        judge: impl Fn(&str) -> Result<T, Vec<String>>,
+    ) -> (Result<Outcome<T>, Failure>, Vec<Vec<Turn>>) {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let mut i = 0;
+        let job = Job {
+            first_user: first.into(),
+            rounds,
+            what: "spec",
+        };
+        let out = repair::run(
+            &job,
+            &|_| {},
+            |turns| {
+                seen.lock().unwrap().push(turns);
+                let r = replies[i.min(replies.len() - 1)].to_string();
+                i += 1;
+                async move { Ok(r) }
+            },
+            judge,
+        )
+        .await;
+        (out, seen.into_inner().unwrap())
+    }
+
+    fn last_user(turns: &[Turn]) -> &str {
+        &turns.last().unwrap().content
+    }
+
     #[test]
     fn json_is_found_through_fences_and_chatter_and_braces_in_strings() {
         assert_eq!(
@@ -542,19 +704,14 @@ mod tests {
             e.contains("Allowed in a room: id, name, kind, w, h, lit"),
             "{e}"
         );
-        let replies = [with_props, GOOD.to_string()];
-        let (mut i, mut seen) = (0, Vec::new());
-        let spec = draft_with("a crypt", 2, |u| {
-            seen.push(u);
-            let r = replies[i].clone();
-            i += 1;
-            async move { Ok(r) }
-        })
-        .await
-        .unwrap();
-        assert_eq!(spec.name, "Crypt");
+        let (out, seen) = drive("a crypt", 2, &[&with_props, GOOD], parse_reply_all).await;
+        assert_eq!(out.unwrap().value.name, "Crypt");
         assert_eq!(seen.len(), 2);
-        assert!(seen[1].contains("Unknown field(s)"), "{}", seen[1]);
+        assert!(
+            last_user(&seen[1]).contains("Unknown field(s)"),
+            "{:?}",
+            seen[1]
+        );
         let w =
             parse_world_reply(r#"{"name":"X","places":[{"name":"P","x":0.5,"y":0.5,"icon":"s"}]}"#)
                 .unwrap_err();
@@ -563,26 +720,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_reply_is_sent_back_with_the_reason_and_the_next_try_can_succeed() {
-        let mut seen: Vec<String> = Vec::new();
-        let replies = [
-            "not json at all".to_string(),
-            GOOD.replace(r#""kind":"secret""#, r#""kind":"warp""#),
-            GOOD.to_string(),
-        ];
-        let mut i = 0;
-        let spec = draft_with("a crypt", 2, |user| {
-            seen.push(user);
-            let r = replies[i].clone();
-            i += 1;
-            async move { Ok(r) }
-        })
-        .await
-        .unwrap();
-        assert_eq!(spec.name, "Crypt");
-        assert_eq!(seen.len(), 3);
-        assert!(seen[0].contains("a crypt") && !seen[0].contains("refused"));
-        assert!(seen[1].contains("refused") && seen[1].contains("no JSON"));
-        assert!(seen[2].contains("schema"), "{}", seen[2]);
+        let bad_kind = GOOD.replace(r#""kind":"secret""#, r#""kind":"warp""#);
+        let (out, seen) = drive(
+            "Design this map: a crypt",
+            2,
+            &["not json at all", &bad_kind, GOOD],
+            parse_reply_all,
+        )
+        .await;
+        let out = out.unwrap();
+        assert_eq!((out.value.name.as_str(), out.attempts), ("Crypt", 3));
+        assert!(seen[0][0].content.contains("a crypt") && seen[0].len() == 1);
+        assert!(last_user(&seen[1]).contains("refused") && last_user(&seen[1]).contains("no JSON"));
+        assert!(last_user(&seen[2]).contains("schema"), "{:?}", seen[2]);
+        // The conversation grows: first request, each refused reply, each complaint.
+        assert_eq!(seen[2].len(), 5);
+        assert_eq!(seen[2][3].content, bad_kind);
     }
 
     #[tokio::test]
@@ -597,24 +750,19 @@ mod tests {
         )
         .unwrap_err()
         .contains("use one of"));
-        let replies = [r#"{"name":"X","land":3}"#.to_string(), good.to_string()];
-        let mut i = 0;
-        let mut seen = Vec::new();
-        let spec = draft_loop(
+        let (out, seen) = drive(
             "an archipelago",
             2,
-            |u| {
-                seen.push(u);
-                let r = replies[i].clone();
-                i += 1;
-                async move { Ok(r) }
-            },
-            parse_world_reply,
+            &[r#"{"name":"X","land":3}"#, good],
+            parse_world_reply_all,
         )
-        .await
-        .unwrap();
-        assert_eq!(spec.name, "Isles");
-        assert!(seen[1].contains("land must be"), "{}", seen[1]);
+        .await;
+        assert_eq!(out.unwrap().value.name, "Isles");
+        assert!(
+            last_user(&seen[1]).contains("land must be"),
+            "{:?}",
+            seen[1]
+        );
         let world_prompt = aipack::system(Kind::World);
         assert!(world_prompt.contains("biomes") && world_prompt.contains("0..1"));
     }
@@ -666,17 +814,23 @@ mod tests {
         // Changing a pinned room, dropping it, or pinning a stranger is refused with the reason.
         assert!(judge(&GOOD.replace(r#""w":8"#, r#""w":9"#))
             .unwrap_err()
+            .join(" ")
             .contains("was changed"));
         assert!(judge(&GOOD.replace("Nave", "Chapel"))
             .unwrap_err()
+            .join(" ")
             .contains("was changed"));
         let no_a = r#"{"name":"Crypt","floors":[{"name":"G","rooms":[{"id":"b","name":"Ossuary","w":5,"h":5}],"links":[]}]}"#;
-        assert!(judge(no_a).unwrap_err().contains("was dropped"));
+        assert!(judge(no_a).unwrap_err().join(" ").contains("was dropped"));
         assert!(judge_refine(&current, vec!["zzz".into()])(GOOD)
             .unwrap_err()
+            .join(" ")
             .contains("not a room"));
         let two = r#"{"name":"C","floors":[{"name":"G","rooms":[{"id":"a","name":"Nave","w":8,"h":6}],"links":[]},{"name":"H","rooms":[{"id":"a","name":"Nave","w":8,"h":6}],"links":[]}]}"#;
-        assert!(judge(two).unwrap_err().contains("exactly one floor"));
+        assert!(judge(two)
+            .unwrap_err()
+            .join(" ")
+            .contains("exactly one floor"));
     }
 
     #[tokio::test]
@@ -697,46 +851,64 @@ mod tests {
             8
         );
         assert_eq!(
-            judge_tags("```{\"tags\":[\"Crate\",\"wooden\",\"storage\"]}```").unwrap(),
+            judge_tags_one("```{\"tags\":[\"Crate\",\"wooden\",\"storage\"]}```").unwrap(),
             ["crate", "wooden", "storage"]
         );
-        assert!(judge_tags("{\"tags\":[\"a!\"]}")
+        assert!(judge_tags_one("{\"tags\":[\"a!\"]}")
             .unwrap_err()
             .contains("at least 2"));
-        assert!(judge_tags("{\"nope\":1}").unwrap_err().contains("tags"));
-        let replies = [
-            "tags: crate, wooden".to_string(),
-            "{\"tags\":[\"crate\",\"cargo\"]}".to_string(),
-        ];
-        let mut i = 0;
-        let got = draft_loop(
+        assert!(judge_tags_one("{\"nope\":1}").unwrap_err().contains("tags"));
+        let (out, seen) = drive(
             "Prop name: Crate",
             1,
-            |_| {
-                let r = replies[i].clone();
-                i += 1;
-                async move { Ok(r) }
-            },
+            &["tags: crate, wooden", "{\"tags\":[\"crate\",\"cargo\"]}"],
             judge_tags,
         )
-        .await
-        .unwrap();
-        assert_eq!(got, ["crate", "cargo"]);
+        .await;
+        assert_eq!(out.unwrap().value, ["crate", "cargo"]);
+        // The first turn is the subject itself (it used to say "Design this map:").
+        assert_eq!(seen[0][0].content, "Prop name: Crate");
         assert!(aipack::system(Kind::Tags).contains("\"tags\""));
     }
 
     #[tokio::test]
+    async fn a_theme_pack_plan_is_judged_and_a_bad_palette_is_repaired_once() {
+        let good = |palette: &str| {
+            format!(
+                r#"{{"name":"Ice","style":"cold","palette":{palette},"materials":[{m},{m},{m},{m}],"props":[{p},{p},{p},{p},{p},{p}]}}"#,
+                m = r#"{"name":"Snow","prompt":"snow, top-down","tags":["snow"]}"#,
+                p = r#"{"name":"Sled","prompt":"a sled","tags":["sled"],"placement":"floor"}"#,
+            )
+        };
+        let ok = good(r##"["#112233","#445566","#778899","#aabbcc"]"##);
+        let bad = good(r##"["blue","#445566","#778899"]"##);
+        let e = judge_theme_pack(&bad).unwrap_err();
+        assert!(e.iter().any(|c| c.contains("palette")), "{e:?}");
+        let (out, seen) = drive("Theme: ice", 2, &[&bad, &ok], judge_theme_pack).await;
+        assert_eq!(out.unwrap().attempts, 2);
+        assert!(last_user(&seen[1]).contains("palette"));
+        assert!(judge_theme_pack(&ok.replace("floor", "ceiling")).is_err());
+    }
+
+    #[tokio::test]
     async fn it_gives_up_after_the_repairs_and_passes_a_backend_error_straight_through() {
-        let e = draft_with("x", 1, |_| async { Ok("nope".to_string()) })
-            .await
-            .unwrap_err();
-        assert!(e.contains("2 tries"), "{e}");
-        let e = draft_with("x", 2, |_| async {
-            Err::<String, _>("nd-world refused it".to_string())
-        })
+        let (e, _) = drive("x", 1, &["nope"], parse_reply_all).await;
+        let e = e.unwrap_err();
+        assert!(e.message.contains("2 tries"), "{e}");
+        let job = Job {
+            first_user: "x".into(),
+            rounds: 2,
+            what: "spec",
+        };
+        let e = repair::run(
+            &job,
+            &|_| {},
+            |_| async { Err::<String, _>("nd-world refused it".to_string()) },
+            parse_reply_all,
+        )
         .await
         .unwrap_err();
-        assert_eq!(e, "nd-world refused it");
+        assert_eq!(e.message, "nd-world refused it");
         let system_prompt = aipack::system(Kind::Map);
         assert!(system_prompt.contains("\"links\"") && system_prompt.contains("reachable"));
     }

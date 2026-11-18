@@ -234,7 +234,7 @@ pub(crate) async fn draft_spec(
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;
         Ok(Json(
-            serde_json::json!({ "spec": d.spec, "warnings": d.warnings }),
+            serde_json::json!({ "spec": d.spec, "warnings": d.warnings, "attempts": d.attempts, "seconds": d.seconds }),
         ))
     }
     #[cfg(not(feature = "bridge"))]
@@ -632,21 +632,9 @@ pub(crate) async fn theme_pack(
     let cfg = app
         .resolve_ai()
         .map_err(|m| ApiError(CoreError::NotFound(m)))?;
-    let backend = draft::Backend::connect(&cfg)
+    let plan = draft::theme_pack(&cfg, &theme)
         .await
         .map_err(|m| ApiError(CoreError::Invalid(m)))?;
-    let system = crate::aipack::system(crate::aipack::Kind::ThemePack);
-    let reply = backend
-        .chat(system, &format!("Theme: {theme}"))
-        .await
-        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
-    let plan = draft::extract_json(&reply)
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .ok_or_else(|| {
-            ApiError(CoreError::Invalid(
-                "the model's answer was not the expected JSON; try again".into(),
-            ))
-        })?;
     Ok(Json(serde_json::json!({ "plan": plan })))
 }
 

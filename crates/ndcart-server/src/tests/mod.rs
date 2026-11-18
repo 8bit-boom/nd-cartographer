@@ -9,6 +9,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+#[cfg(feature = "bridge")]
+mod ai_loop;
 mod ai_pack;
 mod spec_problems;
 

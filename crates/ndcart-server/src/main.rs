@@ -27,6 +27,8 @@ mod packs;
 mod pdf;
 #[cfg(feature = "bridge")]
 mod publish;
+#[cfg(feature = "bridge")]
+mod repair;
 mod routes;
 mod speccheck;
 mod specshape;

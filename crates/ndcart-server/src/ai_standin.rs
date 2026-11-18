@@ -330,7 +330,7 @@ async fn chat(State(s): State<St>, Json(body): Json<Value>) -> (StatusCode, Json
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "bridge"))]
 /// A running stand-in (for tests): its `/v1` address and what it has seen.
 #[allow(dead_code)]
 pub struct Handle {
@@ -340,7 +340,7 @@ pub struct Handle {
 }
 
 /// Start a stand-in on a free loopback port, in this process.
-#[cfg(test)]
+#[cfg(all(test, feature = "bridge"))]
 pub async fn spawn(opts: Options) -> Handle {
     let (app, stats) = router(opts);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0")
