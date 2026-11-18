@@ -262,6 +262,46 @@ cannot express), and `publish` started a nested tokio runtime.
   Fix found on the way: markers, regions, routes and labels now grow the export extent
   (they were cropped from exports of maps without an explicit canvas).
 
+## Server module layout (`crates/ndcart-server/src`)
+
+```
+main.rs        mod list, shared `use`s, build_router (EVERY route is registered here), the CLI
+               entry points (serve, bench, convert, import-pack, ...) and `main`
+state.rs       AppState / `App`, the tile and wall caches and their invalidation (invalidate_dirty,
+               invalidate_doc), ApiError, and the JSON views of a project (FloorView, DocView)
+routes/        the HTTP handlers, grouped by what they serve (routes/mod.rs lists the modules)
+  system.rs      /health, the web UI files, /api/doctor
+  docs.rs        projects: list/create/get (full and `lite`), floors, checkpoints, history and revert,
+                 lint, floor-spec, stats, search, style, the SSE change feed
+  edit.rs        /ops, /undo, /redo, prefabs, scatter, furnish, reroll, stock-room, underlay,
+                 generate / generate-map
+  tiles.rs       /tiles/... and the player /preview
+  export.rs      png/webp/avif, uvtt, foundry, pdf, svg, roll20, /api/convert, /bundle (backup)
+  import.rs      /api/import/uvtt, /foundry, /bundle (restore)
+  assets.rs      materials, props (stamps), pictures, Dungeondraft packs, make-material/make-stamp
+  ai.rs          ai image jobs, draft/refine/ask, AI model settings, nd-world entities
+  proposals.rs   map and world proposals (preview, accept, reject)
+  table.rs       the shared table screen
+bundle.rs      the .ndmapz backup format (build and validated read); also the `ndcart bundle` CLI
+store.rs       StoredDoc / Store, the journal wiring, persistence (save_doc, save_doc_edit, SnapshotJob)
+tiles.rs       the tiny-skia baker (tiles, full-map render, exports' pixels)
+assets.rs      the content-addressed picture store and the custom material/prop library
+cache.rs       the byte-budget LRU used by the tile, asset and pixmap caches
+auth.rs        token gate, same-origin and Host guards, security headers, table tokens
+bench.rs       `ndcart bench` and `bench --large` (budgets)
+publish.rs, draft.rs   the nd-world client side (cargo feature `bridge`)
+mcp.rs, ask.rs, aijobs.rs, ai_settings.rs, doctor.rs, packs.rs, pdf.rs, convert.rs, synth.rs,
+text.rs, worldspec.rs, golden.rs   feature modules
+tests/mod.rs   router-level tests and their helpers (`test_app`, `call`, `new_doc`, `post_ops_json`)
+```
+
+Adding a feature: put its handlers in the `routes/` module that fits (or add a new
+module: a file in `routes/`, a line in `routes/mod.rs`, a `use routes::<name>::*;` in
+`main.rs`), mark them `pub(crate)`, register them in `build_router`, and write its
+tests in `tests/<feature>.rs` (add `mod <feature>;` to `tests/mod.rs`, start the file
+with `use super::*;`). Route modules start with `use crate::*;`, which brings in the
+shared imports and the other modules' items.
+
 ## Floors
 
 All floors share one journal; each entry carries `floor: Option<String>` and undo/replay only touch entries for their own floor
