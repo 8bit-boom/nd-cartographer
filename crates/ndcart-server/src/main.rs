@@ -2583,9 +2583,9 @@ async fn doc_history(
 }
 
 /// `POST /api/docs/{id}/revert` `{floor, index}` - the history browser's
-/// jump: the floor's state at `index` is rebuilt by replaying the journal
-/// prefix, and the difference is applied as ONE undoable batch (nothing is
-/// lost; undo returns to now).
+/// jump: the floor's state at `index` is reached by applying the stored
+/// inverses of every later entry, newest first, as ONE undoable batch
+/// (nothing is lost; undo returns to now).
 async fn revert_to(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -2607,7 +2607,7 @@ async fn revert_to(
         Some(f) => f.clone(),
         None => doc.floors[0].id.clone(),
     };
-    let idx = floors_by_id(&doc.floors, &fid)?;
+    floors_by_id(&doc.floors, &fid)?;
     let journal = &doc.journal;
     if index > journal.len() {
         return Err(ApiError(CoreError::Invalid(format!(
@@ -2615,13 +2615,20 @@ async fn revert_to(
             journal.len()
         ))));
     }
-    let mut at_index = ndcart_core::FloorDoc::new(fid.clone(), doc.floors[idx].name.clone());
-    for e in journal.entries().iter().take(index) {
-        if e.is_for(&fid) {
-            ndcart_core::journal::apply_op(&mut at_index, &e.op)?;
-        }
+    // Walk the journal's stored inverses back from the newest entry down to
+    // `index`. Every layer comes back, and it works after compaction, floor
+    // duplication and checkpoint restore (nothing is replayed from empty).
+    let ops: Vec<ndcart_core::Op> = journal.entries()[index..]
+        .iter()
+        .rev()
+        .filter(|e| e.is_for(&fid))
+        .map(|e| e.inverse.clone())
+        .collect();
+    if ops.is_empty() {
+        return Ok(Json(
+            serde_json::json!({ "ok": true, "unchanged": true, "rev": doc.rev, "restored_to": index }),
+        ));
     }
-    let ops = ndcart_core::journal::grid_replace_ops(&doc.floors[idx], &at_index)?;
     doc.apply_ops(&fid, &[ndcart_core::Op::Batch { ops }])?;
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), doc);
@@ -7428,5 +7435,160 @@ mod tests {
         let (st, reverted) = call(&router, "GET", &uri, vec![]).await;
         assert_eq!(st, StatusCode::OK);
         assert_ne!(painted, reverted, "revert must not serve the old tile");
+    }
+
+    #[tokio::test]
+    async fn revert_keeps_duplicated_content_and_restores_every_layer() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let (id, f) = new_doc(&router, "V").await;
+        let cells: Vec<serde_json::Value> = (0..100)
+            .map(|i| serde_json::json!({"x": i % 10, "y": i / 10}))
+            .collect();
+        let stamp = serde_json::json!({"id":"st1","asset":"barrel","x":1.5,"y":1.5,
+            "scale":1.0,"rotation":0.0,"flip":false,"tint":null,"shadow":true,"gen":null});
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","space":"sp_a","cells":cells},
+                {"t":"add_stamp","stamp":stamp}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // Duplicate the floor: its content is not in the journal.
+        let (st, b) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/floors"),
+            serde_json::json!({"action":"add","name":"Copy","copy_from":f})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&b));
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let dv = jv(&d);
+        let copy = dv["floors"][1]["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            dv["floors"][1]["grid"]["cells"].as_array().unwrap().len(),
+            100
+        );
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::json!({"floor": copy, "ops": [
+                {"t":"paint_cells","space":"sp_a","cells":[{"x":50,"y":50}]}]})
+            .to_string()
+            .into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let n = app.store.read().await.docs[&id].journal.len() - 1;
+        let revert = |floor: String, index: usize| {
+            let router = router.clone();
+            let id = id.clone();
+            async move {
+                call(
+                    &router,
+                    "POST",
+                    &format!("/api/docs/{id}/revert"),
+                    serde_json::json!({"floor": floor, "index": index})
+                        .to_string()
+                        .into_bytes(),
+                )
+                .await
+            }
+        };
+        let (st, _) = revert(copy.clone(), n).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let dv = jv(&d);
+        assert_eq!(
+            dv["floors"][1]["grid"]["cells"].as_array().unwrap().len(),
+            100
+        );
+        assert_eq!(dv["floors"][1]["stamps"].as_array().unwrap().len(), 1);
+
+        // A stamp added on the first floor, reverted away, then undone.
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [{"t":"add_stamp","stamp":
+                {"id":"st2","asset":"crate","x":3.5,"y":3.5,"scale":1.0,"rotation":0.0,
+                 "flip":false,"tint":null,"shadow":true,"gen":null}}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let stamps = |dv: &serde_json::Value| dv["floors"][0]["stamps"].as_array().unwrap().len();
+        let at = app.store.read().await.docs[&id].journal.len() - 1;
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(stamps(&jv(&d)), 2);
+        let (st, _) = revert(f.clone(), at).await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(
+            stamps(&jv(&d)),
+            1,
+            "the stamp is gone after reverting before it"
+        );
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/undo"),
+            serde_json::json!({"floor": f}).to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(stamps(&jv(&d)), 2, "undo brings the stamp back");
+    }
+
+    #[tokio::test]
+    async fn revert_after_journal_compaction_does_not_empty_the_floor() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let (id, f) = new_doc(&router, "C").await;
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        {
+            let mut store = app.store.write().await;
+            let doc = store.docs.get_mut(&id).unwrap();
+            for i in 0..4100 {
+                let op: ndcart_core::Op = serde_json::from_value(serde_json::json!(
+                    {"t":"paint_cells","space":"sp_a","cells":[{"x":i % 200,"y":i / 200}]}
+                ))
+                .unwrap();
+                doc.apply_ops(&f, &[op]).unwrap();
+            }
+            assert!(doc.journal.len() < 4100, "the journal compacted");
+        }
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/revert"),
+            serde_json::json!({"floor": f, "index": 0})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, d) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let cells = jv(&d)["floors"][0]["grid"]["cells"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert!(
+            cells > 0,
+            "reverting inside the retained window keeps older content"
+        );
     }
 }

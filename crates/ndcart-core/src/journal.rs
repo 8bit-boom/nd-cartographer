@@ -849,65 +849,6 @@ pub fn op_summary(op: &Op) -> String {
     }
 }
 
-/// History-browser helper (honest-limits closure): ops that turn `current`'s
-/// grid into `target`'s — spaces upserted/removed, cells cleared and
-/// repainted, marks replaced. One batch's worth; the caller wraps it.
-pub fn grid_replace_ops(
-    current: &crate::doc::FloorDoc,
-    target: &crate::doc::FloorDoc,
-) -> CoreResult<Vec<Op>> {
-    let mut ops = Vec::new();
-    // Spaces: upsert everything in target; remove current's strays.
-    for (id, space) in &target.grid.spaces {
-        ops.push(Op::UpsertSpace {
-            space: space.clone(),
-        });
-        let _ = id;
-    }
-    let removed: Vec<String> = current
-        .grid
-        .spaces
-        .keys()
-        .filter(|id| !target.grid.spaces.contains_key(*id))
-        .cloned()
-        .collect();
-    for id in removed {
-        ops.push(Op::RemoveSpace { id });
-    }
-    // Cells: clear every current painted cell, paint target's cells grouped
-    // by space.
-    let current_cells: Vec<CellKey> = current.grid.cells().map(|(c, _)| c).collect();
-    if !current_cells.is_empty() {
-        ops.push(Op::PaintCells {
-            cells: current_cells,
-            space: None,
-        });
-    }
-    let mut by_space: std::collections::BTreeMap<String, Vec<CellKey>> = Default::default();
-    for (c, s) in target.grid.cells() {
-        by_space.entry(s.to_string()).or_default().push(c);
-    }
-    for (space, cells) in by_space {
-        ops.push(Op::PaintCells {
-            cells,
-            space: Some(space),
-        });
-    }
-    // Marks: clear current's, set target's.
-    for k in current.grid.marks.keys() {
-        ops.push(Op::SetMark {
-            edge: *k,
-            mark: None,
-        });
-    }
-    for (k, m) in &target.grid.marks {
-        ops.push(Op::SetMark {
-            edge: *k,
-            mark: Some(*m),
-        });
-    }
-    Ok(ops)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
