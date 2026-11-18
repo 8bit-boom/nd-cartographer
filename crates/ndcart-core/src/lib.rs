@@ -8,6 +8,7 @@
 
 pub mod assetmeta;
 pub mod base64;
+pub mod dirty;
 pub mod doc;
 pub mod error;
 pub mod extract;
@@ -34,6 +35,7 @@ pub mod visibility;
 pub mod walls;
 pub mod zone;
 
+pub use dirty::{dirty_for_ops, Dirty};
 pub use doc::{
     DocKind, FloorDoc, ImportedWall, Label, Light, Manifest, MapGrid, MapGridKind, NdWorldLink,
     StyleProfile, Underlay,

@@ -30,8 +30,8 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/api/docs/{id}/ops` | `{floor, ops:[…]}` | Applies a batch as journal entries; `{"ok":true,"rev":N}`. ≤ 500 ops per request. |
-| POST | `/api/docs/{id}/undo` | `{floor}` | Applies the last entry's inverse as a new entry; `{"ok":true,"rev":N}`. |
+| POST | `/api/docs/{id}/ops` | `{floor, ops:[…]}` | Applies a batch as journal entries; `{"ok":true,"rev":N,"dirty":…}`. ≤ 500 ops per request. `dirty` says which map cells the edit can have redrawn: `[x0,y0,x1,y1]` (inclusive cell rectangle, already padded for edge blends and wall strokes), `[]` when no tile pixel changed (a light), or `null` when anything may have (text, sun, relief, an era, or an op that is not purely local). Tiles outside the rectangle are byte-identical to before. |
+| POST | `/api/docs/{id}/undo` | `{floor}` | Applies the last entry's inverse as a new entry; `{"ok":true,"rev":N,"dirty":…}` (same `dirty` as `/ops`). |
 | POST | `/api/docs/{id}/floors` | `{action:"add",name,copy_from?}` / `{action:"rename",floor,name}` / `{action:"remove",floor}` / `{action:"move",floor,to}` | Floor structure. Max 64 floors, last floor cannot be removed. `{"ok":true,"rev":N,"floor":id?}`. |
 | POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
 

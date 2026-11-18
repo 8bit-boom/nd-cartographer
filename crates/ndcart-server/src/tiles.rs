@@ -705,6 +705,30 @@ fn apply_stamps_hidden(
     }
 }
 
+/// How far a stamp's drawing (and its shadow) can reach from its centre, in
+/// cells. None when the asset is unknown, so callers treat the edit as global.
+/// Mirrors the reach `apply_stamps_hidden` uses to size a stamp's sprite.
+pub fn stamp_reach_cells(st: &ndcart_core::Stamp) -> Option<f32> {
+    // A couple of pixels at the smallest zoom (16 px per cell) for anti-aliasing.
+    let aa = 2.0 / PPC0 as f32;
+    if let Some(def) = ndcart_paint::find_stamp(&st.asset) {
+        let (pw, ph) = (def.size[0] * st.scale, def.size[1] * st.scale);
+        let throw = if st.shadow {
+            def.height * st.scale * 0.12 * 1.6
+        } else {
+            0.0
+        };
+        return Some((pw * pw + ph * ph).sqrt() * 0.5 + throw * 2.0 + aa);
+    }
+    let assets = crate::assets::global();
+    let c = assets.find_custom(&st.asset, "stamp")?;
+    let img = assets.get_pixmap(&c.asset)?;
+    let pw = c.size * st.scale;
+    let ph = pw * img.height() as f32 / img.width().max(1) as f32;
+    let throw = if st.shadow { pw.min(ph) * 0.1 } else { 0.0 };
+    Some((pw * pw + ph * ph).sqrt() * 0.5 + throw * 2.0 + aa)
+}
+
 /// A square icon of a stamp (for the palette), on a transparent background.
 /// A square icon of a picture (a custom stamp), fitted with a margin.
 pub fn picture_icon(img: &tiny_skia::Pixmap, px: u32) -> Vec<u8> {

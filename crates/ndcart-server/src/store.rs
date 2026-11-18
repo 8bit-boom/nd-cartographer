@@ -454,6 +454,11 @@ impl StoredDoc {
         Ok(())
     }
 
+    /// The op an undo on this floor would apply, without applying it.
+    pub fn peek_undo(&self, floor_id: &str) -> Option<ndcart_core::Op> {
+        self.journal.peek_undo(floor_id).cloned()
+    }
+
     pub fn undo_last(&mut self, floor_id: &str) -> CoreResult<()> {
         let idx = floors_by_id(&self.floors, floor_id)?;
         let floor = &mut self.floors[idx];

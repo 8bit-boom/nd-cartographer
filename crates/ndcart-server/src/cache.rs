@@ -86,6 +86,25 @@ impl<V> Lru<V> {
         }
     }
 
+    /// Rename or drop every entry: `f` returns the key to keep it under, or
+    /// None to drop it. Sizes and recency are kept.
+    pub fn rekey(&mut self, f: impl Fn(&str) -> Option<String>) {
+        let keys: Vec<String> = self.map.keys().cloned().collect();
+        for k in keys {
+            match f(&k) {
+                Some(nk) if nk == k => {}
+                Some(nk) => {
+                    if let Some(e) = self.map.remove(&k) {
+                        self.remove(&nk);
+                        self.order.insert(e.tick, nk.clone());
+                        self.map.insert(nk, e);
+                    }
+                }
+                None => self.remove(&k),
+            }
+        }
+    }
+
     /// Keep only the entries whose key satisfies `keep`.
     pub fn retain_keys(&mut self, keep: impl Fn(&str) -> bool) {
         let drop: Vec<String> = self.map.keys().filter(|k| !keep(k)).cloned().collect();
@@ -114,6 +133,28 @@ mod tests {
         for i in 5..30 {
             assert_eq!(c.get(&format!("k{i}")), Some(&i), "k{i} is cached");
         }
+    }
+
+    #[test]
+    fn rekey_renames_and_drops_keeping_size_and_recency() {
+        let mut c: Lru<u32> = Lru::new(30);
+        for i in 0..3u32 {
+            c.insert(format!("k{i}"), i, 10);
+        }
+        c.rekey(|k| match k {
+            "k0" => Some("n0".to_string()),
+            "k1" => None,
+            _ => Some(k.to_string()),
+        });
+        assert_eq!(c.len(), 2);
+        assert_eq!(c.used(), 20);
+        assert!(c.get("k0").is_none() && c.get("k1").is_none());
+        assert_eq!(c.get("k2"), Some(&2));
+        // n0 kept its place as the oldest: the next insert evicts it, not k2.
+        c.insert("k3".into(), 3, 10);
+        c.insert("k4".into(), 4, 10);
+        assert!(c.get("n0").is_none());
+        assert_eq!(c.get("k2"), Some(&2));
     }
 
     #[test]

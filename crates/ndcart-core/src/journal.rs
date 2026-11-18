@@ -734,20 +734,30 @@ impl Journal {
     /// stored inverse and APPEND that as a new entry marked `undoes`. Nothing is
     /// rewritten or deleted (append-only), and repeated undo walks back through
     /// history.
-    pub fn undo_last(&mut self, floor: &mut FloorDoc) -> CoreResult<bool> {
+    /// Index of the entry `undo_last` would undo on this floor.
+    fn undo_target(&self, floor_id: &str) -> Option<usize> {
         let mut undone = std::collections::BTreeSet::new();
         for e in &self.entries {
             if let Some(i) = e.undoes {
                 undone.insert(i);
             }
         }
-        let target = (0..self.entries.len())
-            .rev()
-            .find(|i| {
-                self.entries[*i].undoes.is_none()
-                    && !undone.contains(i)
-                    && self.entries[*i].is_for(&floor.id)
-            })
+        (0..self.entries.len()).rev().find(|i| {
+            self.entries[*i].undoes.is_none()
+                && !undone.contains(i)
+                && self.entries[*i].is_for(floor_id)
+        })
+    }
+
+    /// The op an undo on this floor would apply (the inverse of the entry it
+    /// undoes), without applying it.
+    pub fn peek_undo(&self, floor_id: &str) -> Option<&Op> {
+        self.undo_target(floor_id).map(|i| &self.entries[i].inverse)
+    }
+
+    pub fn undo_last(&mut self, floor: &mut FloorDoc) -> CoreResult<bool> {
+        let target = self
+            .undo_target(&floor.id)
             .ok_or_else(|| CoreError::NotFound("nothing to undo".to_string()))?;
         let inverse = self.entries[target].inverse.clone();
         let redo_inverse = inverse.inverse_against(floor)?;

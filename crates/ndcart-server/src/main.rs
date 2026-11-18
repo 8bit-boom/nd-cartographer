@@ -62,6 +62,79 @@ fn invalidate_tiles(app: &App, doc_id: &str) {
         .retain_keys(|k| !k.starts_with(&prefix));
 }
 
+/// After an edit that moved the doc from `old_rev` to `new_rev` and changed
+/// only `dirty`: drop the tiles that touch it and carry the rest over to the
+/// new rev, so an edit does not make the whole viewport bake again. Tiles of
+/// other revs are stale leftovers and go. Called with the store write lock
+/// held, so it is ordered against `get_tile`.
+fn invalidate_dirty(
+    app: &App,
+    doc_id: &str,
+    floor_id: &str,
+    old_rev: u64,
+    new_rev: u64,
+    dirty: ndcart_core::Dirty,
+) {
+    if dirty == ndcart_core::Dirty::All || new_rev != old_rev + 1 {
+        invalidate_tiles(app, doc_id);
+        return;
+    }
+    let prefix = format!("{doc_id}/");
+    let old = old_rev.to_string();
+    app.tile_cache.lock().expect("tile cache").rekey(|k| {
+        let Some(rest) = k.strip_prefix(&prefix) else {
+            return Some(k.to_string()); // another document's tile
+        };
+        // floor/z/x_y/rev/onion/era
+        let mut p = rest.split('/');
+        let (floor, z, xy, rev, onion, era) = (
+            p.next()?,
+            p.next()?,
+            p.next()?,
+            p.next()?,
+            p.next()?,
+            p.next()?,
+        );
+        if rev != old {
+            return None;
+        }
+        // A tile that shows the edited floor as its ghost may change too.
+        let affected = if floor == floor_id {
+            let z: u32 = z.parse().ok()?;
+            let (x, y) = xy.split_once('_')?;
+            let (x, y): (i64, i64) = (x.parse().ok()?, y.parse().ok()?);
+            // Tile (x, y) covers 256 px at 16 << z px per cell.
+            let ppc = tiles::PPC0 << z.min(tiles::MAX_Z);
+            let t = i64::from(tiles::TILE);
+            let (cx0, cx1) = ((x * t).div_euclid(ppc), ((x + 1) * t - 1).div_euclid(ppc));
+            let (cy0, cy1) = ((y * t).div_euclid(ppc), ((y + 1) * t - 1).div_euclid(ppc));
+            dirty.touches(cx0, cy0, cx1, cy1)
+        } else {
+            onion == floor_id && dirty != ndcart_core::Dirty::Nothing
+        };
+        (!affected).then(|| format!("{prefix}{floor}/{z}/{xy}/{new_rev}/{onion}/{era}"))
+    });
+}
+
+/// The `dirty` field of an edit's response: a cell rectangle
+/// `[x0, y0, x1, y1]`, `[]` when no tile pixel changed, or null when the
+/// whole picture may have.
+fn dirty_json(d: ndcart_core::Dirty) -> serde_json::Value {
+    match d {
+        ndcart_core::Dirty::All => serde_json::Value::Null,
+        ndcart_core::Dirty::Nothing => serde_json::json!([]),
+        ndcart_core::Dirty::Rect { x0, y0, x1, y1 } => serde_json::json!([x0, y0, x1, y1]),
+    }
+}
+
+/// What an edit of `floor_id` by `ops` can change in the picture.
+fn dirty_of(doc: &store::StoredDoc, floor_id: &str, ops: &[Op]) -> ndcart_core::Dirty {
+    match doc.floors.iter().find(|f| f.id == floor_id) {
+        Some(f) => ndcart_core::dirty_for_ops(f, ops, &tiles::stamp_reach_cells),
+        None => ndcart_core::Dirty::All,
+    }
+}
+
 /// Drop one document's cached tiles and derived walls (after anything that
 /// changes it outside the plain edit path).
 fn invalidate_doc(app: &App, doc_id: &str) {
@@ -4027,13 +4100,17 @@ async fn post_ops(
         .docs
         .get_mut(&id)
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let dirty = dirty_of(doc, &b.floor, &b.ops);
+    let old_rev = doc.rev;
     doc.apply_ops(&b.floor, &b.ops)?;
     let rev = doc.rev;
     store::save_doc_fast(app.data_dir.as_deref(), doc);
+    // Tiles that the edit cannot have touched carry over to the new rev.
+    invalidate_dirty(&app, &id, &b.floor, old_rev, rev, dirty);
     drop(store);
-    // Invalidate stale tiles/walls for this document.
-    invalidate_tiles(&app, &id);
-    Ok(Json(serde_json::json!({"ok": true, "rev": rev})))
+    Ok(Json(
+        serde_json::json!({"ok": true, "rev": rev, "dirty": dirty_json(dirty)}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -4052,12 +4129,19 @@ async fn post_undo(
         .docs
         .get_mut(&id)
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    let dirty = match doc.peek_undo(&b.floor) {
+        Some(inverse) => dirty_of(doc, &b.floor, std::slice::from_ref(&inverse)),
+        None => ndcart_core::Dirty::All,
+    };
+    let old_rev = doc.rev;
     doc.undo_last(&b.floor)?;
     let rev = doc.rev;
     store::save_doc_fast(app.data_dir.as_deref(), doc);
+    invalidate_dirty(&app, &id, &b.floor, old_rev, rev, dirty);
     drop(store);
-    invalidate_tiles(&app, &id);
-    Ok(Json(serde_json::json!({"ok": true, "rev": rev})))
+    Ok(Json(
+        serde_json::json!({"ok": true, "rev": rev, "dirty": dirty_json(dirty)}),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -7518,6 +7602,252 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(floor_digest(&router, &id).await, before);
+    }
+
+    /// Every tile of a 6x6 block at z0 and the middle 6x6 at z1, in a fixed order.
+    async fn tile_block(router: &Router, id: &str, f: &str) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        for (z, from, to) in [(0, 0, 6), (1, 2, 8)] {
+            for y in from..to {
+                for x in from..to {
+                    let (st, b) = call(
+                        router,
+                        "GET",
+                        &format!("/tiles/{id}/{f}/{z}/{x}_{y}"),
+                        vec![],
+                    )
+                    .await;
+                    assert_eq!(st, StatusCode::OK);
+                    out.push(b);
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn an_edit_reports_its_dirty_rect_and_keeps_far_tiles_cached() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let (id, f) = new_doc(&router, "D").await;
+        let (st, b) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","space":"sp_a","cells":[{"x":0,"y":0},{"x":1,"y":0}]}]})
+            .to_string()
+            .into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // Painting makes the space's own cells dirty (and nothing else).
+        assert_eq!(jv(&b)["dirty"], serde_json::json!([-2, -2, 3, 2]));
+        let far = format!("/tiles/{id}/{f}/0/0_0");
+        let near = format!("/tiles/{id}/{f}/0/6_6");
+        let (_, far_before) = call(&router, "GET", &far, vec![]).await;
+        let (_, near_before) = call(&router, "GET", &near, vec![]).await;
+        let (st, b) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"paint_cells","space":"sp_a","cells":[{"x":100,"y":100}]}]})
+            .to_string()
+            .into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(jv(&b)["dirty"], serde_json::json!([98, 98, 102, 102]));
+        let rev = jv(&b)["rev"].as_u64().unwrap();
+        // The far tile was carried over to the new rev: a cache hit, same bytes.
+        let key = format!("{id}/{f}/0/0_0/{rev}/-/-");
+        assert!(
+            app.tile_cache.lock().unwrap().get(&key).is_some(),
+            "the far tile moved to the new rev instead of being dropped"
+        );
+        let near_key = format!("{id}/{f}/0/6_6/{rev}/-/-");
+        assert!(app.tile_cache.lock().unwrap().get(&near_key).is_none());
+        let (_, far_after) = call(&router, "GET", &far, vec![]).await;
+        let (_, near_after) = call(&router, "GET", &near, vec![]).await;
+        assert_eq!(far_before, far_after);
+        assert_ne!(
+            near_before, near_after,
+            "the tile under the edit is redrawn"
+        );
+        // Undo reports the same area.
+        let (st, b) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/undo"),
+            serde_json::json!({"floor": f}).to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(jv(&b)["dirty"], serde_json::json!([98, 98, 102, 102]));
+        // A light changes no tile pixel at all.
+        let (_, b) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::json!({"floor": f, "ops": [{"t":"add_light","light":{"id":"l","x":5.0,"y":5.0,"range":4.0,"color":"#ffaa00","intensity":0.8,"on":true}}]})
+            .to_string()
+            .into_bytes(),
+        )
+        .await;
+        assert_eq!(jv(&b)["dirty"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn dirty_is_null_when_text_is_laid_out_globally() {
+        let router = build_router(test_app());
+        let (id, f) = new_doc(&router, "D").await;
+        let uri = format!("/api/docs/{id}/ops");
+        let post = |ops: serde_json::Value| {
+            call(
+                &router,
+                "POST",
+                &uri,
+                serde_json::json!({"floor": f, "ops": ops})
+                    .to_string()
+                    .into_bytes(),
+            )
+        };
+        let (_, b) = post(serde_json::json!([
+            {"t":"upsert_label","label":{"id":"n","x":2.0,"y":2.0,"text":"Hall","size":0.8,"color":"#222222","bold":false}}
+        ]))
+        .await;
+        assert!(jv(&b)["dirty"].is_null(), "an upsert_label is global");
+        let (_, b) = post(serde_json::json!([
+            {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+            {"t":"paint_cells","space":"sp_a","cells":[{"x":3,"y":3}]}
+        ]))
+        .await;
+        assert!(jv(&b)["dirty"].is_null(), "label collisions are global");
+    }
+
+    /// The strongest check on the dirty rectangles: after each kind of edit,
+    /// every tile served from the carried-over cache equals a fresh bake.
+    #[tokio::test]
+    async fn carried_over_tiles_equal_fresh_bakes_after_every_edit_kind() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let (id, f) = new_doc(&router, "D").await;
+        let stamp = |id: &str, x: f64, y: f64, scale: f64| {
+            serde_json::json!({"id":id,"asset":"barrel","x":x,"y":y,"scale":scale,
+                "rotation":0.3,"flip":false,"tint":null,"shadow":true,"gen":null})
+        };
+        let stroke = serde_json::json!({"id":"st1","kind":"paint","brush":"round","color":"#336699",
+            "size":2.0,"opacity":0.8,"hardness":0.5,"roughness":0.2,"density":0.5,"seed":7,
+            "points":[{"x":20.0,"y":20.0,"pressure":1.0,"tilt":0.0},{"x":30.0,"y":24.0,"pressure":1.0,"tilt":0.0}]});
+        let cells = |x0: i32, y0: i32, x1: i32, y1: i32| -> Vec<serde_json::Value> {
+            (x0..=x1)
+                .flat_map(|x| (y0..=y1).map(move |y| serde_json::json!({"x":x,"y":y})))
+                .collect()
+        };
+        let steps: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "rooms",
+                serde_json::json!([
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                {"t":"upsert_space","space":{"id":"sp_b","name":"B","color":"#5a7d9a","kind":"room"}},
+                {"t":"paint_cells","space":"sp_a","cells":cells(2,2,12,10)},
+                {"t":"paint_cells","space":"sp_b","cells":cells(13,2,20,10)}]),
+            ),
+            (
+                "paint beyond",
+                serde_json::json!([{"t":"paint_cells","space":"sp_b","cells":cells(40,30,44,33)}]),
+            ),
+            (
+                "clear cells",
+                serde_json::json!([{"t":"paint_cells","space":null,"cells":cells(5,5,6,6)}]),
+            ),
+            (
+                "mark",
+                serde_json::json!([{"t":"set_mark","edge":{"cell":{"x":12,"y":5},"edge":"east"},"mark":{"kind":"door","state":"closed"}}]),
+            ),
+            (
+                "recolour",
+                serde_json::json!([{"t":"upsert_space","space":{"id":"sp_b","name":"B","color":"#aa3355","kind":"room"}}]),
+            ),
+            (
+                "stamp",
+                serde_json::json!([{"t":"add_stamp","stamp":stamp("p1", 25.0, 15.0, 1.0)}]),
+            ),
+            (
+                "big stamp",
+                serde_json::json!([{"t":"add_stamp","stamp":stamp("p2", 60.0, 50.0, 4.0)}]),
+            ),
+            (
+                "move stamp",
+                serde_json::json!([{"t":"update_stamp","stamp":stamp("p1", 45.0, 38.0, 1.0)}]),
+            ),
+            (
+                "stroke",
+                serde_json::json!([{"t":"add_stroke","stroke":stroke}]),
+            ),
+            (
+                "remove stroke",
+                serde_json::json!([{"t":"remove_stroke","id":"st1"}]),
+            ),
+            (
+                "remove stamp",
+                serde_json::json!([{"t":"remove_stamp","id":"p2"}]),
+            ),
+        ];
+        // Warm every tile of the block, then edit and compare after each step.
+        let mut kinds = Vec::new();
+        for (name, ops) in steps {
+            let _ = tile_block(&router, &id, &f).await;
+            let (st, b) = call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/ops"),
+                serde_json::json!({"floor": f, "ops": ops})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await;
+            assert_eq!(
+                st,
+                StatusCode::OK,
+                "{name}: {}",
+                String::from_utf8_lossy(&b)
+            );
+            kinds.push((name, jv(&b)["dirty"].clone()));
+            let carried = tile_block(&router, &id, &f).await;
+            app.tile_cache.lock().unwrap().retain_keys(|_| false);
+            let fresh = tile_block(&router, &id, &f).await;
+            assert!(
+                carried == fresh,
+                "{name}: a carried-over tile differs from a fresh bake"
+            );
+        }
+        // The edits above really were localised (not every one fell back to All).
+        assert!(
+            kinds.iter().filter(|(_, d)| d.is_array()).count() >= 9,
+            "{kinds:?}"
+        );
+        // Undo each of them the same way.
+        for _ in 0..11 {
+            let _ = tile_block(&router, &id, &f).await;
+            let (st, _) = call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/undo"),
+                serde_json::json!({"floor": f}).to_string().into_bytes(),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let carried = tile_block(&router, &id, &f).await;
+            app.tile_cache.lock().unwrap().retain_keys(|_| false);
+            let fresh = tile_block(&router, &id, &f).await;
+            assert!(
+                carried == fresh,
+                "undo: a carried-over tile differs from a fresh bake"
+            );
+        }
     }
 
     #[tokio::test]
