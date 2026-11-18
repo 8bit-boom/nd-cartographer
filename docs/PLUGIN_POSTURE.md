@@ -6,9 +6,12 @@ comes after it (plugins, scripts, assistants).
 
 ## What the MCP surface exposes, and why
 
-Five read-shaped tools — `list_projects`, `get_stats`, `get_floor_spec`,
-`export_svg` (writes only to an explicit path the caller names), and `ask`
-(needs an AI configured; answers only from the maps' own text). Writes go
+Four read-shaped tools — `list_projects`, `get_stats`, `get_floor_spec`, and
+`export_png` (renders a PNG, the players' copy by default, to an explicit
+`.png` path the caller names; it refuses to overwrite an existing file unless
+`overwrite` is true; `export_svg` remains as a deprecated alias for one
+release). `ask` is no longer listed: the AI lives in the studio process, so
+over MCP it only returns a "not available" error. Writes go
 through the HTTP API's validated op endpoints, not through the MCP surface:
 an agent that wants to *change* a map works the same way a human does — draft,
 preview, accept — so nothing skips validation. Tested end to end
