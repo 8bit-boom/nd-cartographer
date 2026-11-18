@@ -7,6 +7,7 @@ mod aijobs;
 mod ask;
 mod assets;
 mod auth;
+mod bench;
 mod convert;
 mod doctor;
 #[cfg(feature = "bridge")]
@@ -4491,7 +4492,14 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| "serve".into());
     match cmd.as_str() {
-        "bench" => run_bench(args.collect()),
+        "bench" => {
+            let rest: Vec<String> = args.collect();
+            if rest.iter().any(|a| a == "--large") {
+                bench::run_large(rest.iter().any(|a| a == "--json")).await;
+            } else {
+                run_bench(rest);
+            }
+        }
         "healthcheck" => {
             if !run_healthcheck() {
                 std::process::exit(1);

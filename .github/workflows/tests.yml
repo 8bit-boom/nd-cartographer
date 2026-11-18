@@ -26,6 +26,8 @@ jobs:
         run: cargo test --locked
       - name: bench smoke
         run: cargo run -q -p ndcart-server --bin ndcart bench
+      - name: large-floor bench (budgets)
+        run: cargo run -q --release -p ndcart-server --bin ndcart -- bench --large
       - name: standalone parity (bridge feature off)
         run: cargo test --locked -p ndcart-server --no-default-features
 
