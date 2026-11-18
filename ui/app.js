@@ -810,8 +810,18 @@ document.getElementById('file-open').onchange = async (e) => {
 
 const curFloor = () => state.doc.floors.find(f => f.id === state.floorId) || state.doc.floors[0];
 
-async function refresh() {
-  state.doc = await api('GET', `/api/docs/${state.docId}`);
+// `lite` after an edit: the server sends only the floor being looked at in
+// full (the other floors as id/name/digest), which is all the studio reads
+// from them until it switches floor (a floor switch does a full refresh).
+async function refresh(lite = false) {
+  const url = `/api/docs/${state.docId}` +
+    (lite && state.floorId ? `?floor=${encodeURIComponent(state.floorId)}&lite=1` : '');
+  try {
+    state.doc = await api('GET', url);
+  } catch (e) {
+    if (!lite) throw e;
+    state.doc = await api('GET', `/api/docs/${state.docId}`);   // e.g. the floor just went away
+  }
   state.rev = state.doc.rev;
   // A rev the tile bookkeeping did not account for (another window, a
   // server-side generator...) means any tile may have changed.
@@ -1151,7 +1161,7 @@ async function postOps(ops) {
     const prevRev = state.rev, floorId = state.floorId;
     const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: floorId, ops });
     noteEdit(res, prevRev, floorId);
-    await refresh();
+    await refresh(true);
   } catch (e) {
     statusEl.textContent = `Error: ${e.message}`;
   }
@@ -1177,7 +1187,7 @@ async function flushStroke() {
     const prevRev = state.rev, floorId = state.floorId;
     const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: floorId, ops });
     noteEdit(res, prevRev, floorId);
-    await refresh();
+    await refresh(true);
   } catch (e) {
     statusEl.textContent = `Error: ${e.message}`;
   }
@@ -3322,7 +3332,7 @@ async function undo() {
     const prevRev = state.rev, floorId = state.floorId;
     const res = await api('POST', `/api/docs/${state.docId}/undo`, { floor: floorId });
     noteEdit(res, prevRev, floorId);
-    await refresh();
+    await refresh(true);
   } catch (err) {
     statusEl.textContent = err.message;
   }

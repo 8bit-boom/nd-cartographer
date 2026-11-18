@@ -392,16 +392,80 @@ async fn create_doc(
     Ok(Json(manifest))
 }
 
+#[derive(Deserialize)]
+struct DocQuery {
+    /// With `lite`: the one floor to send in full.
+    floor: Option<String>,
+    /// `1`: the other floors come as `{id, name, digest}` only.
+    lite: Option<String>,
+}
+
+/// A floor in a lite document view.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum LiteFloor {
+    Full(Box<FloorView>),
+    Stub {
+        id: String,
+        name: String,
+        digest: String,
+    },
+}
+
+#[derive(Serialize)]
+struct LiteDocView {
+    manifest: Manifest,
+    rev: u64,
+    floors: Vec<LiteFloor>,
+}
+
 async fn get_doc(
     State(app): State<App>,
     Path(id): Path<String>,
-) -> Result<Json<DocView>, ApiError> {
+    axum::extract::Query(q): axum::extract::Query<DocQuery>,
+) -> Result<Response, ApiError> {
     let store = app.store.read().await;
     let doc = store
         .docs
         .get(&id)
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
-    Ok(Json(doc_view(&app, doc)))
+    if q.lite.as_deref().is_none_or(|l| l == "0" || l.is_empty()) {
+        return Ok(Json(doc_view(&app, doc)).into_response());
+    }
+    // Lite: one floor in full, the rest as stubs; after an edit the studio
+    // only needs the floor it is looking at.
+    let full_id = q
+        .floor
+        .as_deref()
+        .ok_or_else(|| CoreError::Invalid("lite=1 needs floor=<id>".into()))?;
+    floors_by_id(&doc.floors, full_id)?;
+    let floors = doc
+        .floors
+        .iter()
+        .map(|f| {
+            if f.id == full_id {
+                LiteFloor::Full(Box::new(floor_view(
+                    &doc.manifest.id,
+                    &app,
+                    f,
+                    doc.manifest.cell_size,
+                    doc.rev,
+                )))
+            } else {
+                LiteFloor::Stub {
+                    id: f.id.clone(),
+                    name: f.name.clone(),
+                    digest: f.digest(),
+                }
+            }
+        })
+        .collect();
+    Ok(Json(LiteDocView {
+        manifest: doc.manifest.clone(),
+        rev: doc.rev,
+        floors,
+    })
+    .into_response())
 }
 
 #[derive(Deserialize)]
@@ -7697,6 +7761,74 @@ mod tests {
         )
         .await;
         assert_eq!(jv(&b)["dirty"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn lite_doc_sends_one_floor_in_full() {
+        let router = build_router(test_app());
+        let (id, f) = new_doc(&router, "L").await;
+        let mut ids = vec![f.clone()];
+        for name in ["Up", "Roof"] {
+            let (_, b) = call(
+                &router,
+                "POST",
+                &format!("/api/docs/{id}/floors"),
+                serde_json::json!({"action":"add","name":name})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await;
+            ids.push(jv(&b)["floor"].as_str().unwrap().to_string());
+        }
+        let cells: Vec<_> = (0..40)
+            .flat_map(|x| (0..40).map(move |y| serde_json::json!({"x":x,"y":y})))
+            .collect();
+        for fl in &ids {
+            let st = post_ops_json(
+                &router,
+                &id,
+                serde_json::json!({"floor": fl, "ops": [
+                    {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                    {"t":"paint_cells","space":"sp_a","cells":cells}]}),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+        }
+        let (_, full) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let (st, lite) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}?floor={}&lite=1", ids[1]),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (full, lite_v) = (jv(&full), jv(&lite));
+        assert_eq!(lite_v["rev"], full["rev"]);
+        assert_eq!(lite_v["floors"].as_array().unwrap().len(), 3);
+        for (i, fl) in lite_v["floors"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(fl["id"], full["floors"][i]["id"]);
+            assert_eq!(fl["name"], full["floors"][i]["name"]);
+            assert_eq!(fl["digest"], full["floors"][i]["digest"]);
+            if i == 1 {
+                assert_eq!(fl, &full["floors"][1], "the chosen floor is complete");
+            } else {
+                assert!(fl.get("grid").is_none(), "floor {i} is a stub");
+                assert!(fl.get("walls").is_none());
+            }
+        }
+        assert!(lite.len() * 2 < full.to_string().len(), "much smaller");
+        // An unknown floor is refused; lite needs one.
+        let (st, _) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}?floor=nope&lite=1"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = call(&router, "GET", &format!("/api/docs/{id}?lite=1"), vec![]).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

@@ -19,7 +19,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 |---|---|---|---|
 | GET | `/api/docs` | – | `{"docs":[{id,name,kind,rev,floors:[names]}]}` |
 | POST | `/api/docs` | `{name, kind?}` | kind: `battle` (default) / `region` / `schematic`. Returns the `Manifest`. Creates floor "Ground". |
-| GET | `/api/docs/{id}` | – | `{"manifest", "rev", "floors":[FloorView]}` |
+| GET | `/api/docs/{id}` | – | `{"manifest", "rev", "floors":[FloorView]}`. With `?floor=F&lite=1` only floor F is a full FloorView; the others are `{id, name, digest}` stubs (what the studio fetches after an edit). `lite=1` without `floor`, or an unknown floor, is refused. |
 
 `FloorView` = `{id, name, digest, grid, walls, wall_tally, lights, labels}` —
 `grid` is the room grid (`spaces`, `marks`, `cells` as `{x,y,space}` triples);
