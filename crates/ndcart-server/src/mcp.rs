@@ -17,6 +17,10 @@ const TOOLS: &str = r#"[
   {"name": "list_projects", "description": "List the studio's projects: id, name, kind, revision, floor names.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}},
   {"name": "get_stats", "description": "Pacing numbers for one project's floor: rooms/squares/kinds, doors and secrets, lights and their reach, props by provenance, GM labels, encounters, lore coverage.", "inputSchema": {"type": "object", "properties": {"doc": {"type": "string", "description": "document id or exact name"}, "floor": {"type": "string", "description": "floor id; default the first"}}, "required": ["doc"], "additionalProperties": false}},
   {"name": "get_floor_spec", "description": "Read a painted floor back as a MapSpec (the re-layout input): rooms with sizes/kinds/lamps, links, stairs. Warnings report clamps.", "inputSchema": {"type": "object", "properties": {"doc": {"type": "string"}, "floor": {"type": "string"}}, "required": ["doc"], "additionalProperties": false}},
+  {"name": "get_instructions", "description": "The AI instruction pack for writing a spec: system prompt, full reference, repair template, JSON Schema and worked examples. Read this first, then write a spec, then call validate_spec.", "inputSchema": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["map", "world", "refine"], "description": "default map"}}, "additionalProperties": false}},
+  {"name": "get_spec_schema", "description": "The JSON Schema (draft 2020-12) of a MapSpec or WorldSpec.", "inputSchema": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["map", "world"], "description": "default map"}}, "additionalProperties": false}},
+  {"name": "validate_spec", "description": "Check a spec without changing anything: unknown fields, validation, layout and the floor linter. Returns {ok, kind, errors, unknown_fields, problems}; fix the errors and call again. A spec that passes can be previewed by the game master through the HTTP propose route.", "inputSchema": {"type": "object", "properties": {"spec": {"description": "the spec object (or a string holding it)"}, "kind": {"type": "string", "enum": ["map", "world"], "description": "guessed when omitted"}}, "required": ["spec"], "additionalProperties": false}},
+  {"name": "lint_floor", "description": "Run the project linter on one painted floor (read-only): unreachable rooms, doors into nothing, dead ends, repeated names, caps. Returns the problems.", "inputSchema": {"type": "object", "properties": {"doc": {"type": "string", "description": "document id or exact name"}, "floor": {"type": "string", "description": "floor id; default the first"}}, "required": ["doc"], "additionalProperties": false}},
   {"name": "export_png", "description": "Render one floor to a PNG at an explicit output path (a .png path; refuses to overwrite an existing file unless overwrite is true). The picture is the players' copy by default (secret doors and GM-only labels stripped); pass audience \"gm\" for the GM copy. (export_svg is a deprecated alias for this tool.)", "inputSchema": {"type": "object", "properties": {"doc": {"type": "string"}, "floor": {"type": "string"}, "out": {"type": "string", "description": "the file path to write; must end in .png"}, "audience": {"type": "string", "enum": ["player", "gm"], "description": "default player"}, "overwrite": {"type": "boolean", "description": "replace an existing file (default false)"}}, "required": ["doc", "out"], "additionalProperties": false}}
 ]"#;
 
@@ -49,7 +53,7 @@ pub fn run(data_dir: Option<std::path::PathBuf>) -> Result<(), String> {
                     req_id,
                     json!({
                         "protocolVersion": "2024-11-05",
-                        "capabilities": {"tools": {}},
+                        "capabilities": {"tools": {}, "resources": {}},
                         "serverInfo": {"name": "nd-cartographer", "version": env!("CARGO_PKG_VERSION")},
                     }),
                 )?;
@@ -79,6 +83,28 @@ pub fn run(data_dir: Option<std::path::PathBuf>) -> Result<(), String> {
                     Err(e) => {
                         write_tool_error(&mut out, req_id, &e)?;
                     }
+                }
+            }
+            "resources/list" => {
+                write_result(&mut out, req_id, json!({ "resources": resource_list() }))?
+            }
+            "resources/read" => {
+                let uri = msg
+                    .pointer("/params/uri")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match resource_read(uri) {
+                    Some(text) => write_result(
+                        &mut out,
+                        req_id,
+                        json!({"contents": [{"uri": uri, "mimeType": mime_of(uri), "text": text}]}),
+                    )?,
+                    None => write_error(
+                        &mut out,
+                        req_id,
+                        -32002,
+                        &format!("no resource {uri:?}; see resources/list"),
+                    )?,
                 }
             }
             "ping" => write_result(&mut out, req_id, json!({}))?,
@@ -116,6 +142,44 @@ fn write_tool_error(w: &mut impl Write, id: Value, message: &str) -> Result<(), 
     )
     .map_err(|e| e.to_string())?;
     w.flush().map_err(|e| e.to_string())
+}
+
+const PACK_URI: &str = "ndcart://ai/pack/";
+
+fn mime_of(uri: &str) -> &'static str {
+    if uri.ends_with(".json") {
+        "application/json"
+    } else if uri.ends_with(".md") {
+        "text/markdown"
+    } else {
+        "text/plain"
+    }
+}
+
+/// The pack files as MCP resources (`ndcart://ai/pack/<file>`).
+fn resource_list() -> Vec<Value> {
+    std::iter::once("pack.toml")
+        .chain(crate::aipack::FILES.iter().map(|(p, _)| *p))
+        .map(|p| {
+            let uri = format!("{PACK_URI}{p}");
+            json!({"uri": uri, "name": p, "mimeType": mime_of(p),
+                   "description": format!("nd-cartographer AI instruction pack {}", crate::aipack::version())})
+        })
+        .collect()
+}
+
+/// One pack file. Markdown is rendered (limits, ids and the version filled in); JSON is as written.
+fn resource_read(uri: &str) -> Option<String> {
+    let path = uri.strip_prefix(PACK_URI)?;
+    if path == "pack.toml" {
+        return Some(crate::aipack::MANIFEST.to_string());
+    }
+    let raw = crate::aipack::raw(path)?;
+    Some(if path.ends_with(".md") {
+        crate::aipack::render(raw)
+    } else {
+        raw.to_string()
+    })
 }
 
 /// Resolve a doc argument (id or exact name).
@@ -170,6 +234,34 @@ fn call_tool(st: &mut store::Store, name: &str, args: &Value) -> Result<String, 
             )
             .map_err(|e| e.to_string())?;
             Ok(json!({ "spec": spec, "warnings": warnings }).to_string())
+        }
+        "get_instructions" => {
+            let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("map");
+            Ok(crate::aipack::instructions(kind)?.to_string())
+        }
+        "get_spec_schema" => {
+            match args.get("kind").and_then(|v| v.as_str()).unwrap_or("map") {
+                "map" => Ok(crate::aipack::MAPSPEC_SCHEMA.to_string()),
+                "world" => Ok(crate::aipack::WORLDSPEC_SCHEMA.to_string()),
+                k => Err(format!("kind must be map or world, not {k:?}")),
+            }
+        }
+        "validate_spec" => {
+            let spec = args.get("spec").ok_or("argument spec is required")?;
+            let kind = args.get("kind").and_then(|v| v.as_str());
+            Ok(crate::speccheck::check_value(spec, kind)?.to_string())
+        }
+        "lint_floor" => {
+            let d = find_doc(st, args)?;
+            let idx = match args.get("floor").and_then(|v| v.as_str()) {
+                Some(fid) => ndcart_core::doc::floors_by_id(&d.floors, fid)
+                    .map_err(|e| e.to_string())?,
+                None => 0,
+            };
+            let f = &d.floors[idx];
+            let mut problems = ndcart_core::lint(f, d.manifest.cell_size);
+            problems.extend(ndcart_core::lint::lint_links(f, &d.floors));
+            Ok(json!({"floor": f.name, "problems": problems}).to_string())
         }
         "export_png" | "export_svg" => {
             let d = find_doc(st, args)?;
@@ -315,6 +407,64 @@ mod tests {
             "the GM copy shows it"
         );
         let _ = (std::fs::remove_file(&p), std::fs::remove_file(&g));
+    }
+
+    #[test]
+    fn the_spec_tools_work_without_a_project() {
+        let mut st = store::Store::default();
+        let ins = call_tool(&mut st, "get_instructions", &json!({"kind": "world"})).unwrap();
+        let v: Value = serde_json::from_str(&ins).unwrap();
+        assert_eq!(v["version"], crate::aipack::version());
+        assert_eq!(v["schema"]["title"], "WorldSpec");
+        assert!(call_tool(&mut st, "get_instructions", &json!({"kind": "x"})).is_err());
+        let s = call_tool(&mut st, "get_spec_schema", &json!({})).unwrap();
+        assert!(s.contains("\"MapSpec\""));
+        assert!(call_tool(&mut st, "get_spec_schema", &json!({"kind": "q"})).is_err());
+        let r = call_tool(
+            &mut st,
+            "validate_spec",
+            &json!({"spec": {"name": "M", "floors": [{"name": "G", "rooms": [
+                {"id": "a", "name": "A", "w": 4, "h": 4}, {"id": "lost", "name": "B", "w": 4, "h": 4}]}]}}),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["ok"], false);
+        assert!(v["errors"][0].as_str().unwrap().contains("'lost'"), "{v}");
+        assert!(call_tool(&mut st, "validate_spec", &json!({})).is_err());
+    }
+
+    #[test]
+    fn lint_floor_reads_a_painted_floor() {
+        let mut st = store_with_secret_door();
+        let r = call_tool(&mut st, "lint_floor", &json!({"doc": "Vault"})).unwrap();
+        let v: Value = serde_json::from_str(&r).unwrap();
+        let codes: Vec<&str> = v["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["code"].as_str().unwrap())
+            .collect();
+        assert!(codes.contains(&"secret_only_room"), "{codes:?}");
+        assert!(call_tool(&mut st, "lint_floor", &json!({"doc": "Nope"})).is_err());
+    }
+
+    #[test]
+    fn resources_are_the_pack_files_and_markdown_is_rendered() {
+        let list = resource_list();
+        assert!(list
+            .iter()
+            .any(|r| r["uri"] == "ndcart://ai/pack/reference.md"));
+        assert!(list
+            .iter()
+            .any(|r| r["uri"] == "ndcart://ai/pack/pack.toml"));
+        let text = resource_read("ndcart://ai/pack/reference.md").unwrap();
+        assert!(text.contains(crate::aipack::version()) && !text.contains("{{"));
+        assert!(resource_read("ndcart://ai/pack/mapspec.schema.json")
+            .unwrap()
+            .contains("MapSpec"));
+        assert!(resource_read("ndcart://ai/pack/missing.md").is_none());
+        assert!(resource_read("file:///etc/passwd").is_none());
+        assert!(resource_read("ndcart://ai/pack/../../etc/passwd").is_none());
     }
 
     #[test]
