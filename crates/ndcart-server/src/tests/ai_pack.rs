@@ -154,3 +154,78 @@ async fn the_pack_routes_sit_behind_the_token_gate() {
         assert_eq!(r.status(), StatusCode::OK, "{uri}");
     }
 }
+
+#[test]
+fn the_edit_plan_schema_lists_exactly_the_ops_the_code_knows() {
+    use ndcart_core::editplan::Edit;
+    use ndcart_core::mapspec::LinkKind;
+    let schema: serde_json::Value = serde_json::from_str(aipack::EDITPLAN_SCHEMA).unwrap();
+    let mut in_schema: Vec<String> = schema["properties"]["edits"]["items"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["properties"]["op"]["const"].as_str().unwrap().to_string())
+        .collect();
+    in_schema.sort();
+    let samples = [
+        Edit::RenameRoom {
+            room: "a".into(),
+            name: "n".into(),
+        },
+        Edit::SetLit {
+            room: "a".into(),
+            lit: true,
+        },
+        Edit::SetLink {
+            a: "a".into(),
+            b: "b".into(),
+            kind: LinkKind::Door,
+        },
+        Edit::SetMaterial {
+            room: "a".into(),
+            material: "m".into(),
+        },
+        Edit::Furnish {
+            rooms: vec!["a".into()],
+        },
+        Edit::Note {
+            room: "a".into(),
+            text: "t".into(),
+        },
+    ];
+    let mut in_code: Vec<String> = samples
+        .iter()
+        .map(|e| {
+            serde_json::to_value(e).unwrap()["op"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    in_code.sort();
+    assert_eq!(in_schema, in_code);
+    // Each sample has exactly the fields its schema entry lists.
+    for (e, entry) in samples.iter().zip(
+        // schema order is the sample order
+        schema["properties"]["edits"]["items"]["oneOf"]
+            .as_array()
+            .unwrap(),
+    ) {
+        let mut code: Vec<String> = serde_json::to_value(e)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let mut sch: Vec<String> = entry["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        code.sort();
+        sch.sort();
+        assert_eq!(code, sch);
+    }
+}

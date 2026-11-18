@@ -294,6 +294,10 @@ publish.rs, draft.rs   the nd-world client side (cargo feature `bridge`)
 aipack.rs      the AI instruction pack (assets/ai/: prompts, schemas, reference, examples) and the
                tests that keep it in step with the code; speccheck.rs / specshape.rs check a spec
                (unknown fields, validate, lay out, lint) for the AI loop, HTTP and MCP alike
+repair.rs      the one ask/judge/repair loop (conversational, complaint-aware) for every AI call (bridge)
+stepwise.rs    outline-then-floors drafting for multi-floor maps (bridge); aicache.rs the opt-in result cache
+ai_standin.rs  `ndcart ai stand-in`: a deterministic fake model server (tests, demos); also see
+               tests/ai_loop.rs for the router tests that drive the AI routes against it
 mcp.rs, ask.rs, aijobs.rs, ai_settings.rs, doctor.rs, packs.rs, pdf.rs, convert.rs, synth.rs,
 text.rs, worldspec.rs, golden.rs   feature modules
 tests/mod.rs   router-level tests and their helpers (`test_app`, `call`, `new_doc`, `post_ops_json`)

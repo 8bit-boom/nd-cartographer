@@ -193,6 +193,7 @@ fn kind_of(system: &str) -> Option<Kind> {
         Kind::Tags,
         Kind::ThemePack,
         Kind::Outline,
+        Kind::Edit,
     ]
     .into_iter()
     .find(|k| {
@@ -233,6 +234,17 @@ fn pick(system: &str, user: &str, repair_turn: bool, behaviour: Behaviour) -> St
                 break_spec(&mut spec);
             }
             spec.to_string()
+        }
+        Some(Kind::Edit) => {
+            // The floor's description is the JSON line after "Floor:"; rename its first room.
+            let room = user
+                .lines()
+                .find_map(|l| serde_json::from_str::<Value>(l).ok())
+                .and_then(|v| v["rooms"][0]["id"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            let room = if broken { "nope".to_string() } else { room };
+            json!({"edits": [{"op": "rename_room", "room": room, "name": "Renamed by the stand-in"}]})
+                .to_string()
         }
         Some(Kind::Outline) => {
             if broken {

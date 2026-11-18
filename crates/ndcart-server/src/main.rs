@@ -176,6 +176,7 @@ fn build_router(app: App) -> Router {
         .route("/api/ask", post(ask_maps))
         .route("/api/doctor", get(doctor_checks))
         .route("/api/docs/{id}/refine", post(refine_floor))
+        .route("/api/docs/{id}/edit-plan", post(edit_plan))
         .route("/api/docs/{id}/style", post(set_style))
         .route("/api/draft-world", post(draft_world_spec))
         .route("/api/docs/{id}/propose", post(propose_map))

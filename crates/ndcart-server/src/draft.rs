@@ -301,7 +301,7 @@ fn from_pack(text: &str) -> serde_json::Value {
 /// still checks everything a schema cannot say.
 pub fn shape(kind: Kind) -> &'static Shape {
     use std::sync::LazyLock;
-    static SHAPES: LazyLock<[Shape; 5]> = LazyLock::new(|| {
+    static SHAPES: LazyLock<[Shape; 6]> = LazyLock::new(|| {
         let hex = serde_json::json!({"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"});
         let named = |placed: bool| {
             let mut props = serde_json::json!({
@@ -340,6 +340,10 @@ pub fn shape(kind: Kind) -> &'static Shape {
                 schema: from_pack(aipack::OUTLINE_SCHEMA),
             },
             Shape {
+                name: "edit_plan",
+                schema: from_pack(aipack::EDITPLAN_SCHEMA),
+            },
+            Shape {
                 name: "theme_pack",
                 schema: serde_json::json!({
                     "type": "object",
@@ -361,7 +365,8 @@ pub fn shape(kind: Kind) -> &'static Shape {
         Kind::World => &SHAPES[1],
         Kind::Tags => &SHAPES[2],
         Kind::Outline => &SHAPES[3],
-        Kind::ThemePack => &SHAPES[4],
+        Kind::Edit => &SHAPES[4],
+        Kind::ThemePack => &SHAPES[5],
     }
 }
 
@@ -802,6 +807,63 @@ pub async fn theme_pack(cfg: &Config, theme: &str) -> Result<serde_json::Value, 
     )
     .await?
     .value)
+}
+
+/// Judge an edit-plan reply against the real floor: it must parse (no invented ops or
+/// fields) and every edit must check out. Returns the plan and the one batch op it makes.
+pub fn judge_edit(
+    floor: &ndcart_core::doc::FloorDoc,
+    cell: f64,
+) -> impl Fn(&str) -> Result<(ndcart_core::editplan::EditPlan, ndcart_core::journal::Op), Vec<String>>
+{
+    let floor = floor.clone();
+    move |reply: &str| {
+        let json = extract_json(reply).ok_or_else(|| vec![NO_JSON.to_string()])?;
+        let plan: ndcart_core::editplan::EditPlan = serde_json::from_str(json)
+            .map_err(|e| vec![format!("The JSON did not match the schema: {e}.")])?;
+        let materials: Vec<&str> = ndcart_paint::starter().iter().map(|m| m.id).collect();
+        let op = ndcart_core::editplan::compile(&floor, cell, &materials, &plan)?;
+        Ok((plan, op))
+    }
+}
+
+/// Ask for typed edits to `floor` per `instruction`. Nothing is applied here.
+pub async fn edit_plan(
+    cfg: &Config,
+    floor: &ndcart_core::doc::FloorDoc,
+    cell: f64,
+    instruction: &str,
+) -> Result<
+    (
+        ndcart_core::editplan::EditPlan,
+        ndcart_core::journal::Op,
+        usize,
+    ),
+    String,
+> {
+    too_long(instruction)?;
+    let backend = Backend::connect(cfg).await?;
+    let first = format!(
+        "Floor:\n{}\n\nChange request: {}",
+        ndcart_core::editplan::describe(floor, cell),
+        instruction.trim()
+    );
+    let out = solve(
+        &backend,
+        Task {
+            cache: &cfg.cache,
+            system: aipack::system(Kind::Edit),
+            kind: Kind::Edit,
+            first_user: first,
+            rounds: 2,
+            what: "edit plan",
+        },
+        &|_| {},
+        judge_edit(floor, cell),
+    )
+    .await?;
+    let (plan, op) = out.value;
+    Ok((plan, op, out.attempts))
 }
 
 pub async fn run(args: Vec<String>) -> Result<(), String> {

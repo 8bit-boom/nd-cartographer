@@ -408,3 +408,61 @@ async fn the_stepwise_setting_builds_even_a_one_floor_map_in_steps() {
     assert_eq!(h.stats.chats(), 3);
     assert_eq!(v["spec"]["floors"].as_array().unwrap().len(), 2);
 }
+
+/// A project with one painted floor (a proposal accepted); returns the router, doc and floor ids.
+async fn painted_doc(router: &Router) -> (String, String) {
+    let (id, _) = new_doc(router, "Edit me").await;
+    let spec = serde_json::from_str::<serde_json::Value>(&one_floor("Ground")).unwrap();
+    let (_, p) = post_json(
+        router,
+        &format!("/api/docs/{id}/propose"),
+        serde_json::json!({"spec": spec, "seed": 3}),
+    )
+    .await;
+    let pid = p["id"].as_str().unwrap().to_string();
+    let (st, a) = post_json(
+        router,
+        &format!("/api/docs/{id}/proposals/{pid}/accept"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{a}");
+    (id, a["floors"][0].as_str().unwrap().to_string())
+}
+
+#[tokio::test]
+async fn an_edit_plan_is_repaired_previewed_and_applies_as_one_undoable_step() {
+    let (router, h) = app_for(Options {
+        behaviour: Behaviour::FixOnce,
+        ..Options::default()
+    })
+    .await;
+    let (id, floor) = painted_doc(&router).await;
+    let (st, v) = post_json(
+        &router,
+        &format!("/api/docs/{id}/edit-plan"),
+        serde_json::json!({"floor": floor, "instruction": "rename the first room"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The first plan named a room that is not there; the repair turn named it back.
+    assert_eq!(v["attempts"], 2);
+    let repair = h.stats.bodies()[1]["messages"][3]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(repair.contains("'nope' is not a room"), "{repair}");
+    assert!(v["summary"][0].as_str().unwrap().starts_with("Rename "));
+    assert_eq!(v["ops_preview"]["floor"], floor);
+    // Nothing changed yet; applying the preview is one undo step.
+    let apply = v["ops_preview"].clone();
+    let (st, a) = post_json(&router, &format!("/api/docs/{id}/ops"), apply).await;
+    assert_eq!(st, StatusCode::OK, "{a}");
+    let (st, _) = post_json(
+        &router,
+        &format!("/api/docs/{id}/undo"),
+        serde_json::json!({"floor": floor}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+}

@@ -10,6 +10,7 @@ pub mod assetmeta;
 pub mod base64;
 pub mod dirty;
 pub mod doc;
+pub mod editplan;
 pub mod error;
 pub mod extract;
 pub mod furnish;

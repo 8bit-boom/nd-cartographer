@@ -3287,6 +3287,17 @@ document.getElementById('bk-resize').onclick = async () => {
   await postOps([{ t: 'batch', ops: [...state.sel].map(s => ({ t: 'resize_room', space: s, fx, fy })) }]);
   statusEl.textContent = `Resized ${state.sel.size} room(s) by ${fx}x${fy}.`;
 };
+document.getElementById('bk-edit').onclick = async () => {
+  const instruction = window.prompt('What should change on this floor? (the layout stays; names, doors, lights, floors and props can change)', 'Rename the biggest room to Great Hall and make the doors secret');
+  if (instruction === null || !instruction.trim()) return;
+  statusEl.textContent = 'Asking the AI for edits…';
+  try {
+    const out = await api('POST', `/api/docs/${state.docId}/edit-plan`, { floor: state.floorId, instruction: instruction.trim() });
+    if (!window.confirm(`Apply ${out.summary.length} edit(s)?\n\n- ${out.summary.join('\n- ')}\n\nCtrl+Z takes them all back in one step.`)) { statusEl.textContent = 'Nothing was changed.'; return; }
+    await postOps(out.ops_preview.ops);
+    statusEl.textContent = `Applied ${out.summary.length} edit(s). Ctrl+Z takes them back in one step.`;
+  } catch (e) { statusEl.textContent = e.message; }
+};
 document.getElementById('bk-refine').onclick = async () => {
   const instruction = window.prompt(`What should change? (${state.sel.size} room(s) selected stay exactly as they are)`, 'Add a barracks next to the entrance');
   if (instruction === null || !instruction.trim()) return;

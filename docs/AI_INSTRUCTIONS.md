@@ -12,11 +12,11 @@ binary, so a running studio always serves the pack that matches its code.
 | File | What it is |
 |---|---|
 | `pack.toml` | the pack `version`, the `schema_version`, and the list of files |
-| `system_map.md`, `system_world.md`, `system_refine.md`, `system_tags.md`, `system_theme_pack.md`, `system_outline.md` | the short system prompts the studio sends |
+| `system_map.md`, `system_world.md`, `system_refine.md`, `system_tags.md`, `system_theme_pack.md`, `system_outline.md`, `system_edit.md` | the short system prompts the studio sends |
 | `reference.md` | the full reference: fields, limits, how the layout works, what the linter checks |
 | `repair.md` | the text the studio sends back when a reply is refused |
 | `mistakes.md` | common mistakes and their fixes |
-| `mapspec.schema.json`, `worldspec.schema.json`, `outline.schema.json` | JSON Schemas (draft 2020-12) |
+| `mapspec.schema.json`, `worldspec.schema.json`, `outline.schema.json`, `editplan.schema.json` | JSON Schemas (draft 2020-12) |
 | `examples/*.json` | worked examples: `{request, spec, why}` |
 
 Placeholders such as `{{MAX_ROOMS}}` in the text files are filled from the real constants when

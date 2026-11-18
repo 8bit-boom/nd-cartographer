@@ -416,6 +416,63 @@ pub(crate) async fn refine_floor(
 }
 
 #[derive(Deserialize)]
+pub(crate) struct EditPlanBody {
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    pub(crate) floor: Option<String>,
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    pub(crate) instruction: String,
+}
+
+/// `POST /api/docs/{id}/edit-plan` `{floor?, instruction}` — ask the AI for typed edits to a
+/// painted floor (rename a room, light it, change a door, set its floor material, furnish it,
+/// leave a GM note). Returns `{plan, ops_preview, summary}`; the studio shows the summary and,
+/// when the GM agrees, sends `ops_preview` to `POST /api/docs/{id}/ops` (one undo step).
+/// Nothing is changed here.
+pub(crate) async fn edit_plan(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<EditPlanBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
+    #[cfg(feature = "bridge")]
+    {
+        let (floor, cell, floor_id) = {
+            let store = app.store.read().await;
+            let doc = store
+                .docs
+                .get(&id)
+                .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+            let idx = match &b.floor {
+                Some(f) => floors_by_id(&doc.floors, f)?,
+                None => 0,
+            };
+            (
+                doc.floors[idx].clone(),
+                doc.manifest.cell_size,
+                doc.floors[idx].id.clone(),
+            )
+        };
+        let cfg = app
+            .resolve_ai()
+            .map_err(|m| ApiError(CoreError::NotFound(m)))?;
+        let (plan, op, attempts) = draft::edit_plan(&cfg, &floor, cell, &b.instruction)
+            .await
+            .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        Ok(Json(serde_json::json!({
+            "plan": plan,
+            "summary": ndcart_core::editplan::summary(&plan),
+            "ops_preview": { "floor": floor_id, "ops": [op] },
+            "attempts": attempts,
+        })))
+    }
+    #[cfg(not(feature = "bridge"))]
+    {
+        let _ = (app, id, b);
+        Err(ApiError(CoreError::NotFound(NO_BRIDGE.into())))
+    }
+}
+
+#[derive(Deserialize)]
 pub(crate) struct AskBody {
     #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
     pub(crate) question: String,

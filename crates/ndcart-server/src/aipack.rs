@@ -36,6 +36,10 @@ pub const FILES: &[(&str, &str)] = &[
         "system_outline.md",
         include_str!("../assets/ai/system_outline.md"),
     ),
+    (
+        "system_edit.md",
+        include_str!("../assets/ai/system_edit.md"),
+    ),
     ("reference.md", include_str!("../assets/ai/reference.md")),
     ("repair.md", include_str!("../assets/ai/repair.md")),
     ("mistakes.md", include_str!("../assets/ai/mistakes.md")),
@@ -50,6 +54,10 @@ pub const FILES: &[(&str, &str)] = &[
     (
         "outline.schema.json",
         include_str!("../assets/ai/outline.schema.json"),
+    ),
+    (
+        "editplan.schema.json",
+        include_str!("../assets/ai/editplan.schema.json"),
     ),
     (
         "examples/map-shop.json",
@@ -104,6 +112,8 @@ pub const MANIFEST: &str = include_str!("../assets/ai/pack.toml");
 pub const MAPSPEC_SCHEMA: &str = include_str!("../assets/ai/mapspec.schema.json");
 /// The JSON Schema a WorldSpec reply must follow.
 pub const WORLDSPEC_SCHEMA: &str = include_str!("../assets/ai/worldspec.schema.json");
+/// The JSON Schema of an edit plan (typed edits to a painted floor).
+pub const EDITPLAN_SCHEMA: &str = include_str!("../assets/ai/editplan.schema.json");
 /// The JSON Schema of the multi-floor outline (step one of a stepwise draft).
 pub const OUTLINE_SCHEMA: &str = include_str!("../assets/ai/outline.schema.json");
 
@@ -144,6 +154,7 @@ pub enum Kind {
     Tags,
     ThemePack,
     Outline,
+    Edit,
 }
 
 impl Kind {
@@ -155,6 +166,7 @@ impl Kind {
             "tags" => Kind::Tags,
             "theme_pack" | "theme-pack" => Kind::ThemePack,
             "outline" => Kind::Outline,
+            "edit" => Kind::Edit,
             _ => return None,
         })
     }
@@ -166,6 +178,7 @@ impl Kind {
             Kind::Tags => "system_tags.md",
             Kind::ThemePack => "system_theme_pack.md",
             Kind::Outline => "system_outline.md",
+            Kind::Edit => "system_edit.md",
         }
     }
 }
@@ -221,12 +234,13 @@ pub fn render(text: &str) -> String {
 pub fn instructions(kind: &str) -> Result<Value, String> {
     use crate::specshape::SpecKind;
     let k = Kind::parse(kind).ok_or_else(|| {
-        format!("kind must be map, world, refine, tags, theme_pack or outline, not '{kind}'")
+        format!("kind must be map, world, refine, tags, theme_pack, outline or edit, not '{kind}'")
     })?;
     let schema_text = match k {
         Kind::Map | Kind::Refine => Some(schema(SpecKind::Map)),
         Kind::World => Some(schema(SpecKind::World)),
         Kind::Outline => Some(OUTLINE_SCHEMA),
+        Kind::Edit => Some(EDITPLAN_SCHEMA),
         Kind::Tags | Kind::ThemePack => None,
     };
     let want_world = k == Kind::World;
@@ -235,7 +249,7 @@ pub fn instructions(kind: &str) -> Result<Value, String> {
             .into_iter()
             .filter(|e| e.file.contains("world-") == want_world)
             .collect(),
-        Kind::Tags | Kind::ThemePack | Kind::Outline => Vec::new(),
+        Kind::Tags | Kind::ThemePack | Kind::Outline | Kind::Edit => Vec::new(),
     };
     if k == Kind::Refine {
         ex.sort_by_key(|e| !e.file.ends_with("map-refine.json"));
@@ -255,7 +269,7 @@ pub fn instructions(kind: &str) -> Result<Value, String> {
     }))
 }
 
-static SYSTEMS: LazyLock<[String; 6]> = LazyLock::new(|| {
+static SYSTEMS: LazyLock<[String; 7]> = LazyLock::new(|| {
     [
         Kind::Map,
         Kind::World,
@@ -263,6 +277,7 @@ static SYSTEMS: LazyLock<[String; 6]> = LazyLock::new(|| {
         Kind::Tags,
         Kind::ThemePack,
         Kind::Outline,
+        Kind::Edit,
     ]
     .map(|k| render(raw(k.file()).expect("pack file")))
 });
@@ -276,6 +291,7 @@ pub fn system(kind: Kind) -> &'static str {
         Kind::Tags => 3,
         Kind::ThemePack => 4,
         Kind::Outline => 5,
+        Kind::Edit => 6,
     };
     &SYSTEMS[i]
 }
