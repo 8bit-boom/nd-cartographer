@@ -695,8 +695,12 @@ pub(crate) async fn ai_models(State(app): State<App>) -> Result<Json<serde_json:
     };
     let key = {
         let stored = app.ai.lock().expect("ai settings").clone();
-        ai_settings::resolve_key(
+        ai_settings::resolve_key_for(
+            &url,
             std::env::var("ND_CARTO_LLM_KEY")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            std::env::var("ND_CARTO_LLM_KEY_FILE")
                 .ok()
                 .filter(|v| !v.is_empty()),
             &stored,
@@ -791,13 +795,18 @@ pub(crate) async fn ai_status(State(app): State<App>) -> Json<serde_json::Value>
 
 #[cfg(feature = "bridge")]
 pub(crate) fn ai_status_value(app: &App) -> serde_json::Value {
-    match app.resolve_ai() {
+    let mut v = match app.resolve_ai() {
         Ok(c) => serde_json::json!({
             "mode": if c.direct.is_some() { "standalone" } else { "nd-world" },
             "detail": c.describe(),
         }),
         Err(m) => serde_json::json!({ "mode": "off", "detail": m }),
+    };
+    // The model the studio runs itself: its supervisor's state (running, restarting, gave up).
+    if app.ai.lock().expect("ai settings").managed.is_some() {
+        v["managed"] = serde_json::to_value(crate::ai_local::serve::status()).unwrap_or_default();
     }
+    v
 }
 
 #[cfg(not(feature = "bridge"))]

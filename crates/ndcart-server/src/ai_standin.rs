@@ -64,6 +64,9 @@ pub struct Options {
     pub script: Vec<String>,
     /// Answer `/props` like llama.cpp does (otherwise 404, like a hosted API).
     pub llama_props: bool,
+    /// When set, `/v1/*` wants `Authorization: Bearer <key>` (a 401 otherwise), like
+    /// llama-server started with `--api-key-file`. `/health` stays public, as in llama.cpp.
+    pub api_key: Option<String>,
 }
 
 impl Default for Options {
@@ -75,6 +78,7 @@ impl Default for Options {
             delay_ms: 2000,
             script: Vec::new(),
             llama_props: true,
+            api_key: None,
         }
     }
 }
@@ -113,14 +117,45 @@ pub fn router(opts: Options) -> (Router, Arc<Stats>) {
         opts,
         stats: stats.clone(),
     });
+    let v1 = Router::new()
+        .route("/v1/models", get(models))
+        .route("/v1/chat/completions", post(chat))
+        .route_layer(axum::middleware::from_fn_with_state(
+            shared.clone(),
+            key_guard,
+        ));
     let app = Router::new()
         .route("/health", get(health))
         .route("/props", get(props))
-        .route("/v1/models", get(models))
-        .route("/v1/chat/completions", post(chat))
         .route("/__stats", get(stats_route))
+        .merge(v1)
         .with_state(shared);
     (app, stats)
+}
+
+/// The API key check (only when the stand-in was given a key).
+async fn key_guard(
+    State(s): State<St>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Some(key) = &s.opts.api_key {
+        let ok = req
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|k| k == key);
+        if !ok {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": {"message": "Invalid API Key", "type": "authentication_error", "code": 401}})),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
 }
 
 async fn health(State(s): State<St>) -> StatusCode {
@@ -394,9 +429,48 @@ pub async fn spawn(opts: Options) -> Handle {
 pub async fn run(args: Vec<String>) -> Result<(), String> {
     let mut opts = Options::default();
     let mut port: u16 = 8099;
+    // `--llama-compat`: take llama-server's command line (the managed-server tests point
+    // `ND_CARTO_LLAMA_SERVER` at a script that execs this), honouring `--port`,
+    // `--alias` and `--api-key-file` and ignoring the rest.
+    let compat = args.iter().any(|a| a == "--llama-compat");
+    if compat && args.iter().any(|a| a == "--version") {
+        eprintln!("version: 1 (ndcart-stand-in)");
+        return Ok(());
+    }
+    if compat && args.iter().any(|a| a == "--list-devices") {
+        eprintln!("Available devices:");
+        return Ok(());
+    }
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut val = |n: &str| it.next().ok_or(format!("{n} needs a value"));
+        if compat {
+            match a.as_str() {
+                "--llama-compat" => {}
+                "--alias" | "-a" => opts.models = vec![val("--alias")?],
+                "--api-key-file" => {
+                    let f = val("--api-key-file")?;
+                    let key = std::fs::read_to_string(&f)
+                        .map_err(|e| format!("cannot read the key file {f}: {e}"))?;
+                    opts.api_key = Some(key.trim().to_string());
+                }
+                // The stand-in's own flags still work in this mode.
+                "--behaviour" | "--behavior" | "--delay-ms" | "--loading" | "--port" => {}
+                // Flags of llama-server that take a value.
+                "-m" | "--model" | "--host" | "-c" | "--ctx-size" | "-np" | "--parallel"
+                | "-ngl" | "--gpu-layers" | "-t" | "--threads" => {
+                    let _ = it.next();
+                    continue;
+                }
+                _ => continue,
+            }
+            if !matches!(
+                a.as_str(),
+                "--behaviour" | "--behavior" | "--delay-ms" | "--loading" | "--port"
+            ) {
+                continue;
+            }
+        }
         match a.as_str() {
             "--port" => {
                 port = val("--port")?

@@ -559,7 +559,11 @@ async fn main() {
             }
             assets::init(data_dir.as_ref().map(|d| d.join("assets")));
             let app_data_dir = data_dir.clone();
-            let ai = ai_settings::load(data_dir.as_deref());
+            #[allow(unused_mut)]
+            let mut ai = ai_settings::load(data_dir.as_deref());
+            // A local model set to start with the studio (`ndcart ai setup`).
+            #[cfg(feature = "bridge")]
+            let supervisor = ai_local::serve::autostart(data_dir.as_deref(), &mut ai);
             let app: App = Arc::new(AppState {
                 store: tokio::sync::RwLock::new(store),
                 data_dir,
@@ -600,6 +604,10 @@ async fn main() {
                 })
                 .await
                 .unwrap();
+            #[cfg(feature = "bridge")]
+            if let Some(s) = supervisor {
+                s.shutdown().await;
+            }
         }
         other => {
             eprintln!(
@@ -622,7 +630,13 @@ async fn run_ai(args: Vec<String>) -> Result<(), String> {
         Some("pull") => ai_local::pull::run_pull(args.collect()).await,
         #[cfg(feature = "bridge")]
         Some("import") => ai_local::pull::run_import(args.collect()),
-        Some(o) => Err(format!("unknown ai command '{o}' (try: models, pull, import, stand-in)")),
+        #[cfg(feature = "bridge")]
+        Some("serve") => ai_local::serve::run_serve(args.collect()).await,
+        #[cfg(feature = "bridge")]
+        Some("stop") => ai_local::serve::run_stop(args.collect()),
+        #[cfg(feature = "bridge")]
+        Some("key") => ai_local::serve::run_key(args.collect()),
+        Some(o) => Err(format!("unknown ai command '{o}' (try: models, pull, import, serve, stop, key, stand-in)")),
         None => Err(
             "usage: ndcart ai models | stand-in --port N [--behaviour good|fix-once|garbage|slow|no-schema]"
                 .into(),

@@ -103,9 +103,17 @@ impl Config {
             (Some(_), None) => {
                 return Err("set the model name as well as the endpoint address".into())
             }
-            _ => None,
+            // No endpoint set: the model the studio runs itself, when there is one.
+            _ => crate::ai_settings::resolve_direct(None, None, stored),
         };
-        let key = env("ND_CARTO_LLM_KEY").or_else(|| stored.key.clone());
+        let key = direct.as_ref().and_then(|(u, _)| {
+            crate::ai_settings::resolve_key_for(
+                u,
+                env("ND_CARTO_LLM_KEY"),
+                env("ND_CARTO_LLM_KEY_FILE"),
+                stored,
+            )
+        });
         let cfg = Config {
             server: env("ND_CARTO_SERVER"),
             world: env("ND_CARTO_WORLD"),

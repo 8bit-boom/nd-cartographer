@@ -6,6 +6,9 @@
 //! The stored `key` never leaves the server: the GET redacts it, and it is
 //! only ever sent to the model endpoint itself as `Authorization: Bearer`.
 
+// The managed-model helpers are used by the bridge-only AI code.
+#![cfg_attr(not(feature = "bridge"), allow(dead_code))]
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
@@ -29,6 +32,65 @@ pub struct StoredAiSettings {
     /// Build maps in steps (an outline, then each floor) even for one floor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stepwise: Option<bool>,
+    /// A model the studio runs itself with llama.cpp (`ndcart ai setup`). Used when no other
+    /// endpoint is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<Managed>,
+}
+
+/// The managed local server (plan item 4.5). Defaults are applied by the accessors, so a file
+/// that names only `model_file` works.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+pub struct Managed {
+    /// The GGUF file, relative to `<data>/models` (or an absolute path).
+    pub model_file: String,
+    /// Context size (default 16384).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<u32>,
+    /// Loopback port (default 8391).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// `-ngl`: `auto` (default), `all`, or a number (`0` for CPU only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_layers: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u32>,
+    /// Start (and keep running) the server whenever `ndcart serve` runs.
+    #[serde(default)]
+    pub autostart: bool,
+    /// An explicit `llama-server` path (the environment variable still wins).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_path: Option<String>,
+    /// The file holding the server's API key (set when the server is first started).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_file: Option<String>,
+    /// The catalog id this came from, for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+}
+
+pub const MANAGED_ALIAS: &str = "ndcart-local";
+pub const DEFAULT_PORT: u16 = 8391;
+pub const DEFAULT_CTX: u32 = 16384;
+
+impl Managed {
+    pub fn port(&self) -> u16 {
+        self.port.unwrap_or(DEFAULT_PORT)
+    }
+    pub fn ctx(&self) -> u32 {
+        self.ctx.unwrap_or(DEFAULT_CTX)
+    }
+    pub fn base_url(&self) -> String {
+        format!("http://127.0.0.1:{}/v1", self.port())
+    }
+}
+
+/// The managed server's key, from its 0600 file (never from the command line).
+pub fn read_key_file(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 pub const FILE_NAME: &str = "ai-settings.json";
@@ -68,13 +130,36 @@ pub fn resolve_direct(
         (Some(u), Some(m)) if !u.trim().is_empty() && !m.trim().is_empty() => {
             Some((u.trim().to_string(), m.trim().to_string()))
         }
+        // Nothing else set: the model the studio runs itself.
+        (None, None) => stored
+            .managed
+            .as_ref()
+            .map(|m| (m.base_url(), MANAGED_ALIAS.to_string())),
         _ => None,
     }
 }
 
-/// The key as env-else-file.
-pub fn resolve_key(env_key: Option<String>, stored: &StoredAiSettings) -> Option<String> {
-    env_key.or_else(|| stored.key.clone())
+/// The key for the endpoint at `url`: the environment (`ND_CARTO_LLM_KEY`, or the file named by
+/// `ND_CARTO_LLM_KEY_FILE`), else the managed server's key file when `url` is the managed
+/// server (so its key is never sent anywhere else), else the saved key.
+pub fn resolve_key_for(
+    url: &str,
+    env_key: Option<String>,
+    env_key_file: Option<String>,
+    stored: &StoredAiSettings,
+) -> Option<String> {
+    if let Some(k) = env_key {
+        return Some(k);
+    }
+    if let Some(k) = env_key_file.as_deref().and_then(read_key_file) {
+        return Some(k);
+    }
+    if let Some(m) = &stored.managed {
+        if url.trim_end_matches('/') == m.base_url() {
+            return m.key_file.as_deref().and_then(read_key_file);
+        }
+    }
+    stored.key.clone()
 }
 
 /// A redacted view for the UI: which fields are set, never their secrets.
@@ -102,6 +187,8 @@ pub fn view(stored: &StoredAiSettings) -> AiSettingsView {
         "environment"
     } else if stored.direct_url.is_some() || stored.direct_model.is_some() {
         "saved"
+    } else if stored.managed.is_some() {
+        "managed"
     } else {
         "none"
     };
@@ -138,9 +225,12 @@ mod tests {
             resolve_direct(Some("http://env:2/v1".into()), None, &stored),
             Some(("http://env:2/v1".to_string(), "file-model".to_string()))
         );
-        assert_eq!(resolve_key(None, &stored), Some("file-key".to_string()));
         assert_eq!(
-            resolve_key(Some("env-key".into()), &stored),
+            resolve_key_for("http://file:1/v1", None, None, &stored),
+            Some("file-key".to_string())
+        );
+        assert_eq!(
+            resolve_key_for("http://file:1/v1", Some("env-key".into()), None, &stored),
             Some("env-key".to_string())
         );
         // Half-configured (url without model) is not a direct model.
@@ -162,6 +252,11 @@ mod tests {
             thinking: Some(true),
             cache: Some(true),
             stepwise: Some(true),
+            managed: Some(Managed {
+                model_file: "unsloth/X-GGUF/X.gguf".into(),
+                autostart: true,
+                ..Default::default()
+            }),
         };
         save(Some(&dir), &stored).unwrap();
         assert_eq!(load(Some(&dir)), stored);
@@ -186,6 +281,68 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_managed_model_is_the_fallback_and_its_key_goes_only_to_its_own_address() {
+        let dir = std::env::temp_dir().join(format!("ndcart-ai-managed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let kf = dir.join("k");
+        std::fs::write(&kf, "managed-key\n").unwrap();
+        let stored = StoredAiSettings {
+            key: Some("saved-key".into()),
+            managed: Some(Managed {
+                model_file: "m.gguf".into(),
+                port: Some(9000),
+                key_file: Some(kf.to_string_lossy().into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_direct(None, None, &stored),
+            Some((
+                "http://127.0.0.1:9000/v1".to_string(),
+                "ndcart-local".to_string()
+            ))
+        );
+        assert_eq!(
+            resolve_key_for("http://127.0.0.1:9000/v1", None, None, &stored).as_deref(),
+            Some("managed-key")
+        );
+        // Another address gets the saved key, never the managed one.
+        assert_eq!(
+            resolve_key_for("http://elsewhere:1/v1", None, None, &stored).as_deref(),
+            Some("saved-key")
+        );
+        // The environment wins: a key file there beats everything.
+        let ef = dir.join("e");
+        std::fs::write(&ef, "env-file-key").unwrap();
+        assert_eq!(
+            resolve_key_for(
+                "http://127.0.0.1:9000/v1",
+                None,
+                ef.to_str().map(String::from),
+                &stored
+            )
+            .as_deref(),
+            Some("env-file-key")
+        );
+        // An explicit saved endpoint beats the managed one.
+        let both = StoredAiSettings {
+            direct_url: Some("http://x/v1".into()),
+            direct_model: Some("m".into()),
+            ..stored.clone()
+        };
+        assert_eq!(resolve_direct(None, None, &both).unwrap().0, "http://x/v1");
+        // A half-set environment does not silently fall back to the managed model.
+        assert_eq!(
+            resolve_direct(Some("http://y/v1".into()), None, &stored),
+            None
+        );
+        assert_eq!(view(&stored).source, "managed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
