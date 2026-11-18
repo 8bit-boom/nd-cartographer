@@ -44,8 +44,9 @@ const INDEX_HTML: &str = include_str!("../../../ui/index.html");
 const APP_JS: &str = include_str!("../../../ui/app.js");
 const APP_CSS: &str = include_str!("../../../ui/app.css");
 
-/// (doc, floor, rev) -> derived walls.
-type WallCache = HashMap<(String, String, u64), Arc<Vec<Wall>>>;
+/// (doc, floor) -> (rev, derived walls): one entry per floor, replaced when
+/// the rev moves on, so the cache cannot grow with the number of edits.
+type WallCache = HashMap<(String, String), (u64, Arc<Vec<Wall>>)>;
 
 /// Drop every cached tile of one document.
 fn invalidate_tiles(app: &App, doc_id: &str) {
@@ -153,14 +154,29 @@ struct DocView {
     floors: Vec<FloorView>,
 }
 
+/// The floor's derived walls at `rev`: cached when the rev matches, otherwise
+/// derived and stored in place of the floor's previous entry.
+fn walls_for(
+    app: &App,
+    doc_id: &str,
+    floor: &FloorDoc,
+    cell_size: f64,
+    rev: u64,
+) -> Arc<Vec<Wall>> {
+    let mut cache = app.wall_cache.lock().expect("wall cache");
+    let key = (doc_id.to_string(), floor.id.clone());
+    if let Some((r, w)) = cache.get(&key) {
+        if *r == rev {
+            return w.clone();
+        }
+    }
+    let w = Arc::new(tiles::derive_walls(floor, cell_size));
+    cache.insert(key, (rev, w.clone()));
+    w
+}
+
 fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u64) -> FloorView {
-    let walls = {
-        let mut cache = app.wall_cache.lock().expect("wall cache");
-        cache
-            .entry((doc_id.to_string(), floor.id.clone(), rev))
-            .or_insert_with(|| Arc::new(tiles::derive_walls(floor, cell_size)))
-            .clone()
-    };
+    let walls = walls_for(app, doc_id, floor, cell_size, rev);
     FloorView {
         id: floor.id.clone(),
         name: floor.name.clone(),
@@ -4023,25 +4039,13 @@ async fn get_tile(
     if let Some(bytes) = app.tile_cache.lock().expect("tile cache").get(&key) {
         return Ok(png_response(bytes));
     }
-    let walls = {
-        let mut cache = app.wall_cache.lock().expect("wall cache");
-        cache
-            .entry((doc_id.clone(), floor_id.clone(), rev))
-            .or_insert_with(|| Arc::new(tiles::derive_walls(&floor, cell_size)))
-            .clone()
-    };
+    let walls = walls_for(&app, &doc_id, &floor, cell_size, rev);
     // The optional floor shown faintly underneath (must be a floor of this document).
     let ghost = match &onion_id {
         Some(oid) => {
             let oi = floors_by_id(&doc.floors, oid)?;
             let of = doc.floors[oi].clone();
-            let ow = {
-                let mut cache = app.wall_cache.lock().expect("wall cache");
-                cache
-                    .entry((doc_id.clone(), oid.clone(), rev))
-                    .or_insert_with(|| Arc::new(tiles::derive_walls(&of, cell_size)))
-                    .clone()
-            };
+            let ow = walls_for(&app, &doc_id, &of, cell_size, rev);
             Some((of, ow))
         }
         None => None,
@@ -7589,6 +7593,39 @@ mod tests {
         assert!(
             cells > 0,
             "reverting inside the retained window keeps older content"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_wall_cache_does_not_grow_with_edits() {
+        let app = test_app();
+        let router = build_router(app.clone());
+        let (id, f) = new_doc(&router, "W").await;
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        for i in 0..50 {
+            let st = post_ops_json(
+                &router,
+                &id,
+                serde_json::json!({"floor": f, "ops": [
+                    {"t":"paint_cells","space":"sp_a","cells":[{"x":i,"y":0}]}]}),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let (st, _) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+            assert_eq!(st, StatusCode::OK);
+        }
+        let floors = app.store.read().await.docs[&id].floors.len();
+        let entries = app.wall_cache.lock().unwrap().len();
+        assert!(
+            entries >= 1 && entries <= floors,
+            "{entries} entries, {floors} floors"
         );
     }
 }
