@@ -9,6 +9,8 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+mod spec_problems;
+
 fn test_app() -> App {
     Arc::new(AppState {
         store: tokio::sync::RwLock::new(store::Store::default()),

@@ -28,7 +28,9 @@ pub(crate) fn proposal_summary(p: &store::Proposal) -> serde_json::Value {
             })
         })
         .collect();
-    serde_json::json!({ "id": p.id, "name": p.spec.name, "seed": p.seed, "floors": floors })
+    // What the linter found about the spec, mapped back to the spec's room ids.
+    let problems = ndcart_core::speclint::lint_compiled(&p.spec, &p.floors).unwrap_or_default();
+    serde_json::json!({ "id": p.id, "name": p.spec.name, "seed": p.seed, "floors": floors, "problems": problems })
 }
 
 /// `POST /api/docs/{id}/propose` `{spec, seed?}` — lay a MapSpec (rooms and how

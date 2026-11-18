@@ -88,6 +88,8 @@ pub struct CompiledFloor {
     pub name: String,
     pub ops: Vec<Op>,
     pub centres: BTreeMap<String, (i32, i32)>,
+    /// Room id -> the id of the space the ops paint it as (for mapping lint results back).
+    pub spaces: BTreeMap<String, String>,
 }
 
 fn id_ok(s: &str) -> bool {
@@ -424,11 +426,18 @@ pub fn compile_floor_styled(
             debug_assert_eq!(lights, c.lights.len());
         }
     }
+    let spaces: BTreeMap<String, String> = f
+        .rooms
+        .iter()
+        .zip(&ids)
+        .map(|(r, s)| (r.id.clone(), c.spaces[(*s - 1) as usize].id.clone()))
+        .collect();
     let ops = c.into_ops();
     Ok(CompiledFloor {
         name: f.name.clone(),
         ops,
         centres,
+        spaces,
     })
 }
 

@@ -24,6 +24,7 @@ pub mod outline;
 pub mod overlay;
 pub mod prefab;
 pub mod scatter;
+pub mod speclint;
 pub mod stamp;
 pub mod stats;
 pub mod stroke;

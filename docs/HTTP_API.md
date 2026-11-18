@@ -64,11 +64,11 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/assets/{id}/make-stamp` | `{name, size?, key?, tolerance?, prompt?, seed?, ai?}` | Cut the prop out of its flat background, trim it, add it to the props (`stp_…`). |
 | POST | `/api/stamps/{id}/tags` | `{tags}` | The GM's confirmed tags for a custom prop; `…/suggest-tags` asks the AI (suggestions only). |
 | POST | `/api/docs/{id}/underlay` | `{floor?, asset, x, y, w, h, opacity?}` | A stored picture behind the floor, one undo step. |
-| POST | `/api/docs/{id}/propose` | `{spec: MapSpec, seed?}` | Lay a room-graph spec out and hold it as a proposal (nothing changes). 400 with a fix-it message if the spec breaks a rule. |
+| POST | `/api/docs/{id}/propose` | `{spec: MapSpec, seed?}` | Lay a room-graph spec out and hold it as a proposal (nothing changes). 400 with a fix-it message if the spec breaks a rule. The answer's `problems` lists what the floor linter found (`{severity, code, message, floor, rooms:[spec room ids]}`). |
 | GET | `/api/docs/{id}/proposals/{pid}/preview?floor=N&ppc=` | – | PNG of one proposed floor. |
 | POST | `/api/docs/{id}/proposals/{pid}/accept` | – | Adds the floors (and stairs) as new floors; undo with `undo-structure` once per floor. |
 | DELETE | `/api/docs/{id}/proposals/{pid}` | – | Reject. |
-| POST | `/api/draft` | `{prompt}` | Ask nd-world's AI for a MapSpec. Needs `ND_CARTO_SERVER`, `ND_CARTO_EMAIL`, `ND_CARTO_PASSWORD[_FILE]` in the studio's environment (404 naming what is missing otherwise). |
+| POST | `/api/draft` | `{prompt}` | Ask the AI (nd-world, or your own model) for a MapSpec; answers `{spec, warnings}` (linter findings, same shape as `problems` above). Needs `ND_CARTO_SERVER`, `ND_CARTO_EMAIL`, `ND_CARTO_PASSWORD[_FILE]` in the studio's environment (404 naming what is missing otherwise). |
 | GET | `/api/docs/{id}/preview?floor&x&y&radius&darkness&ppc` | – | PNG of what the table sees from a point (players' copy, fog, sight blocked by walls and closed doors, lamps light what they reach). |
 | POST | `/api/docs/{id}/scatter` | `{floor?, points:[[x,y]…], biome? \| assets[], spacing?, density?, seed}` | Fill an area with props (and, for a biome, a tinted region) as one undoable step. Biomes: forest, meadow, rocky, swamp, desert. |
 | GET | `/api/prefabs` | – | The prefab library shared by every project. |

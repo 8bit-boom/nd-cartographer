@@ -230,10 +230,12 @@ pub(crate) async fn draft_spec(
             .resolve_ai()
             .map_err(|m| ApiError(CoreError::NotFound(m)))?;
         let ctx = draft_context(&app, &b.doc, b.lore).await;
-        let spec = draft::draft(&cfg, &b.prompt, &ctx)
+        let d = draft::draft(&cfg, &b.prompt, &ctx)
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;
-        Ok(Json(serde_json::json!({ "spec": spec })))
+        Ok(Json(
+            serde_json::json!({ "spec": d.spec, "warnings": d.warnings }),
+        ))
     }
     #[cfg(not(feature = "bridge"))]
     {

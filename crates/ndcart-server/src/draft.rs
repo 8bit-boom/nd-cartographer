@@ -90,10 +90,35 @@ pub fn parse_reply(reply: &str) -> Result<MapSpec, String> {
         .map_err(|e| format!("The JSON did not match the schema: {e}."))?;
     spec.validate()
         .map_err(|e| format!("The spec broke a rule: {e}."))?;
-    // Laying it out is the last check: it may not fit.
-    ndcart_core::mapspec::compile(&spec, 1)
+    // Laying it out is the next check: it may not fit.
+    let laid = ndcart_core::mapspec::compile(&spec, 1)
         .map_err(|e| format!("The spec could not be laid out: {e}."))?;
+    // The floor linter runs on the result: an error here (a publish cap) goes back to the model.
+    let errors: Vec<String> = ndcart_core::speclint::lint_compiled(&spec, &laid)
+        .map_err(|e| format!("The spec could not be checked: {e}."))?
+        .into_iter()
+        .filter(|p| p.severity == ndcart_core::Severity::Error)
+        .map(|p| p.message)
+        .collect();
+    if !errors.is_empty() {
+        return Err(format!(
+            "The laid-out map breaks a limit: {} Make the map smaller.",
+            errors.join(" ")
+        ));
+    }
     Ok(spec)
+}
+
+/// A drafted map and what the linter noticed about it (shown beside the preview; none of it
+/// stops the GM from accepting).
+pub struct Drafted {
+    pub spec: MapSpec,
+    pub warnings: Vec<ndcart_core::speclint::SpecProblem>,
+}
+
+/// The linter's non-error findings for a spec that passed [`parse_reply`].
+pub fn warnings_of(spec: &MapSpec) -> Vec<ndcart_core::speclint::SpecProblem> {
+    ndcart_core::speclint::lint_spec(spec, 1).unwrap_or_default()
 }
 
 /// Ask until a valid spec comes back (the first try plus `repairs` corrections).
@@ -322,15 +347,17 @@ fn too_long(prompt: &str) -> Result<(), String> {
 }
 
 /// Draft a battle-map spec from `prompt`.
-pub async fn draft(cfg: &Config, prompt: &str, ctx: &Context) -> Result<MapSpec, String> {
+pub async fn draft(cfg: &Config, prompt: &str, ctx: &Context) -> Result<Drafted, String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
     let system = with_context(SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
-    draft_with(prompt, 2, |user| {
+    let spec = draft_with(prompt, 2, |user| {
         let (backend, system) = (&backend, system.clone());
         async move { backend.chat(&system, &user).await }
     })
-    .await
+    .await?;
+    let warnings = warnings_of(&spec);
+    Ok(Drafted { spec, warnings })
 }
 
 /// Draft a WORLD spec from `prompt`.
@@ -551,7 +578,10 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         &Context::default(),
     )
     .await?;
-    let text = serde_json::to_string_pretty(&spec).map_err(|e| e.to_string())?;
+    for w in &spec.warnings {
+        eprintln!("note ({}): {}", w.floor, w.message);
+    }
+    let text = serde_json::to_string_pretty(&spec.spec).map_err(|e| e.to_string())?;
     match out {
         Some(f) => {
             std::fs::write(&f, text).map_err(|e| format!("cannot write {f}: {e}"))?;
@@ -591,6 +621,15 @@ mod tests {
         assert!(parse_reply(&unlinked).unwrap_err().contains("not linked"));
         let huge = GOOD.replace(r#""w":8"#, r#""w":80"#);
         assert!(parse_reply(&huge).unwrap_err().contains("2-30"));
+    }
+
+    #[test]
+    fn linter_warnings_ride_along_with_a_valid_reply() {
+        // Warnings are findings, not refusals: GOOD has a secret-only room and still parses.
+        let spec = parse_reply(GOOD).unwrap();
+        let w = warnings_of(&spec);
+        assert!(w.iter().any(|p| p.code == "secret_only_room"), "{w:?}");
+        assert!(w.iter().all(|p| p.severity != ndcart_core::Severity::Error));
     }
 
     #[tokio::test]
