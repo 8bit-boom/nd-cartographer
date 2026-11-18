@@ -47,6 +47,25 @@ const APP_CSS: &str = include_str!("../../../ui/app.css");
 /// (doc, floor, rev) -> derived walls.
 type WallCache = HashMap<(String, String, u64), Arc<Vec<Wall>>>;
 
+/// Drop every cached tile of one document.
+fn invalidate_tiles(app: &App, doc_id: &str) {
+    let prefix = format!("{doc_id}/");
+    app.tile_cache
+        .lock()
+        .expect("tile cache")
+        .retain(|k, _| !k.starts_with(&prefix));
+}
+
+/// Drop one document's cached tiles and derived walls (after anything that
+/// changes it outside the plain edit path).
+fn invalidate_doc(app: &App, doc_id: &str) {
+    invalidate_tiles(app, doc_id);
+    app.wall_cache
+        .lock()
+        .expect("wall cache")
+        .retain(|k, _| k.0 != doc_id);
+}
+
 struct AppState {
     store: tokio::sync::RwLock<store::Store>,
     data_dir: Option<PathBuf>,
@@ -262,7 +281,7 @@ async fn create_doc(
         .clone();
     store::save_doc(app.data_dir.as_deref(), &store.docs[&manifest.id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
+    invalidate_doc(&app, &manifest.id);
     Ok(Json(manifest))
 }
 
@@ -539,7 +558,7 @@ async fn import_foundry(
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     let manifest = store.docs[&id].manifest.clone();
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({
         "manifest": manifest, "floor": floor_id,
         "stats": { "cols": scene.cols, "rows": scene.rows, "walls": scene.walls.len(), "lights": scene.lights.len() },
@@ -629,7 +648,7 @@ async fn import_uvtt(
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     let manifest = store.docs[&id].manifest.clone();
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({
         "manifest": manifest,
         "floor": floor_id,
@@ -702,8 +721,7 @@ async fn floors_route(
         .collect();
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(
         serde_json::json!({ "floors": floors, "floor": new_floor }),
     ))
@@ -727,8 +745,7 @@ async fn undo_structure(
         .collect();
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({ "floors": floors })))
 }
 
@@ -811,8 +828,7 @@ async fn restore_checkpoint(
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     store::save_checkpoints(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
@@ -920,8 +936,7 @@ async fn place_prefab(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
@@ -1034,8 +1049,7 @@ async fn scatter_props(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
@@ -1381,7 +1395,7 @@ async fn reroll_room(
     doc.apply_ops(&floor_id, &[ndcart_core::Op::Batch { ops }])?;
     store::save_doc(app.data_dir.as_deref(), doc);
     drop(store);
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({
         "ok": true, "removed": removed, "placed": added,
     })))
@@ -1428,8 +1442,7 @@ async fn furnish_rooms(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
@@ -1732,8 +1745,7 @@ async fn set_underlay(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
@@ -1778,8 +1790,7 @@ async fn generate_map(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
@@ -1874,7 +1885,7 @@ async fn generate_world(
     doc.apply_ops(&floor_id, &[Op::Batch { ops }])?;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({
         "ok": true, "cols": cols, "rows": rows, "rivers": river_count,
         "sea_level": t.sea_level(), "chunks": t.chunk_count(),
@@ -2615,7 +2626,7 @@ async fn revert_to(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), doc);
     drop(store);
-    app.wall_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(
         serde_json::json!({ "ok": true, "rev": rev, "restored_to": index }),
     ))
@@ -2781,8 +2792,7 @@ async fn accept_proposal(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(
         serde_json::json!({ "ok": true, "rev": rev, "floors": floors }),
     ))
@@ -3497,8 +3507,7 @@ async fn accept_world(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), &store.docs[&id]);
     drop(store);
-    app.wall_cache.lock().expect("wall cache").clear();
-    app.tile_cache.lock().expect("tile cache").clear();
+    invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({ "ok": true, "rev": rev })))
 }
 
@@ -3939,11 +3948,7 @@ async fn post_ops(
     store::save_doc_fast(app.data_dir.as_deref(), doc);
     drop(store);
     // Invalidate stale tiles/walls for this document.
-    let prefix = format!("{id}/");
-    app.tile_cache
-        .lock()
-        .expect("tile cache")
-        .retain(|k, _| !k.starts_with(&prefix));
+    invalidate_tiles(&app, &id);
     Ok(Json(serde_json::json!({"ok": true, "rev": rev})))
 }
 
@@ -3967,11 +3972,7 @@ async fn post_undo(
     let rev = doc.rev;
     store::save_doc_fast(app.data_dir.as_deref(), doc);
     drop(store);
-    let prefix = format!("{id}/");
-    app.tile_cache
-        .lock()
-        .expect("tile cache")
-        .retain(|k, _| !k.starts_with(&prefix));
+    invalidate_tiles(&app, &id);
     Ok(Json(serde_json::json!({"ok": true, "rev": rev})))
 }
 
@@ -7396,5 +7397,36 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
         assert_eq!(floor_digest(&router, &id).await, before);
+    }
+
+    #[tokio::test]
+    async fn revert_busts_the_tile_cache() {
+        let router = build_router(test_app());
+        let (id, f) = new_doc(&router, "T").await;
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": f, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+                {"t":"paint_cells","space":"sp_a","cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1},{"x":1,"y":1}]}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let uri = format!("/tiles/{id}/{f}/0/0_0");
+        let (st, painted) = call(&router, "GET", &uri, vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/revert"),
+            serde_json::json!({"floor": f, "index": 0})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, reverted) = call(&router, "GET", &uri, vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_ne!(painted, reverted, "revert must not serve the old tile");
     }
 }
