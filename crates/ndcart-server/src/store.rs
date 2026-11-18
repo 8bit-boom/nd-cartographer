@@ -466,6 +466,8 @@ pub struct Store {
     pub docs: BTreeMap<String, StoredDoc>,
     /// The prefab library, shared by every document.
     pub prefabs: BTreeMap<String, ndcart_core::Prefab>,
+    /// Project folders `load_dir` could not read (shown by the doctor).
+    pub skipped: Vec<String>,
 }
 
 impl Store {
@@ -477,7 +479,7 @@ impl Store {
     }
 
     pub fn load_dir(&mut self, dir: &Path) -> CoreResult<()> {
-        let mut count = 0usize;
+        let before = self.docs.len();
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => return Ok(()),
@@ -487,99 +489,18 @@ impl Store {
             if !doc_dir.is_dir() {
                 continue;
             }
-            let manifest_path = doc_dir.join("manifest.json");
-            let snapshot_path = doc_dir.join("snapshot.json");
-            let floors_path = doc_dir.join("floors.json"); // before snapshots existed
-            let journal_path = doc_dir.join("journal.ndjson");
-            if !(manifest_path.is_file() && (snapshot_path.is_file() || floors_path.is_file())) {
-                continue;
+            // One unreadable project must not keep the others from loading.
+            if let Err(err) = self.load_one(&doc_dir) {
+                eprintln!("ndcart: skipping {}: {err}", doc_dir.display());
+                self.skipped.push(
+                    doc_dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| doc_dir.display().to_string()),
+                );
             }
-            let read = |p: &Path| {
-                std::fs::read_to_string(p).map_err(|e| {
-                    ndcart_core::CoreError::Invalid(format!("reading {}: {e}", p.display()))
-                })
-            };
-            let bad = |p: &Path, e: serde_json::Error| {
-                ndcart_core::CoreError::Invalid(format!("parsing {}: {e}", p.display()))
-            };
-            let manifest: Manifest =
-                serde_json::from_str(&read(&manifest_path)?).map_err(|e| bad(&manifest_path, e))?;
-            // The snapshot says how much of the journal it already contains; older
-            // projects had a plain `floors.json` that always held everything.
-            let (mut floors, snapshot_len): (Vec<FloorDoc>, Option<usize>) = if snapshot_path
-                .is_file()
-            {
-                #[derive(serde::Deserialize)]
-                struct Snap {
-                    journal_len: usize,
-                    floors: Vec<FloorDoc>,
-                }
-                let snap: Snap = serde_json::from_str(&read(&snapshot_path)?)
-                    .map_err(|e| bad(&snapshot_path, e))?;
-                (snap.floors, Some(snap.journal_len))
-            } else {
-                (
-                    serde_json::from_str(&read(&floors_path)?).map_err(|e| bad(&floors_path, e))?,
-                    None,
-                )
-            };
-            let journal_text = std::fs::read_to_string(&journal_path).unwrap_or_default();
-            let journal = Journal::from_ndjson(&journal_text)?;
-            let snapshot_len = snapshot_len.unwrap_or(journal.len()).min(journal.len());
-            // Edits made after the snapshot are in the journal's tail: apply them.
-            for e in &journal.entries()[snapshot_len..] {
-                let target = match &e.floor {
-                    Some(fid) => floors.iter_mut().find(|f| &f.id == fid),
-                    None => floors.first_mut(),
-                };
-                // A floor removed since is simply gone; its old edits have nowhere to go.
-                if let Some(f) = target {
-                    apply_op(f, &e.op).map_err(|err| {
-                        ndcart_core::CoreError::Invalid(format!(
-                            "replaying the journal of {}: {err}",
-                            doc_dir.display()
-                        ))
-                    })?;
-                }
-            }
-            let structure = StructJournal::from_ndjson(
-                &std::fs::read_to_string(doc_dir.join("structure.ndjson")).unwrap_or_default(),
-            )?;
-            for f in &mut floors {
-                f.grid.fixup();
-            }
-            let rev = journal.len() as u64;
-            let jlen = journal.len();
-            let id = manifest.id.clone();
-            self.docs.insert(
-                id,
-                StoredDoc {
-                    manifest,
-                    floors,
-                    journal,
-                    structure,
-                    checkpoints: std::fs::read_to_string(doc_dir.join("checkpoints.json"))
-                        .ok()
-                        .and_then(|t| serde_json::from_str(&t).ok())
-                        .unwrap_or_default(),
-                    proposals: Vec::new(),
-                    world_proposals: Vec::new(),
-                    table: None,
-                    rev,
-                    persisted: {
-                        let p = Persisted::default();
-                        p.appended.store(jlen, std::sync::atomic::Ordering::Relaxed);
-                        // The snapshot is older than the journal when a tail was replayed.
-                        p.snapshot_len
-                            .store(snapshot_len, std::sync::atomic::Ordering::Relaxed);
-                        p.snapshot_at
-                            .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
-                        p
-                    },
-                },
-            );
-            count += 1;
         }
+        let count = self.docs.len() - before;
         if let Ok(rd) = std::fs::read_dir(dir.join("prefabs")) {
             for e in rd.flatten() {
                 if let Some(p) = std::fs::read_to_string(e.path())
@@ -593,6 +514,102 @@ impl Store {
         if count > 0 {
             println!("ndcart: loaded {count} document(s) from {}", dir.display());
         }
+        Ok(())
+    }
+
+    /// Load one project directory into the store. A directory that is not a
+    /// project is ignored (Ok); a broken one is an Err.
+    fn load_one(&mut self, doc_dir: &Path) -> CoreResult<()> {
+        let manifest_path = doc_dir.join("manifest.json");
+        let snapshot_path = doc_dir.join("snapshot.json");
+        let floors_path = doc_dir.join("floors.json"); // before snapshots existed
+        let journal_path = doc_dir.join("journal.ndjson");
+        if !(manifest_path.is_file() && (snapshot_path.is_file() || floors_path.is_file())) {
+            return Ok(());
+        }
+        let read = |p: &Path| {
+            std::fs::read_to_string(p).map_err(|e| {
+                ndcart_core::CoreError::Invalid(format!("reading {}: {e}", p.display()))
+            })
+        };
+        let bad = |p: &Path, e: serde_json::Error| {
+            ndcart_core::CoreError::Invalid(format!("parsing {}: {e}", p.display()))
+        };
+        let manifest: Manifest =
+            serde_json::from_str(&read(&manifest_path)?).map_err(|e| bad(&manifest_path, e))?;
+        // The snapshot says how much of the journal it already contains; older
+        // projects had a plain `floors.json` that always held everything.
+        let (mut floors, snapshot_len): (Vec<FloorDoc>, Option<usize>) = if snapshot_path.is_file()
+        {
+            #[derive(serde::Deserialize)]
+            struct Snap {
+                journal_len: usize,
+                floors: Vec<FloorDoc>,
+            }
+            let snap: Snap =
+                serde_json::from_str(&read(&snapshot_path)?).map_err(|e| bad(&snapshot_path, e))?;
+            (snap.floors, Some(snap.journal_len))
+        } else {
+            (
+                serde_json::from_str(&read(&floors_path)?).map_err(|e| bad(&floors_path, e))?,
+                None,
+            )
+        };
+        let journal_text = std::fs::read_to_string(&journal_path).unwrap_or_default();
+        let journal = Journal::from_ndjson(&journal_text)?;
+        let snapshot_len = snapshot_len.unwrap_or(journal.len()).min(journal.len());
+        // Edits made after the snapshot are in the journal's tail: apply them.
+        for e in &journal.entries()[snapshot_len..] {
+            let target = match &e.floor {
+                Some(fid) => floors.iter_mut().find(|f| &f.id == fid),
+                None => floors.first_mut(),
+            };
+            // A floor removed since is simply gone; its old edits have nowhere to go.
+            if let Some(f) = target {
+                apply_op(f, &e.op).map_err(|err| {
+                    ndcart_core::CoreError::Invalid(format!(
+                        "replaying the journal of {}: {err}",
+                        doc_dir.display()
+                    ))
+                })?;
+            }
+        }
+        let structure = StructJournal::from_ndjson(
+            &std::fs::read_to_string(doc_dir.join("structure.ndjson")).unwrap_or_default(),
+        )?;
+        for f in &mut floors {
+            f.grid.fixup();
+        }
+        let rev = journal.len() as u64;
+        let jlen = journal.len();
+        let id = manifest.id.clone();
+        self.docs.insert(
+            id,
+            StoredDoc {
+                manifest,
+                floors,
+                journal,
+                structure,
+                checkpoints: std::fs::read_to_string(doc_dir.join("checkpoints.json"))
+                    .ok()
+                    .and_then(|t| serde_json::from_str(&t).ok())
+                    .unwrap_or_default(),
+                proposals: Vec::new(),
+                world_proposals: Vec::new(),
+                table: None,
+                rev,
+                persisted: {
+                    let p = Persisted::default();
+                    p.appended.store(jlen, std::sync::atomic::Ordering::Relaxed);
+                    // The snapshot is older than the journal when a tail was replayed.
+                    p.snapshot_len
+                        .store(snapshot_len, std::sync::atomic::Ordering::Relaxed);
+                    p.snapshot_at
+                        .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+                    p
+                },
+            },
+        );
         Ok(())
     }
 }
@@ -799,6 +816,22 @@ mod persistence_tests {
         let mut st = Store::default();
         st.load_dir(dir).unwrap();
         st
+    }
+
+    #[test]
+    fn one_broken_project_is_skipped_not_fatal() {
+        let dir = tmpdir("skip");
+        let a = StoredDoc::new("Good", DocKind::Battle);
+        let b = StoredDoc::new("Bad", DocKind::Battle);
+        let (aid, bid) = (a.manifest.id.clone(), b.manifest.id.clone());
+        save_doc(Some(&dir), &a);
+        save_doc(Some(&dir), &b);
+        std::fs::write(dir.join(&bid).join("snapshot.json"), "{").unwrap();
+        let mut st = Store::default();
+        st.load_dir(&dir).unwrap();
+        assert_eq!(st.docs.len(), 1);
+        assert!(st.docs.contains_key(&aid));
+        assert_eq!(st.skipped, vec![bid]);
     }
 
     #[test]

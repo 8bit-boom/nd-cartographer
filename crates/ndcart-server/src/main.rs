@@ -3009,6 +3009,18 @@ async fn doctor_checks(State(app): State<App>) -> Json<serde_json::Value> {
             .unwrap_or_default();
     #[cfg(feature = "bridge")]
     checks.extend(doctor::ai_checks().await);
+    let skipped = app.store.read().await.skipped.clone();
+    if !skipped.is_empty() {
+        checks.push(doctor::Check {
+            level: doctor::Level::Warn,
+            what: "projects",
+            detail: format!(
+                "{} project folder(s) could not be loaded and were skipped: {}",
+                skipped.len(),
+                skipped.join(", ")
+            ),
+        });
+    }
     Json(serde_json::json!({ "checks": checks }))
 }
 
