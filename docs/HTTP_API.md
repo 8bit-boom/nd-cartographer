@@ -116,7 +116,7 @@ Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/api/docs/{id}/generate` | Body `{seed?, cols?, rows?, land?, continent?, ridges?, rivers?}` (size capped at 512×512 cells). Replaces the first floor's terrain and rivers as one undoable step; returns `{cols, rows, rivers, sea_level, chunks}`. Same seed ⇒ the same world. |
+| POST | `/api/docs/{id}/generate` | Body `{floor?, seed?, cols?, rows?, land?, continent?, ridges?, rivers?}` (size capped at 512×512 cells). Replaces the terrain and rivers of floor `floor` (default: the first; an unknown id is a 404) as one undoable step; returns `{floor, cols, rows, rivers, sea_level, chunks}`. Same seed ⇒ the same world. |
 
 ## Assets and import
 

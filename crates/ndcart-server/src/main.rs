@@ -921,6 +921,8 @@ async fn import_bundle(
 
 #[derive(Deserialize)]
 struct GenerateBody {
+    /// The floor to draw the world on (default: the first).
+    floor: Option<String>,
     seed: Option<u32>,
     cols: Option<u32>,
     rows: Option<u32>,
@@ -2117,9 +2119,13 @@ async fn generate_world(
         .docs
         .get_mut(&id)
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
-    let floor_id = doc.floors[0].id.clone();
+    let idx = match &b.floor {
+        Some(fid) => floors_by_id(&doc.floors, fid)?,
+        None => 0,
+    };
+    let floor_id = doc.floors[idx].id.clone();
     let t = &world.terrain;
-    let mut ops: Vec<Op> = doc.floors[0]
+    let mut ops: Vec<Op> = doc.floors[idx]
         .rivers
         .iter()
         .map(|r| Op::RemoveRiver { id: r.id.clone() })
@@ -2150,7 +2156,7 @@ async fn generate_world(
     drop(store);
     invalidate_doc(&app, &id);
     Ok(Json(serde_json::json!({
-        "ok": true, "cols": cols, "rows": rows, "rivers": river_count,
+        "ok": true, "floor": floor_id, "cols": cols, "rows": rows, "rivers": river_count,
         "sea_level": t.sea_level(), "chunks": t.chunk_count(),
     })))
 }
@@ -5544,6 +5550,70 @@ mod tests {
             .unwrap()
             .to_string();
         (id, floor)
+    }
+
+    #[tokio::test]
+    async fn a_world_is_generated_on_the_chosen_floor() {
+        let router = build_router(test_app());
+        let (id, first) = region_doc(&router).await;
+        let (_, b) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/floors"),
+            serde_json::json!({"action":"add","name":"Second"})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+        let second = jv(&b)["floor"].as_str().unwrap().to_string();
+        let gen =
+            serde_json::json!({"floor": second, "seed": 7, "cols": 24, "rows": 20, "rivers": 2});
+        let (st, body) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/generate"),
+            gen.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        assert_eq!(jv(&body)["floor"], serde_json::json!(second));
+        let (_, doc) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let v = jv(&doc);
+        let floor = |fid: &str| {
+            v["floors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["id"] == fid)
+                .unwrap()
+                .clone()
+        };
+        assert!(
+            floor(&first)["terrain"].is_null(),
+            "the first floor is untouched"
+        );
+        assert!(floor(&first)["canvas"].is_null());
+        assert!(floor(&second)["terrain"]["chunks"].as_u64().unwrap() > 0);
+        assert_eq!(floor(&second)["canvas"], serde_json::json!([24, 20]));
+        // An unknown floor is refused; no floor means the first.
+        let bad = serde_json::json!({"floor": "nope", "cols": 16, "rows": 16});
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/generate"),
+            bad.to_string().into_bytes(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, body) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/generate"),
+            br#"{"cols":16,"rows":16}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(jv(&body)["floor"], serde_json::json!(first));
     }
 
     #[tokio::test]

@@ -1604,7 +1604,7 @@ document.getElementById('ts-regen').onclick = () => {
   document.getElementById('nd-name').value = state.doc.manifest.name;
   // Regenerate in place: the dialog's submit creates a NEW project, so handle this one separately.
   if (window.confirm('Generate a new world over this one? (Undo brings the old one back.)')) {
-    api('POST', `/api/docs/${state.docId}/generate`, worldParams()).then(() => { tileCache.clear(); return refresh(); })
+    api('POST', `/api/docs/${state.docId}/generate`, { ...worldParams(), floor: state.floorId }).then(() => { tileCache.clear(); return refresh(); })
       .catch((err) => { statusEl.textContent = `Could not generate: ${err.message}`; });
   }
 };
