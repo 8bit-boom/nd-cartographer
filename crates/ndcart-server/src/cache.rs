@@ -86,7 +86,6 @@ impl<V> Lru<V> {
         }
     }
 
-    #[allow(dead_code)]
     /// Keep only the entries whose key satisfies `keep`.
     pub fn retain_keys(&mut self, keep: impl Fn(&str) -> bool) {
         let drop: Vec<String> = self.map.keys().filter(|k| !keep(k)).cloned().collect();

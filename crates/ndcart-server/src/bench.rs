@@ -115,7 +115,7 @@ pub(crate) async fn run_large(json: bool) {
         data_dir: None,
         ai: Mutex::new(ai_settings::load(None)),
         wall_cache: Mutex::new(HashMap::new()),
-        tile_cache: Mutex::new(HashMap::new()),
+        tile_cache: Mutex::new(crate::cache::Lru::new(TILE_CACHE_BYTES)),
         heavy: tokio::sync::Semaphore::new(heavy_permits()),
         table_tokens: Default::default(),
     });

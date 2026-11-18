@@ -50,13 +50,16 @@ const APP_CSS: &str = include_str!("../../../ui/app.css");
 /// the rev moves on, so the cache cannot grow with the number of edits.
 type WallCache = HashMap<(String, String), (u64, Arc<Vec<Wall>>)>;
 
+/// Byte budget of the tile cache.
+const TILE_CACHE_BYTES: usize = 128 << 20;
+
 /// Drop every cached tile of one document.
 fn invalidate_tiles(app: &App, doc_id: &str) {
     let prefix = format!("{doc_id}/");
     app.tile_cache
         .lock()
         .expect("tile cache")
-        .retain(|k, _| !k.starts_with(&prefix));
+        .retain_keys(|k| !k.starts_with(&prefix));
 }
 
 /// Drop one document's cached tiles and derived walls (after anything that
@@ -76,8 +79,9 @@ struct AppState {
     /// OpenAI-compatible endpoint); loaded from the data dir, saved on POST.
     ai: Mutex<ai_settings::StoredAiSettings>,
     wall_cache: Mutex<WallCache>,
-    /// "doc/floor/z/x_y/rev/onion/era" -> PNG bytes; cleared wholesale when big.
-    tile_cache: Mutex<HashMap<String, Vec<u8>>>,
+    /// "doc/floor/z/x_y/rev/onion/era" -> PNG bytes; least recently used
+    /// tiles are evicted over [`TILE_CACHE_BYTES`].
+    tile_cache: Mutex<cache::Lru<bytes::Bytes>>,
     /// Limits how many big bakes (exports, pdf, previews, convert) run at
     /// once, so a few parallel requests cannot exhaust memory.
     heavy: tokio::sync::Semaphore,
@@ -4093,7 +4097,13 @@ async fn get_tile(
         onion_id.as_deref().unwrap_or("-"),
         era_id.unwrap_or("-")
     );
-    if let Some(bytes) = app.tile_cache.lock().expect("tile cache").get(&key) {
+    let hit = app
+        .tile_cache
+        .lock()
+        .expect("tile cache")
+        .get(&key)
+        .cloned();
+    if let Some(bytes) = hit {
         return Ok(png_response(bytes));
     }
     let floor = doc.floors[idx].clone();
@@ -4123,22 +4133,21 @@ async fn get_tile(
     })
     .await
     .map_err(|e| CoreError::Invalid(format!("tile bake failed: {e}")))?;
-    let mut cache = app.tile_cache.lock().expect("tile cache");
-    if cache.len() > 2_000 {
-        cache.clear();
-    }
-    cache.insert(key, bytes.clone());
-    drop(cache);
-    Ok(png_response(&bytes))
+    let bytes = bytes::Bytes::from(bytes);
+    app.tile_cache
+        .lock()
+        .expect("tile cache")
+        .insert(key, bytes.clone(), bytes.len());
+    Ok(png_response(bytes))
 }
 
-fn png_response(bytes: &[u8]) -> Response {
+fn png_response(bytes: bytes::Bytes) -> Response {
     (
         [
             (header::CONTENT_TYPE, "image/png"),
             (header::CACHE_CONTROL, "private, max-age=86400"),
         ],
-        bytes.to_vec(),
+        bytes,
     )
         .into_response()
 }
@@ -4607,7 +4616,7 @@ async fn main() {
                 data_dir,
                 ai: Mutex::new(ai),
                 wall_cache: Mutex::new(HashMap::new()),
-                tile_cache: Mutex::new(HashMap::new()),
+                tile_cache: Mutex::new(cache::Lru::new(TILE_CACHE_BYTES)),
                 heavy: tokio::sync::Semaphore::new(heavy_permits()),
                 table_tokens: Default::default(),
             });
@@ -4669,7 +4678,7 @@ mod tests {
             data_dir: None,
             ai: Mutex::new(ai_settings::load(None)),
             wall_cache: Mutex::new(HashMap::new()),
-            tile_cache: Mutex::new(HashMap::new()),
+            tile_cache: Mutex::new(cache::Lru::new(TILE_CACHE_BYTES)),
             heavy: tokio::sync::Semaphore::new(heavy_permits()),
             table_tokens: Default::default(),
         })
@@ -7582,6 +7591,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tile_cache_stays_inside_its_byte_budget() {
+        let app = test_app();
+        let (id, f);
+        let router = build_router(app.clone());
+        (id, f) = new_doc(&router, "T").await;
+        let (_, one) = call(&router, "GET", &format!("/tiles/{id}/{f}/0/0_0"), vec![]).await;
+        let budget = one.len() * 3 + one.len() / 2;
+        *app.tile_cache.lock().unwrap() = cache::Lru::new(budget);
+        for x in 0..10 {
+            let (st, _) = call(&router, "GET", &format!("/tiles/{id}/{f}/0/{x}_0"), vec![]).await;
+            assert_eq!(st, StatusCode::OK);
+        }
+        let c = app.tile_cache.lock().unwrap();
+        assert!(c.used() <= budget, "{} > {budget}", c.used());
+        assert!(c.len() >= 1 && c.len() <= 10);
+    }
+
+    #[tokio::test]
     async fn revert_busts_the_tile_cache() {
         let router = build_router(test_app());
         let (id, f) = new_doc(&router, "T").await;
@@ -7933,7 +7960,7 @@ mod tests {
             data_dir: None,
             ai: Mutex::new(ai_settings::load(None)),
             wall_cache: Mutex::new(HashMap::new()),
-            tile_cache: Mutex::new(HashMap::new()),
+            tile_cache: Mutex::new(cache::Lru::new(TILE_CACHE_BYTES)),
             heavy: tokio::sync::Semaphore::new(1),
             table_tokens: Default::default(),
         });
