@@ -67,7 +67,7 @@ pub fn extract_floor_spec(
         });
         let room_id = ok_id(id).ok_or_else(|| {
             CoreError::Invalid(format!(
-                "space id '{id}' is not usable in a spec (1..=40 chars of a-z 0-9 _ -)"
+                "space id '{id}' is not usable in a spec (1..=40 chars of A-Z a-z 0-9 _ -)"
             ))
         })?;
         rooms.push(RoomSpec {
@@ -177,7 +177,7 @@ fn floor_land_room(target: &FloorDoc, c: CellKey) -> Option<String> {
         .map(|s| ok_id(s).unwrap_or_else(|| "hall".into()))
 }
 
-/// Spec ids are 1..=40 chars of a-z 0-9 _ - (the same rule mapspec applies).
+/// Spec ids are 1..=40 chars of A-Z a-z 0-9 _ - (the same rule mapspec applies).
 fn ok_id(s: &str) -> Option<String> {
     let ok = !s.is_empty()
         && s.len() <= 40

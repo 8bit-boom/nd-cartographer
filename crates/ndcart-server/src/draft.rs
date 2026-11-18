@@ -24,7 +24,7 @@ Schema:
     {
       "name": string (unique, 1-40 chars),
       "rooms": [                    // 1-60 rooms per floor
-        {"id": string (a-z 0-9 _ -), "name": string, "w": 2-30, "h": 2-30, "kind": "room"|"corridor"|"area", "lit": true|false}
+        {"id": string (1-40 chars of A-Z a-z 0-9 _ -; lowercase is best), "name": string, "w": 2-30, "h": 2-30, "kind": "room"|"corridor"|"area", "lit": true|false}
       ],
       "links": [                    // how rooms connect; EVERY room must be reachable from the first room
         {"a": room id, "b": room id, "kind": "door"|"opening"|"secret"}

@@ -43,7 +43,7 @@ overland map). Paste either into the studio's **✨ From a spec…** dialog, or 
 |---|---|
 | `name` | 1-80 characters |
 | `floors` | 1-12; names unique, 1-40 characters |
-| `rooms` | 1-60 per floor; `id` unique, 1-40 of `a-z 0-9 _ -`; `name` 1-60; `w`,`h` 2-30 squares; `kind` `room` (default), `corridor` or `area`; `lit` default true (a lamp in the room) |
+| `rooms` | 1-60 per floor; `id` unique, 1-40 of `A-Z a-z 0-9 _ -` (lowercase is recommended); `name` 1-60; `w`,`h` 2-30 squares; `kind` `room` (default), `corridor` or `area`; `lit` default true (a lamp in the room) |
 | `links` | `a`,`b` are room ids on the same floor; `kind` `door` (default), `opening` (an archway) or `secret` |
 | `stairs` | `room` on this floor; `to_floor` another floor's name; optional `to_room` and `label`. The way back is added unless the other floor already has stairs here |
 

@@ -125,7 +125,7 @@ impl MapSpec {
             for r in &f.rooms {
                 if !id_ok(&r.id) || !ids.insert(r.id.as_str()) {
                     return bad(format!(
-                        "floor '{}': room ids must be unique, 1-40 chars of a-z 0-9 _ -",
+                        "floor '{}': room ids must be unique, 1-40 chars of A-Z a-z 0-9 _ - (lowercase is best)",
                         f.name
                     ));
                 }
@@ -660,6 +660,23 @@ mod tests {
             j.push(&mut f, op).unwrap();
         }
         f
+    }
+
+    #[test]
+    fn ids_may_use_capitals_and_the_message_says_so() {
+        let mut m = station();
+        m.floors[0].rooms[0].id = "Hall_1".into();
+        for l in &mut m.floors[0].links {
+            for e in [&mut l.a, &mut l.b] {
+                if e == "hall" {
+                    *e = "Hall_1".into();
+                }
+            }
+        }
+        m.validate().expect("Hall_1 is a valid id");
+        m.floors[0].rooms[0].id = "Hall 1".into();
+        let e = m.validate().unwrap_err().to_string();
+        assert!(e.contains("A-Z a-z 0-9 _ -"), "{e}");
     }
 
     #[test]
