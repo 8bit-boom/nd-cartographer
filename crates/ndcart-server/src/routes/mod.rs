@@ -2,3 +2,4 @@
 //! one place that lists every route.
 
 pub(crate) mod system;
+pub(crate) mod tiles;
