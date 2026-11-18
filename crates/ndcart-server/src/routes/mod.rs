@@ -3,6 +3,7 @@
 
 pub(crate) mod ai;
 pub(crate) mod assets;
+pub(crate) mod docs;
 pub(crate) mod edit;
 pub(crate) mod export;
 pub(crate) mod import;
