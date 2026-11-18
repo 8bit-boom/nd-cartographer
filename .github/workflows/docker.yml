@@ -19,6 +19,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      - name: Compose files (the optional local-AI profiles; nothing is pulled)
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.yml --profile ai-cpu config --quiet
+          docker compose -f docker-compose.yml --profile ai-gpu config --quiet
+          # Without a profile only the studio is listed: the AI services are opt-in.
+          test "$(docker compose -f docker-compose.yml config --services)" = ndcart
+          test "$(docker compose -f docker-compose.yml --profile ai-cpu config --services | sort | tr '\n' ' ')" = "llm ndcart "
+          test "$(docker compose -f docker-compose.yml --profile ai-gpu config --services | sort | tr '\n' ' ')" = "llm-gpu ndcart "
       - name: Build
         run: docker build -t nd-cartographer:ci .
       - name: Start and check

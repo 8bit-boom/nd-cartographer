@@ -22,5 +22,78 @@ services:
       # Optional: a standalone OpenAI-compatible model instead of nd-world.
       # ND_CARTO_LLM_URL: "http://ollama:11434/v1"
       # ND_CARTO_LLM_MODEL: "llama3.1"
+      # Optional: the local model below (the `ai-cpu` or `ai-gpu` profile). Use `llm-gpu`
+      # in the address for the GPU profile. The key file is made by `ndcart ai key` (see
+      # docs/DOCKER.md); it is read from the file, never written in this YAML.
+      # ND_CARTO_LLM_URL: "http://llm:8080/v1"
+      # ND_CARTO_LLM_MODEL: "ndcart-local"
+      # ND_CARTO_LLM_KEY_FILE: "/data/ai-runtime.key"
     volumes:
       - ./data:/data
+
+  # ---- optional local AI (nothing here runs unless you pick a profile) -------------------
+  # `docker compose --profile ai-cpu up -d`   a model on the CPU
+  # `docker compose --profile ai-gpu up -d`   a model on an NVIDIA GPU
+  # First download the model with the studio image (it checks the file's SHA-256):
+  #   docker compose run --rm ndcart ndcart ai pull qwen3.5-4b --data-dir /data --yes
+  #   docker compose run --rm ndcart ndcart ai key --data-dir /data
+  # The model path below is the catalog's file name; if `ai pull` printed a different
+  # path, use that one. Pin the image to a tag you have tested (":server" moves).
+  llm:
+    profiles: ["ai-cpu"]
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: nd-cartographer-llm
+    restart: unless-stopped
+    command:
+      - "-m"
+      - "/data/models/unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-UD-Q4_K_XL.gguf"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--alias"
+      - "ndcart-local"
+      - "--api-key-file"
+      - "/data/ai-runtime.key"
+      - "-c"
+      - "16384"
+      - "-np"
+      - "1"
+      - "--no-webui"
+    # Read-only: the server needs the model and the key, nothing else. No port is published;
+    # only the studio (on this compose network) reaches it.
+    volumes:
+      - ./data:/data:ro
+
+  llm-gpu:
+    profiles: ["ai-gpu"]
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: nd-cartographer-llm-gpu
+    restart: unless-stopped
+    command:
+      - "-m"
+      - "/data/models/unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-UD-Q4_K_XL.gguf"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--alias"
+      - "ndcart-local"
+      - "--api-key-file"
+      - "/data/ai-runtime.key"
+      - "-c"
+      - "16384"
+      - "-np"
+      - "1"
+      - "--no-webui"
+      - "-ngl"
+      - "all"
+    volumes:
+      - ./data:/data:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

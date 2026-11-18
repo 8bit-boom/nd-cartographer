@@ -48,6 +48,62 @@ docker run -d --name nd-cartographer -p 8300:8300 \
 
 Build it yourself: `docker build -t nd-cartographer .`
 
+## A model on the same machine (optional): the `ai-cpu` and `ai-gpu` profiles
+
+The compose file also holds two opt-in services that run a model with upstream
+llama.cpp's `llama-server` (the image `ghcr.io/ggml-org/llama.cpp`). Nothing starts
+unless you pick a profile; plain `docker compose up -d` still runs only `ndcart`.
+
+1. **Download the model** with the studio image. It shows the size, checks the free disk,
+   verifies the file's SHA-256 against the Hugging Face Hub, and resumes if interrupted.
+   Only the model file is downloaded, never a program:
+
+   ```bash
+   docker compose run --rm ndcart ndcart ai models --data-dir /data     # what fits, sizes
+   docker compose run --rm ndcart ndcart ai pull qwen3.5-4b --data-dir /data --yes
+   docker compose run --rm ndcart ndcart ai key --data-dir /data        # makes /data/ai-runtime.key
+   ```
+   (The container needs outbound access to `huggingface.co` for the download. The model
+   names in the catalog were written without live Hub access: if `ai pull` says a file is
+   not in the repository it lists what is, and `ndcart ai pull unsloth/Repo-GGUF:File.gguf`
+   fetches an exact file.) `ai pull` prints the file's path. The compose file expects
+   `/data/models/unsloth/Qwen3.5-4B-GGUF/Qwen3.5-4B-UD-Q4_K_XL.gguf`; if yours differs, edit
+   the `-m` line of the service.
+2. **Start it**: `docker compose --profile ai-cpu up -d`, or for an NVIDIA card
+   `docker compose --profile ai-gpu up -d`.
+3. **Point the studio at it**: uncomment the three `ND_CARTO_LLM_*` lines in the `ndcart`
+   service (`llm-gpu` instead of `llm` in the address for the GPU profile) and
+   `docker compose up -d`. The key is read from `/data/ai-runtime.key`; it is never written
+   in the YAML. Then check it: `docker compose exec ndcart ndcart ai test` (a verdict of
+   good, usable or too weak) and `docker compose exec ndcart ndcart doctor`.
+
+The model server publishes no port (only the studio, on the compose network, reaches it),
+asks for the key on every request, and mounts `/data` read-only. Pin the image to a tag you
+have tested: `:server` moves with every release. The CPU profile needs the RAM the model
+needs (about 3-4 GB for the 4B model).
+
+**NVIDIA on plain Docker** needs the NVIDIA Container Toolkit; `-ngl all` offloads every
+layer to the card. For AMD or Vulkan use the images `:server-rocm` or `:server-vulkan`
+instead and pass the devices they document (`/dev/kfd`, `/dev/dri`); see llama.cpp's
+`docs/docker.md`. This was not tried here.
+
+**TrueNAS SCALE:**
+
+- For the GPU profile, turn on *Apps → Settings → Install NVIDIA Drivers* (it appears when
+  an NVIDIA GPU is present) and reboot the app service as it asks.
+- Paste the YAML as a Custom App as above. On 25.10 forum reports say the custom YAML
+  needs a top-level `services:` key (it has one); this is unverified here.
+- Both containers share one dataset, mounted at `/data`. The studio runs as uid 568 and owns
+  it; the llama.cpp image only reads `/data/models` and the key, which is why the mount is
+  read-only. The key file is private (mode 600, owner 568): the llama.cpp image runs as root by
+  default and can read it. If you set `user:` on the model service, give that user read
+  access to the key file and nobody else.
+- Not tested on a real TrueNAS machine or GPU: CI runs `docker compose config` for each
+  profile (no images are pulled), and the container's behaviour is the same `llama-server`
+  the `ndcart ai serve` command manages on a desktop.
+
+Without Docker, `ndcart ai setup` does all of this on one computer (see `ndcart ai --help`).
+
 ## Notes
 
 - Do not expose the port to the internet. Use a VPN, or a reverse proxy with
