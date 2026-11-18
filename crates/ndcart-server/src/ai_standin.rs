@@ -192,6 +192,7 @@ fn kind_of(system: &str) -> Option<Kind> {
         Kind::Refine,
         Kind::Tags,
         Kind::ThemePack,
+        Kind::Outline,
     ]
     .into_iter()
     .find(|k| {
@@ -222,10 +223,27 @@ fn pick(system: &str, user: &str, repair_turn: bool, behaviour: Behaviour) -> St
                 return "{}".into();
             };
             let mut spec = e.spec;
+            // One floor of a stepwise draft: the first floor of the best match.
+            if user.contains("Now write ONLY floor") {
+                if let Some(f) = spec["floors"].get(0).cloned() {
+                    spec["floors"] = json!([f]);
+                }
+            }
             if broken {
                 break_spec(&mut spec);
             }
             spec.to_string()
+        }
+        Some(Kind::Outline) => {
+            if broken {
+                "Here is the plan.".into()
+            } else {
+                json!({"name": "Stand-in Keep", "floors": [
+                    {"name": "Upper", "purpose": "the entrance", "rooms": 4, "links_to": ["Lower"]},
+                    {"name": "Lower", "purpose": "the vaults", "rooms": 4, "links_to": []},
+                ]})
+                .to_string()
+            }
         }
         Some(Kind::Refine) => {
             let e = aipack::examples()

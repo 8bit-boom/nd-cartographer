@@ -29,6 +29,9 @@ pub struct AiJob {
     /// Draft jobs: `asking`, `checking`, `repairing`, `done` or `error`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub phase: String,
+    /// Draft jobs built in steps: `outline`, then `floor 2/3`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub step: String,
     /// Draft jobs: which try this is, of how many at most.
     #[serde(skip_serializing_if = "is_zero")]
     pub attempt: usize,
@@ -152,6 +155,7 @@ pub fn register(kind: &str, prompt: &str, count: usize) -> Result<String, String
             seeds: Vec::new(),
             urls: Vec::new(),
             phase: String::new(),
+            step: String::new(),
             attempt: 0,
             max_attempts: 0,
             problems: Vec::new(),
@@ -187,14 +191,22 @@ pub async fn run_draft(
     use crate::repair::Progress;
     let progress = |p: Progress| {
         update(&id, |j| match p {
+            Progress::Step(label) => {
+                j.step = label;
+            }
             Progress::Asking { attempt, max } => {
                 j.phase = "asking".into();
                 j.attempt = attempt;
                 j.max_attempts = max;
-                j.message = if attempt > 1 {
-                    format!("Asking (try {attempt} of {max})…")
+                let of = if j.step.is_empty() {
+                    String::new()
                 } else {
-                    "Asking…".into()
+                    format!(" for the {}", j.step)
+                };
+                j.message = if attempt > 1 {
+                    format!("Asking{of} (try {attempt} of {max})…")
+                } else {
+                    format!("Asking{of}…")
                 };
             }
             Progress::Checking { attempt } => {

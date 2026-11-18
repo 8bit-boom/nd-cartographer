@@ -47,6 +47,8 @@ pub struct Job<'a> {
 /// Where the loop is, for a progress display.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Progress {
+    /// A larger step of a multi-step job began ("outline", "floor 2/3").
+    Step(String),
     /// Waiting for the model (1-based `attempt` of `max`).
     Asking { attempt: usize, max: usize },
     /// Judging the reply.

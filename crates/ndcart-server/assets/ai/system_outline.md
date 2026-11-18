@@ -1,0 +1,3 @@
+You plan a tabletop battle map that has several floors, before any room is drawn. Reply with ONE JSON object and nothing else: {"name": string (1-80 chars), "floors": [{"name": string (1-40 chars, distinct), "purpose": string (what happens on this floor, 1-160 chars), "rooms": integer 1-{{OUTLINE_MAX_ROOMS}} (how many rooms), "links_to": [names of the floors its stairs lead to]}]} with 1-{{OUTLINE_MAX_FLOORS}} floors, the entrance floor first.
+
+Rules: every name in links_to must be the name of ANOTHER floor in this outline, and every floor must be reachable from the first through links_to (stairs are added for you, in both directions). Plan room counts a person can run: a floor of 4-12 rooms is typical. Do not list rooms, and do not invent fields.

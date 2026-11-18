@@ -182,7 +182,11 @@ fn number_word(w: &str) -> Option<usize> {
     })
 }
 
-/// How many floors the prompt asks for ("3 levels", "two floors"), 1..=4.
+/// How many floors a prompt asks for ("3 levels", "two floors"), 1..=4.
+pub fn floors_asked(prompt: &str) -> usize {
+    floors_in(&words(prompt))
+}
+
 fn floors_in(ws: &[String]) -> usize {
     const UNITS: &[&str] = &[
         "floor", "floors", "level", "levels", "storey", "storeys", "story", "stories", "deck",

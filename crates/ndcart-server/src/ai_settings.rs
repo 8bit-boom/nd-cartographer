@@ -26,6 +26,9 @@ pub struct StoredAiSettings {
     /// Keep accepted AI results and reuse them for the same request (default off).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<bool>,
+    /// Build maps in steps (an outline, then each floor) even for one floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stepwise: Option<bool>,
 }
 
 pub const FILE_NAME: &str = "ai-settings.json";
@@ -82,6 +85,7 @@ pub struct AiSettingsView {
     pub key_set: bool,
     pub thinking: bool,
     pub cache: bool,
+    pub stepwise: bool,
     pub source: &'static str,
 }
 
@@ -107,6 +111,7 @@ pub fn view(stored: &StoredAiSettings) -> AiSettingsView {
         key_set: std::env::var("ND_CARTO_LLM_KEY").is_ok() || stored.key.is_some(),
         thinking: stored.thinking.unwrap_or(false),
         cache: stored.cache.unwrap_or(false),
+        stepwise: stored.stepwise.unwrap_or(false),
         source,
     }
 }
@@ -156,6 +161,7 @@ mod tests {
             key: None,
             thinking: Some(true),
             cache: Some(true),
+            stepwise: Some(true),
         };
         save(Some(&dir), &stored).unwrap();
         assert_eq!(load(Some(&dir)), stored);

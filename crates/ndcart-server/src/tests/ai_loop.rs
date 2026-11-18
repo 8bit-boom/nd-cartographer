@@ -326,3 +326,85 @@ async fn the_cache_is_off_by_default() {
     post_json(&router, "/api/draft", body).await;
     assert_eq!(h.stats.chats(), 2);
 }
+
+fn one_floor(name: &str) -> String {
+    format!(
+        r#"{{"name":"x","floors":[{{"name":"{name}","rooms":[{{"id":"a","name":"Hall","w":6,"h":5}},{{"id":"b","name":"Store","w":5,"h":4}}],"links":[{{"a":"a","b":"b"}}]}}]}}"#
+    )
+}
+
+#[tokio::test]
+async fn a_three_floor_request_is_built_in_steps_and_a_broken_floor_is_repaired_alone() {
+    let outline = serde_json::json!({"name":"Keep","floors":[
+        {"name":"Top","purpose":"gate","rooms":2,"links_to":["Middle"]},
+        {"name":"Middle","purpose":"halls","rooms":2,"links_to":["Bottom"]},
+        {"name":"Bottom","purpose":"vaults","rooms":2,"links_to":[]}]})
+    .to_string();
+    let bad_two = one_floor("Middle").replace(r#""id":"b","#, r#""id":"b","props":["x"],"#);
+    let (router, h) = app_for(Options {
+        script: vec![
+            outline,
+            one_floor("Top"),
+            bad_two,
+            one_floor("Middle"),
+            one_floor("Bottom"),
+        ],
+        ..Options::default()
+    })
+    .await;
+    let (st, v) = post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a keep with 3 levels"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // Outline, floor 1, floor 2 twice (the first was refused), floor 3: five asks.
+    assert_eq!(h.stats.chats(), 5);
+    assert_eq!(v["attempts"], 5);
+    let floors = v["spec"]["floors"].as_array().unwrap();
+    assert_eq!(floors.len(), 3);
+    let stairs = |i: usize| floors[i]["stairs"].as_array().unwrap().len();
+    assert_eq!((stairs(0), stairs(1), stairs(2)), (1, 2, 1));
+    assert_eq!(floors[1]["stairs"][0]["to_floor"], "Top");
+    // The merged map is the real thing.
+    let (st, c) = post_json(
+        &router,
+        "/api/spec/check",
+        serde_json::json!({"spec": v["spec"]}),
+    )
+    .await;
+    assert_eq!(
+        (st, &c["ok"]),
+        (StatusCode::OK, &serde_json::json!(true)),
+        "{c}"
+    );
+    // The second floor's repair turn quotes the complaint; the others were asked once.
+    let bodies = h.stats.bodies();
+    assert_eq!(bodies[3]["messages"].as_array().unwrap().len(), 4);
+    assert!(bodies[2]["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .contains("floor 2 of 3"));
+}
+
+#[tokio::test]
+async fn the_stepwise_setting_builds_even_a_one_floor_map_in_steps() {
+    let (router, h) = app_for(Options::default()).await;
+    post_json(
+        &router,
+        "/api/ai-settings",
+        serde_json::json!({"stepwise": true}),
+    )
+    .await;
+    let (st, v) = post_json(
+        &router,
+        "/api/draft",
+        serde_json::json!({"prompt":"a crypt"}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The stand-in's own outline has two floors: outline + two floors.
+    assert_eq!(h.stats.chats(), 3);
+    assert_eq!(v["spec"]["floors"].as_array().unwrap().len(), 2);
+}

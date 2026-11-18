@@ -83,6 +83,8 @@ pub struct Config {
     pub thinking: bool,
     /// Reuse accepted results (set when the settings turn the cache on).
     pub cache: crate::aicache::Use,
+    /// Always build maps in steps (outline, then floors).
+    pub stepwise: bool,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -113,6 +115,7 @@ impl Config {
             key,
             thinking: stored.thinking.unwrap_or(false),
             cache: Default::default(),
+            stepwise: stored.stepwise.unwrap_or(false),
         };
         if cfg.direct.is_none() && (cfg.server.is_none() || cfg.email.is_none()) {
             return Err("to draft with AI set ND_CARTO_SERVER and ND_CARTO_EMAIL (nd-world), or ND_CARTO_LLM_URL and ND_CARTO_LLM_MODEL (a model you run yourself)".into());
@@ -298,7 +301,7 @@ fn from_pack(text: &str) -> serde_json::Value {
 /// still checks everything a schema cannot say.
 pub fn shape(kind: Kind) -> &'static Shape {
     use std::sync::LazyLock;
-    static SHAPES: LazyLock<[Shape; 4]> = LazyLock::new(|| {
+    static SHAPES: LazyLock<[Shape; 5]> = LazyLock::new(|| {
         let hex = serde_json::json!({"type": "string", "pattern": "^#[0-9a-fA-F]{6}$"});
         let named = |placed: bool| {
             let mut props = serde_json::json!({
@@ -333,6 +336,10 @@ pub fn shape(kind: Kind) -> &'static Shape {
                 }),
             },
             Shape {
+                name: "outline",
+                schema: from_pack(aipack::OUTLINE_SCHEMA),
+            },
+            Shape {
                 name: "theme_pack",
                 schema: serde_json::json!({
                     "type": "object",
@@ -353,21 +360,22 @@ pub fn shape(kind: Kind) -> &'static Shape {
         Kind::Map | Kind::Refine => &SHAPES[0],
         Kind::World => &SHAPES[1],
         Kind::Tags => &SHAPES[2],
-        Kind::ThemePack => &SHAPES[3],
+        Kind::Outline => &SHAPES[3],
+        Kind::ThemePack => &SHAPES[4],
     }
 }
 
 /// Run the shared repair loop against a connected model.
-struct Task<'a> {
-    system: &'a str,
-    kind: Kind,
-    first_user: String,
-    rounds: usize,
-    what: &'a str,
-    cache: &'a crate::aicache::Use,
+pub(crate) struct Task<'a> {
+    pub(crate) system: &'a str,
+    pub(crate) kind: Kind,
+    pub(crate) first_user: String,
+    pub(crate) rounds: usize,
+    pub(crate) what: &'a str,
+    pub(crate) cache: &'a crate::aicache::Use,
 }
 
-async fn solve<T: serde::Serialize + serde::de::DeserializeOwned>(
+pub(crate) async fn solve<T: serde::Serialize + serde::de::DeserializeOwned>(
     backend: &Backend,
     task: Task<'_>,
     progress: &(dyn Fn(Progress) + Sync),
@@ -446,8 +454,21 @@ pub async fn draft_with_progress(
 ) -> Result<Drafted, String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
-    let system = with_context(aipack::system(Kind::Map), &ctx.with_lore(&backend).await?);
-    let out = solve(
+    let ctx = ctx.with_lore(&backend).await?;
+    let system = with_context(aipack::system(Kind::Map), &ctx);
+    // Several floors, or the setting: plan first, then draw each floor on its own.
+    if cfg.stepwise || ndcart_core::template::floors_asked(prompt) > 1 {
+        let (spec, attempts, seconds) =
+            crate::stepwise::draft(cfg, &backend, &system, prompt, progress).await?;
+        let warnings = warnings_of(&spec);
+        return Ok(Drafted {
+            spec,
+            warnings,
+            attempts,
+            seconds,
+        });
+    }
+    let one_shot = solve(
         &backend,
         Task {
             cache: &cfg.cache,
@@ -460,13 +481,40 @@ pub async fn draft_with_progress(
         progress,
         parse_reply_all,
     )
-    .await?;
+    .await;
+    let out = match one_shot {
+        Ok(o) => o,
+        // Too big to lay out in one go is what a plan-then-floors draft is for.
+        Err(f) if size_related(&f) => {
+            let (spec, attempts, seconds) =
+                crate::stepwise::draft(cfg, &backend, &system, prompt, progress).await?;
+            let warnings = warnings_of(&spec);
+            return Ok(Drafted {
+                spec,
+                warnings,
+                attempts: attempts + f.attempts,
+                seconds,
+            });
+        }
+        Err(f) => return Err(f.message),
+    };
     let warnings = warnings_of(&out.value);
     Ok(Drafted {
         spec: out.value,
         warnings,
         attempts: out.attempts,
         seconds: out.seconds,
+    })
+}
+
+/// Did the repair loop give up on a size problem (too many rooms, would not fit)?
+fn size_related(f: &Failure) -> bool {
+    f.complaints.iter().any(|c| {
+        let c = c.to_lowercase();
+        c.contains("could not fit")
+            || c.contains("too large")
+            || c.contains("make the map smaller")
+            || c.contains("rooms") && (c.contains("needs 1-") || c.contains("1-60"))
     })
 }
 
@@ -798,6 +846,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         key,
         thinking: false,
         cache: Default::default(),
+        stepwise: false,
     };
     let spec = draft(
         &cfg,

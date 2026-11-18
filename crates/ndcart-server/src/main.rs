@@ -35,6 +35,8 @@ mod routes;
 mod speccheck;
 mod specshape;
 mod state;
+#[cfg(feature = "bridge")]
+mod stepwise;
 mod store;
 mod synth;
 mod text;

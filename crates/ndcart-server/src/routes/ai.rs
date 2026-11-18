@@ -553,6 +553,7 @@ pub(crate) struct AiSettingsBody {
     pub(crate) key: Option<String>,
     pub(crate) thinking: Option<bool>,
     pub(crate) cache: Option<bool>,
+    pub(crate) stepwise: Option<bool>,
 }
 
 pub(crate) async fn post_ai_settings(
@@ -587,6 +588,9 @@ pub(crate) async fn post_ai_settings(
     }
     if let Some(c) = b.cache {
         stored.cache = Some(c);
+    }
+    if let Some(c) = b.stepwise {
+        stored.stepwise = Some(c);
     }
     if let Some(k) = b.key {
         let k = k.trim().to_string();

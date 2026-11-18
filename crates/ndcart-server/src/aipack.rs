@@ -32,6 +32,10 @@ pub const FILES: &[(&str, &str)] = &[
         "system_theme_pack.md",
         include_str!("../assets/ai/system_theme_pack.md"),
     ),
+    (
+        "system_outline.md",
+        include_str!("../assets/ai/system_outline.md"),
+    ),
     ("reference.md", include_str!("../assets/ai/reference.md")),
     ("repair.md", include_str!("../assets/ai/repair.md")),
     ("mistakes.md", include_str!("../assets/ai/mistakes.md")),
@@ -42,6 +46,10 @@ pub const FILES: &[(&str, &str)] = &[
     (
         "worldspec.schema.json",
         include_str!("../assets/ai/worldspec.schema.json"),
+    ),
+    (
+        "outline.schema.json",
+        include_str!("../assets/ai/outline.schema.json"),
     ),
     (
         "examples/map-shop.json",
@@ -96,6 +104,8 @@ pub const MANIFEST: &str = include_str!("../assets/ai/pack.toml");
 pub const MAPSPEC_SCHEMA: &str = include_str!("../assets/ai/mapspec.schema.json");
 /// The JSON Schema a WorldSpec reply must follow.
 pub const WORLDSPEC_SCHEMA: &str = include_str!("../assets/ai/worldspec.schema.json");
+/// The JSON Schema of the multi-floor outline (step one of a stepwise draft).
+pub const OUTLINE_SCHEMA: &str = include_str!("../assets/ai/outline.schema.json");
 
 #[derive(serde::Deserialize)]
 pub struct Manifest {
@@ -133,6 +143,7 @@ pub enum Kind {
     Refine,
     Tags,
     ThemePack,
+    Outline,
 }
 
 impl Kind {
@@ -143,6 +154,7 @@ impl Kind {
             "refine" => Kind::Refine,
             "tags" => Kind::Tags,
             "theme_pack" | "theme-pack" => Kind::ThemePack,
+            "outline" => Kind::Outline,
             _ => return None,
         })
     }
@@ -153,6 +165,7 @@ impl Kind {
             Kind::Refine => "system_refine.md",
             Kind::Tags => "system_tags.md",
             Kind::ThemePack => "system_theme_pack.md",
+            Kind::Outline => "system_outline.md",
         }
     }
 }
@@ -173,7 +186,7 @@ pub fn render(text: &str) -> String {
         .map(|(group, words)| format!("- {group}: {}", code_list(words.iter().copied())))
         .collect::<Vec<_>>()
         .join("\n");
-    let subs: [(&str, String); 12] = [
+    let subs: [(&str, String); 14] = [
         ("PACK_VERSION", version().to_string()),
         ("SCHEMA_VERSION", schema_version().to_string()),
         ("CARGO_PKG_VERSION", env!("CARGO_PKG_VERSION").to_string()),
@@ -181,6 +194,8 @@ pub fn render(text: &str) -> String {
         ("MAX_ROOMS", MAX_ROOMS.to_string()),
         ("ROOM_MIN", ROOM_MIN.to_string()),
         ("ROOM_MAX", ROOM_MAX.to_string()),
+        ("OUTLINE_MAX_FLOORS", "6".to_string()),
+        ("OUTLINE_MAX_ROOMS", "20".to_string()),
         ("MAX_LIGHTS", ndcart_core::MAX_LIGHTS.to_string()),
         ("WALL_CAP", ndcart_core::ND_WORLD_WALL_CAP.to_string()),
         (
@@ -206,11 +221,12 @@ pub fn render(text: &str) -> String {
 pub fn instructions(kind: &str) -> Result<Value, String> {
     use crate::specshape::SpecKind;
     let k = Kind::parse(kind).ok_or_else(|| {
-        format!("kind must be map, world, refine, tags or theme_pack, not '{kind}'")
+        format!("kind must be map, world, refine, tags, theme_pack or outline, not '{kind}'")
     })?;
     let schema_text = match k {
         Kind::Map | Kind::Refine => Some(schema(SpecKind::Map)),
         Kind::World => Some(schema(SpecKind::World)),
+        Kind::Outline => Some(OUTLINE_SCHEMA),
         Kind::Tags | Kind::ThemePack => None,
     };
     let want_world = k == Kind::World;
@@ -219,7 +235,7 @@ pub fn instructions(kind: &str) -> Result<Value, String> {
             .into_iter()
             .filter(|e| e.file.contains("world-") == want_world)
             .collect(),
-        Kind::Tags | Kind::ThemePack => Vec::new(),
+        Kind::Tags | Kind::ThemePack | Kind::Outline => Vec::new(),
     };
     if k == Kind::Refine {
         ex.sort_by_key(|e| !e.file.ends_with("map-refine.json"));
@@ -239,13 +255,14 @@ pub fn instructions(kind: &str) -> Result<Value, String> {
     }))
 }
 
-static SYSTEMS: LazyLock<[String; 5]> = LazyLock::new(|| {
+static SYSTEMS: LazyLock<[String; 6]> = LazyLock::new(|| {
     [
         Kind::Map,
         Kind::World,
         Kind::Refine,
         Kind::Tags,
         Kind::ThemePack,
+        Kind::Outline,
     ]
     .map(|k| render(raw(k.file()).expect("pack file")))
 });
@@ -258,6 +275,7 @@ pub fn system(kind: Kind) -> &'static str {
         Kind::Refine => 2,
         Kind::Tags => 3,
         Kind::ThemePack => 4,
+        Kind::Outline => 5,
     };
     &SYSTEMS[i]
 }
