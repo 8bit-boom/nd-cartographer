@@ -4242,7 +4242,6 @@ fn run_bench(args: Vec<String>) {
             bake_ppc = it.next().and_then(|v| v.parse().ok()).unwrap_or(16);
         }
     }
-    println!("ndcart bench: journal + walls + replay + full-map bake on a 200x140 dungeon");
     let mut floor = FloorDoc::new("bench".into(), "Bench".into());
     let mut journal = Journal::default();
 
@@ -4260,11 +4259,15 @@ fn run_bench(args: Vec<String>) {
         };
         store::apply_ops_direct(&mut floor, &mut journal, &[Op::UpsertSpace { space }]).unwrap();
     }
-    // 10,000 single-cell ops (worst-case journal granularity).
+    // One single-cell op per square (worst-case journal granularity).
     let cols = 200usize;
     let rows = 140usize;
+    println!(
+        "ndcart bench: journal + walls + replay + full-map bake on a {cols}x{rows} dungeon ({} cells)",
+        cols * rows
+    );
     let mut op_count = 0usize;
-    'outer: for y in 0..rows {
+    for y in 0..rows {
         for x in 0..cols {
             let op = Op::PaintCells {
                 cells: vec![ndcart_core::CellKey::new(x as i32, y as i32)],
@@ -4272,9 +4275,6 @@ fn run_bench(args: Vec<String>) {
             };
             store::apply_ops_direct(&mut floor, &mut journal, &[op]).unwrap();
             op_count += 1;
-            if op_count >= 10_000 {
-                break 'outer;
-            }
         }
     }
     let apply_ms = t0.elapsed().as_millis();
