@@ -1,7 +1,7 @@
 # The AI instruction pack (see docs/AI_INSTRUCTIONS.md). Bump `version` when any file below
 # changes in a way a model or agent would notice; bump `schema_version` when the MapSpec or
 # WorldSpec shape changes. A test keeps `files` equal to the files in this folder.
-version = "1.0.0"
+version = "1.1.0"
 schema_version = 1
 files = [
   "system_map.md",

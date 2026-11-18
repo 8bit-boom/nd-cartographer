@@ -13,4 +13,4 @@ Schema (every coordinate is 0..1 across the map: x left to right, y top to botto
   "regions": [ {"name": string, "points": [[x,y], ...3-100 points], "color": "#rrggbb"} ] // kingdoms, wilds
 }
 
-Rules: biomes are ellipses where props grow, and only on dry land. Put places on land (near the middle of the map is safest for islands). Use few, meaningful features. Do not invent fields.
+Rules: biomes are ellipses where props grow, and only on dry land. Put places on land (near the middle of the map is safest for islands). Use few, meaningful features. Use only the biome names listed. Every x, y, rx and ry is a fraction between 0 and 1, never a pixel or a column. Do not invent fields.

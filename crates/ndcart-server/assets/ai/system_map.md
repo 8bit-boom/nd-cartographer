@@ -19,4 +19,10 @@ Schema:
   ]
 }
 
-Rules: sizes are in squares (a normal room is 4-10). Give rooms evocative names. Use "secret" sparingly. Do not invent fields. Do not describe positions; the layout is computed for you.
+Rules:
+- Sizes are in squares: a normal room is 4-10, a great hall 10-20. Make passages `"kind":"corridor"`, 2-3 squares wide.
+- The first room is the entrance; the layout grows outward from it along the links. A hub room with several links ends up in the middle.
+- Every room needs a path from the first room through links. Links join rooms on ONE floor; to reach another floor use "stairs", naming the floor by its name.
+- Give rooms evocative, distinct names. A name such as Barracks, Kitchen, Library, Armory, Crypt or Cargo Hold decides which props the room gets.
+- Use "secret" sparingly (once or twice a floor). Set "lit": false for rooms that should be dark.
+- Do not invent fields: no props, material, furniture, x or y. Do not describe positions; the layout is computed for you.
