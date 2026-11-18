@@ -230,6 +230,31 @@ impl RoomGrid {
         self.cells.iter().map(|(k, v)| (*k, v.as_str()))
     }
 
+    /// The painted cells with `x0 <= x <= x1` and `y0 <= y <= y1`, in the
+    /// same order as [`cells`](Self::cells). Cells are ordered by `(x, y)`, so
+    /// this visits only the columns `x0..=x1`, not the whole floor.
+    pub fn cells_in(
+        &self,
+        x0: i32,
+        x1: i32,
+        y0: i32,
+        y1: i32,
+    ) -> impl Iterator<Item = (CellKey, &str)> + '_ {
+        let range = if x0 > x1 {
+            None
+        } else {
+            Some(
+                self.cells
+                    .range(CellKey::new(x0, i32::MIN)..=CellKey::new(x1, i32::MAX)),
+            )
+        };
+        range
+            .into_iter()
+            .flatten()
+            .filter(move |(k, _)| k.y >= y0 && k.y <= y1)
+            .map(|(k, v)| (*k, v.as_str()))
+    }
+
     pub fn cell_count(&self) -> usize {
         self.cells.len()
     }
@@ -396,6 +421,47 @@ pub fn new_space_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cells_in_equals_a_filtered_cells() {
+        let mut g = RoomGrid::default();
+        g.upsert_space(default_space("a", "A", SpaceKind::Room))
+            .unwrap();
+        g.upsert_space(default_space("b", "B", SpaceKind::Room))
+            .unwrap();
+        // A small deterministic generator (no rand dependency).
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |m: i64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % m as u64) as i32 - (m / 2) as i32
+        };
+        for i in 0..3000 {
+            let c = CellKey::new(next(80), next(80));
+            g.paint(&[c], Some(if i % 3 == 0 { "a" } else { "b" }))
+                .unwrap();
+        }
+        let wanted = |g: &RoomGrid, x0, x1, y0, y1| {
+            g.cells()
+                .filter(|(k, _)| k.x >= x0 && k.x <= x1 && k.y >= y0 && k.y <= y1)
+                .map(|(k, v)| (k, v.to_string()))
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..200 {
+            let (x0, x1, y0, y1) = (next(100), next(100), next(100), next(100));
+            let got: Vec<_> = g
+                .cells_in(x0, x1, y0, y1)
+                .map(|(k, v)| (k, v.to_string()))
+                .collect();
+            assert_eq!(got, wanted(&g, x0, x1, y0, y1), "{x0} {x1} {y0} {y1}");
+        }
+        let all: Vec<_> = g
+            .cells_in(i32::MIN, i32::MAX, i32::MIN, i32::MAX)
+            .map(|(k, v)| (k, v.to_string()))
+            .collect();
+        assert_eq!(all.len(), g.cell_count());
+    }
 
     #[test]
     fn material_ids_are_validated_and_optional_in_old_documents() {

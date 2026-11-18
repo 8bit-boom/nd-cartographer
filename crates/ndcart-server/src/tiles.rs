@@ -320,7 +320,7 @@ pub fn grid_extent(floor: &FloorDoc) -> (u32, u32) {
 /// Seed for every pattern and blend jitter. A document-level seed can replace
 /// this later; fixed for now so renders are reproducible.
 const PAINT_SEED: u32 = 0x6e64;
-const FALLBACK: Surface = Surface::Flat([0x33, 0x44, 0x55]);
+static FALLBACK: Surface = Surface::Flat([0x33, 0x44, 0x55]);
 
 /// What a space paints: a pack material, a picture-based custom material, or a flat colour.
 #[derive(Clone)]
@@ -1965,19 +1965,21 @@ fn render_pixmap_hidden(
     // zoom levels and the full-map export all agree.
     let surfaces = surfaces_of(floor);
     let stride = w as usize * 4;
-    for (cell, space_id) in floor.grid.cells() {
+    let clamp = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    for (cell, space_id) in
+        floor
+            .grid
+            .cells_in(clamp(cx_from), clamp(cx_to), clamp(cy_from), clamp(cy_to))
+    {
         let cx = i64::from(cell.x);
         let cy = i64::from(cell.y);
-        if cx < cx_from || cx > cx_to || cy < cy_from || cy > cy_to {
-            continue;
-        }
-        let own = surfaces.get(space_id).cloned().unwrap_or(FALLBACK);
+        let own = surfaces.get(space_id).unwrap_or(&FALLBACK);
         // The four neighbours' surfaces, only when painted and different.
         let nb = |c: CellKey| {
             floor
                 .grid
                 .cell_space(c)
-                .and_then(|id| surfaces.get(id).cloned())
+                .and_then(|id| surfaces.get(id))
                 .filter(|n| !own.same_as(n))
         };
         // Animated materials (water) drift their noise input by the phase
@@ -2008,17 +2010,17 @@ fn render_pixmap_hidden(
                 let mut c = own.sample(su, sv);
                 // Horizontal edge pair, then vertical; near a corner both apply.
                 let (hn, hd, hs) = if fx < 0.5 {
-                    (west.as_ref(), fx, Side::Far)
+                    (west, fx, Side::Far)
                 } else {
-                    (east.as_ref(), 1.0 - fx, Side::Near)
+                    (east, 1.0 - fx, Side::Near)
                 };
                 if let Some(n) = hn.filter(|_| hd < BLEND_WIDTH) {
                     c = edge_mix(c, n.sample(u, v), hd, hs, u, v, PAINT_SEED);
                 }
                 let (vn, vd, vs) = if fy < 0.5 {
-                    (north.as_ref(), fy, Side::Far)
+                    (north, fy, Side::Far)
                 } else {
-                    (south.as_ref(), 1.0 - fy, Side::Near)
+                    (south, 1.0 - fy, Side::Near)
                 };
                 if let Some(n) = vn.filter(|_| vd < BLEND_WIDTH) {
                     c = edge_mix(c, n.sample(u, v), vd, vs, u, v, PAINT_SEED);
