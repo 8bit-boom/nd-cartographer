@@ -4225,6 +4225,7 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
         .with_state(app)
+        .layer(axum::middleware::from_fn(auth::same_origin_guard))
 }
 
 // ---------- bench ----------
@@ -7663,5 +7664,56 @@ mod tests {
             .await
             .expect("the stream must end, not run forever");
         assert_eq!(body.matches("event: gone").count(), 1, "{body}");
+    }
+
+    #[tokio::test]
+    async fn cross_site_posts_are_refused_and_same_origin_ones_pass() {
+        let router = build_router(test_app());
+        let post = |hdrs: &[(&str, &str)]| {
+            let mut b = Request::builder().method("POST").uri("/api/assets");
+            for (k, v) in hdrs {
+                b = b.header(*k, *v);
+            }
+            router
+                .clone()
+                .oneshot(b.body(Body::from(b"junk".to_vec())).unwrap())
+        };
+        let host = ("host", "127.0.0.1:8300");
+        let r = post(&[host, ("origin", "https://evil.example")])
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = post(&[host, ("sec-fetch-site", "cross-site")])
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = post(&[host, ("sec-fetch-site", "same-site")])
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        // Same origin reaches the handler (junk body -> 400).
+        let r = post(&[
+            host,
+            ("origin", "http://127.0.0.1:8300"),
+            ("sec-fetch-site", "same-origin"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // No Origin at all (curl, CLI, bridge) reaches the handler.
+        let r = post(&[]).await.unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        // GET is never filtered.
+        let r = router
+            .clone()
+            .oneshot(
+                Request::get("/health")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
     }
 }

@@ -158,6 +158,12 @@ Listening off loopback requires a token: `Authorization: Bearer T`, cookie
 `ND_CARTO_TOKEN`, `ND_CARTO_TOKEN_FILE`, or `<data-dir>/token` (generated 0600 on
 first run, printed once). 401 without it.
 
+Cross-site guard (always on): a POST/PUT/PATCH/DELETE is refused with 403 when
+`Sec-Fetch-Site` is present and is not `same-origin` or `none`, or when an `Origin`
+header is present and differs from the request's `Host`. Requests with neither header
+(curl, the CLI, the MCP bridge) are unaffected. Behind a reverse proxy, forward the
+original `Host` header or the browser UI's writes will be refused.
+
 ## CLI
 
 ```

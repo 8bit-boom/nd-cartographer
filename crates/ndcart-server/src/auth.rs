@@ -84,6 +84,38 @@ fn query_token(req: &Request) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Cross-site request guard. A web page the GM visits can fire "simple"
+/// cross-site POSTs at the studio; browsers label those with `Sec-Fetch-Site`
+/// and `Origin`, so refuse state-changing requests that come from elsewhere.
+/// Requests carrying neither header (curl, the CLI, the MCP bridge) pass.
+pub async fn same_origin_guard(req: Request, next: Next) -> Response {
+    use axum::http::Method;
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    let h = req.headers();
+    let site_ok = h
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .is_none_or(|v| v == "same-origin" || v == "none");
+    let origin_ok = match h.get(header::ORIGIN) {
+        None => true,
+        Some(o) => {
+            let host = h.get(header::HOST).and_then(|v| v.to_str().ok());
+            let o_auth = o
+                .to_str()
+                .ok()
+                .and_then(|o| o.split_once("://"))
+                .map(|(_, a)| a.trim_end_matches('/'));
+            matches!((o_auth, host), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b))
+        }
+    };
+    if site_ok && origin_ok {
+        return next.run(req).await;
+    }
+    (StatusCode::FORBIDDEN, "ndcart: cross-site request refused").into_response()
+}
+
 pub async fn gate(token: String, req: Request, next: Next) -> Response {
     if req.uri().path() == "/health" {
         return next.run(req).await;
