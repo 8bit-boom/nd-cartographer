@@ -76,8 +76,18 @@ struct AppState {
     wall_cache: Mutex<WallCache>,
     /// "doc/floor/z/x_y/rev" -> PNG bytes; cleared wholesale when big.
     tile_cache: Mutex<HashMap<String, Vec<u8>>>,
+    /// Limits how many big bakes (exports, pdf, previews, convert) run at
+    /// once, so a few parallel requests cannot exhaust memory.
+    heavy: tokio::sync::Semaphore,
 }
 type App = Arc<AppState>;
+
+/// Permits for `AppState::heavy`: half the cores, at least one.
+fn heavy_permits() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get() / 2)
+        .max(1)
+}
 
 // ---------- API error mapping ----------
 
@@ -2149,10 +2159,12 @@ struct PackExportQuery {
 /// materials as a Dungeondraft-style pack. Art that came from someone else's pack
 /// is left out unless you ask for `include=all` (check its license first).
 async fn export_pack(
+    State(app): State<App>,
     axum::extract::Query(q): axum::extract::Query<PackExportQuery>,
 ) -> Result<Response, ApiError> {
     let name = q.name.unwrap_or_default();
     let all = q.include.as_deref() == Some("all");
+    let _heavy = app.heavy.acquire().await;
     let (bytes, ..) =
         tokio::task::spawn_blocking(move || packs::export_own(assets::global(), &name, all))
             .await
@@ -2779,6 +2791,7 @@ async fn proposal_preview(
         j.push(&mut f, op)?;
     }
     drop(store);
+    let _heavy = app.heavy.acquire().await;
     let walls = tiles::derive_walls(&f, cell_size);
     let (png, ..) = tiles::bake_full_as(
         &f,
@@ -3513,6 +3526,7 @@ async fn world_proposal_preview(
         (doc.floors[0].clone(), p.ops.clone(), doc.manifest.cell_size)
     };
     let ppc = q.ppc.unwrap_or(4);
+    let _heavy = app.heavy.acquire().await;
     let png = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ApiError> {
         let mut j = ndcart_core::Journal::default();
         for op in &ops {
@@ -3709,6 +3723,7 @@ async fn preview(
     }
     let (ppc, dark) = (q.ppc.unwrap_or(16), q.darkness.unwrap_or(true));
     let phase = q.frame.unwrap_or(0.0).clamp(0.0, 6.0);
+    let _heavy = app.heavy.acquire().await;
     let (png, ..) = tokio::task::spawn_blocking(move || {
         tiles::bake_preview_frame(&floor, cell_size, ppc, [x, y], radius, dark, phase)
     })
@@ -3774,6 +3789,7 @@ async fn export_pdf(
         )
     };
     let margin = 36.0;
+    let _heavy = app.heavy.acquire().await;
     let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
         let (cols, rows) = tiles::grid_extent(&floor);
         let plan = pdf::plan(cols, rows, inch, paper, margin)?;
@@ -3849,6 +3865,7 @@ async fn export_png(
         .as_deref()
         .and_then(|id| filtered.era(id))
         .cloned();
+    let _heavy = app.heavy.acquire().await;
     let (bytes, ..) = tokio::task::spawn_blocking(move || {
         let walls = tiles::derive_walls(&filtered, cell_size);
         tiles::bake_full_limit_era(
@@ -3945,6 +3962,7 @@ struct ConvertQuery {
 /// `POST /api/convert?format=webp|avif|png[&quality=N]` — raw image bytes in
 /// (PNG/JPEG/GIF/BMP/WebP), converted image out. Max 80 MB / 40 Mpx.
 async fn convert_image(
+    State(app): State<App>,
     axum::extract::Query(q): axum::extract::Query<ConvertQuery>,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
@@ -3957,6 +3975,7 @@ async fn convert_image(
         None => tiles::ImageFormat::Webp,
     };
     let quality = q.quality.unwrap_or(80);
+    let _heavy = app.heavy.acquire().await;
     let out = tokio::task::spawn_blocking(move || convert::convert(&body, fmt, quality))
         .await
         .map_err(|e| ApiError(CoreError::Invalid(format!("convert failed: {e}"))))?
@@ -4563,6 +4582,7 @@ async fn main() {
                 ai: Mutex::new(ai),
                 wall_cache: Mutex::new(HashMap::new()),
                 tile_cache: Mutex::new(HashMap::new()),
+                heavy: tokio::sync::Semaphore::new(heavy_permits()),
             });
             let mut router = build_router(app);
             if auth::is_loopback(&listen) {
@@ -4622,6 +4642,7 @@ mod tests {
             ai: Mutex::new(ai_settings::load(None)),
             wall_cache: Mutex::new(HashMap::new()),
             tile_cache: Mutex::new(HashMap::new()),
+            heavy: tokio::sync::Semaphore::new(heavy_permits()),
         })
     }
 
@@ -7802,5 +7823,41 @@ mod tests {
                 "{uri}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn heavy_bakes_wait_for_a_permit() {
+        let app = test_app();
+        // One permit, held: an export must not start until it is released.
+        let app1 = Arc::new(AppState {
+            store: tokio::sync::RwLock::new(store::Store::default()),
+            data_dir: None,
+            ai: Mutex::new(ai_settings::load(None)),
+            wall_cache: Mutex::new(HashMap::new()),
+            tile_cache: Mutex::new(HashMap::new()),
+            heavy: tokio::sync::Semaphore::new(1),
+        });
+        assert!(app.heavy.available_permits() >= 1);
+        let router = build_router(app1.clone());
+        let held = app1.heavy.acquire().await.unwrap();
+        let mut png = tiny_skia::Pixmap::new(2, 2).unwrap();
+        png.fill(tiny_skia::Color::from_rgba8(1, 2, 3, 255));
+        let png = png.encode_png().unwrap();
+        let req = Request::post("/api/convert?format=png")
+            .body(Body::from(png))
+            .unwrap();
+        let mut fut = Box::pin(router.clone().oneshot(req));
+        let early = tokio::time::timeout(std::time::Duration::from_millis(200), &mut fut).await;
+        assert!(
+            early.is_err(),
+            "a convert must wait while the only permit is held"
+        );
+        drop(held);
+        let r = tokio::time::timeout(std::time::Duration::from_secs(10), fut)
+            .await
+            .expect("runs once the permit is free")
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(app1.heavy.available_permits(), 1, "the permit is returned");
     }
 }
