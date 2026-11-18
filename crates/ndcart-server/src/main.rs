@@ -75,7 +75,7 @@ struct AppState {
     /// OpenAI-compatible endpoint); loaded from the data dir, saved on POST.
     ai: Mutex<ai_settings::StoredAiSettings>,
     wall_cache: Mutex<WallCache>,
-    /// "doc/floor/z/x_y/rev" -> PNG bytes; cleared wholesale when big.
+    /// "doc/floor/z/x_y/rev/onion/era" -> PNG bytes; cleared wholesale when big.
     tile_cache: Mutex<HashMap<String, Vec<u8>>>,
     /// Limits how many big bakes (exports, pdf, previews, convert) run at
     /// once, so a few parallel requests cannot exhaust memory.
@@ -4088,7 +4088,7 @@ async fn get_tile(
     // cloning the floor: a hit must not pay for the clone.
     let era_id = doc.floors[idx].active_era.as_deref();
     let key = format!(
-        "{doc_id}/{floor_id}/{z}/{x}_{y}/{}/{}",
+        "{doc_id}/{floor_id}/{z}/{x}_{y}/{rev}/{}/{}",
         onion_id.as_deref().unwrap_or("-"),
         era_id.unwrap_or("-")
     );
@@ -4112,6 +4112,10 @@ async fn get_tile(
         .as_deref()
         .and_then(|id| floor.era(id))
         .cloned();
+    // Bake without the store lock: edits are not blocked behind a tile. The
+    // key carries the rev, so a bake that finishes after an edit lands under
+    // its old rev and is never served.
+    drop(store);
     let bytes = tokio::task::spawn_blocking(move || {
         let onion = ghost.as_ref().map(|(f, w)| (f, w.as_slice()));
         tiles::bake_tile_era(&floor, &walls, cell_size, z, x, y, onion, era.as_ref(), 0.0)
@@ -4124,7 +4128,6 @@ async fn get_tile(
     }
     cache.insert(key, bytes.clone());
     drop(cache);
-    drop(store);
     Ok(png_response(&bytes))
 }
 
@@ -7532,6 +7535,49 @@ mod tests {
         println!("100 warm tile GETs: {ms:.1} ms");
         #[cfg(not(debug_assertions))]
         assert!(ms < 50.0, "100 cached GETs took {ms:.1} ms");
+    }
+
+    #[tokio::test]
+    async fn tile_baked_during_an_edit_is_never_served_afterwards() {
+        let router = build_router(test_app());
+        let (id, f) = new_doc(&router, "T").await;
+        let (_, b) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/floors"),
+            serde_json::json!({"action":"add","name":"Up"})
+                .to_string()
+                .into_bytes(),
+        )
+        .await;
+        let up = jv(&b)["floor"].as_str().unwrap().to_string();
+        // A busy onion floor makes the bake slow enough to overlap the edit.
+        let cells: Vec<_> = (0..60)
+            .flat_map(|x| (0..60).map(move |y| serde_json::json!({"x":x,"y":y})))
+            .collect();
+        let st = post_ops_json(
+            &router,
+            &id,
+            serde_json::json!({"floor": up, "ops": [
+                {"t":"upsert_space","space":{"id":"sp_b","name":"B","color":"#5a7d9a","kind":"room"}},
+                {"t":"paint_cells","space":"sp_b","cells":cells}]}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let uri = format!("/tiles/{id}/{f}/0/0_0?onion={up}");
+        let (_, before) = call(&router, "GET", &uri, vec![]).await;
+        // A different, uncached tile, so this GET really bakes while the edit lands.
+        let slow = format!("/tiles/{id}/{f}/0/1_0?onion={up}");
+        let edit = serde_json::json!({"floor": f, "ops": [
+            {"t":"upsert_space","space":{"id":"sp_a","name":"A","color":"#7f5539","kind":"room"}},
+            {"t":"paint_cells","space":"sp_a","cells":[{"x":0,"y":0},{"x":1,"y":0},{"x":0,"y":1}]}]});
+        let (_, st) = tokio::join!(
+            call(&router, "GET", &slow, vec![]),
+            post_ops_json(&router, &id, edit)
+        );
+        assert_eq!(st, StatusCode::OK);
+        let (_, after) = call(&router, "GET", &uri, vec![]).await;
+        assert_ne!(before, after, "the edit must show in the next tile");
     }
 
     #[tokio::test]
