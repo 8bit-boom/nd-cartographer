@@ -1,0 +1,139 @@
+{
+  "request": "A four-floor wizard's tower: workshop, library, laboratory and an observatory on top.",
+  "spec": {
+    "name": "Tower of Ael Varn",
+    "floors": [
+      {
+        "name": "Ground Floor",
+        "rooms": [
+          {
+            "id": "gate",
+            "name": "Gatehouse",
+            "w": 6,
+            "h": 5
+          },
+          {
+            "id": "work",
+            "name": "Workshop",
+            "w": 8,
+            "h": 6
+          },
+          {
+            "id": "kitchen",
+            "name": "Kitchen",
+            "w": 6,
+            "h": 5
+          }
+        ],
+        "links": [
+          {
+            "a": "gate",
+            "b": "work"
+          },
+          {
+            "a": "work",
+            "b": "kitchen"
+          }
+        ],
+        "stairs": [
+          {
+            "room": "work",
+            "to_floor": "Library Floor",
+            "to_room": "lib"
+          }
+        ]
+      },
+      {
+        "name": "Library Floor",
+        "rooms": [
+          {
+            "id": "lib",
+            "name": "Library",
+            "w": 9,
+            "h": 7
+          },
+          {
+            "id": "study",
+            "name": "Study",
+            "w": 5,
+            "h": 5
+          }
+        ],
+        "links": [
+          {
+            "a": "lib",
+            "b": "study"
+          }
+        ],
+        "stairs": [
+          {
+            "room": "lib",
+            "to_floor": "Ground Floor",
+            "to_room": "work"
+          },
+          {
+            "room": "study",
+            "to_floor": "Laboratory",
+            "to_room": "lab"
+          }
+        ]
+      },
+      {
+        "name": "Laboratory",
+        "rooms": [
+          {
+            "id": "lab",
+            "name": "Alchemy Lab",
+            "w": 8,
+            "h": 6
+          },
+          {
+            "id": "store",
+            "name": "Reagent Store",
+            "w": 4,
+            "h": 4
+          }
+        ],
+        "links": [
+          {
+            "a": "lab",
+            "b": "store"
+          }
+        ],
+        "stairs": [
+          {
+            "room": "lab",
+            "to_floor": "Library Floor",
+            "to_room": "study"
+          },
+          {
+            "room": "store",
+            "to_floor": "Observatory",
+            "to_room": "dome"
+          }
+        ]
+      },
+      {
+        "name": "Observatory",
+        "rooms": [
+          {
+            "id": "dome",
+            "name": "Observatory Dome",
+            "w": 9,
+            "h": 9,
+            "kind": "area"
+          }
+        ],
+        "links": [],
+        "stairs": [
+          {
+            "room": "dome",
+            "to_floor": "Laboratory",
+            "to_room": "store"
+          }
+        ]
+      }
+    ]
+  },
+  "why": "Each floor is small; the tower gets its height from stairs that name the next floor. A floor with a single room needs no links."
+}

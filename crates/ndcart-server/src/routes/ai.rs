@@ -635,7 +635,7 @@ pub(crate) async fn theme_pack(
     let backend = draft::Backend::connect(&cfg)
         .await
         .map_err(|m| ApiError(CoreError::Invalid(m)))?;
-    let system = "You design tabletop art packs. Reply with ONE JSON object and nothing else: {\"name\": string (1-60 chars), \"style\": string (1-120 chars, the shared look), \"palette\": [4-8 \"#rrggbb\"], \"materials\": [4-6 {\"name\", \"prompt\", \"tags\": [1-4 words]}], \"props\": [6-12 {\"name\", \"prompt\", \"tags\": [1-4 words], \"placement\": \"floor\"|\"wall\"}]} Prompts are image-generator prompts (subject, angle \"top-down\", style). Keep the style consistent.";
+    let system = crate::aipack::system(crate::aipack::Kind::ThemePack);
     let reply = backend
         .chat(system, &format!("Theme: {theme}"))
         .await

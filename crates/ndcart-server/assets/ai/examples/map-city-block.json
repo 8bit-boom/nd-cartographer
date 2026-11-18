@@ -1,0 +1,82 @@
+{
+  "request": "A city block: market square, a tavern, a smithy and the guardhouse, joined by alleys.",
+  "spec": {
+    "name": "Copperfield Block",
+    "floors": [
+      {
+        "name": "Block",
+        "rooms": [
+          {
+            "id": "square",
+            "name": "Market Square",
+            "w": 14,
+            "h": 10,
+            "kind": "area"
+          },
+          {
+            "id": "tavern",
+            "name": "The Tipsy Heron Tavern",
+            "w": 10,
+            "h": 8
+          },
+          {
+            "id": "smithy",
+            "name": "Smithy",
+            "w": 7,
+            "h": 6
+          },
+          {
+            "id": "guard",
+            "name": "Guardhouse",
+            "w": 7,
+            "h": 6
+          },
+          {
+            "id": "alley",
+            "name": "Back Alley",
+            "w": 9,
+            "h": 2,
+            "kind": "corridor",
+            "lit": false
+          },
+          {
+            "id": "cell",
+            "name": "Guard Cells",
+            "w": 5,
+            "h": 5,
+            "lit": false
+          }
+        ],
+        "links": [
+          {
+            "a": "square",
+            "b": "tavern"
+          },
+          {
+            "a": "square",
+            "b": "smithy",
+            "kind": "opening"
+          },
+          {
+            "a": "square",
+            "b": "guard"
+          },
+          {
+            "a": "square",
+            "b": "alley",
+            "kind": "opening"
+          },
+          {
+            "a": "guard",
+            "b": "cell"
+          },
+          {
+            "a": "alley",
+            "b": "tavern"
+          }
+        ]
+      }
+    ]
+  },
+  "why": "Open ground is an area; buildings are rooms. The extra link alley-tavern makes a loop, which the layout draws as an L-shaped passage."
+}

@@ -39,6 +39,27 @@ const fn r(asset: &'static str, at: Where, per: usize, min: usize, scale: (f32, 
     }
 }
 
+/// The room-name keywords that pick a furnishing recipe, as `(recipe, keywords)`. The first
+/// group with a keyword inside the lowercase room name wins. The AI instruction pack renders
+/// this table so a model knows which names get which props.
+pub const KEYWORDS: &[(&str, &[&str])] = &[
+    (
+        "barracks",
+        &["barrack", "dorm", "quarters", "bedroom", "crew"],
+    ),
+    ("kitchen", &["kitchen", "mess", "galley", "canteen"]),
+    ("library", &["library", "study", "office", "lab", "archive"]),
+    (
+        "store",
+        &["store", "cargo", "pantry", "warehouse", "locker"],
+    ),
+    ("shrine", &["shrine", "temple", "chapel", "altar"]),
+    ("throne", &["throne", "hall", "audience"]),
+    ("crypt", &["crypt", "tomb", "ossuary", "vault"]),
+    ("cell", &["cell", "prison", "jail"]),
+    ("armory", &["armory", "armoury", "workshop", "forge"]),
+];
+
 /// The recipe for a room: the first keyword its lowercase name contains wins,
 /// else its kind decides.
 fn recipe(name: &str, kind: SpaceKind) -> &'static [Rule] {
@@ -102,31 +123,25 @@ fn recipe(name: &str, kind: SpaceKind) -> &'static [Rule] {
         r("bush", Middle, 10, 1, (0.8, 1.1)),
     ];
     let n = name.to_lowercase();
-    let has = |ks: &[&str]| ks.iter().any(|k| n.contains(k));
-    if has(&["barrack", "dorm", "quarters", "bedroom", "crew"]) {
-        BARRACKS
-    } else if has(&["kitchen", "mess", "galley", "canteen"]) {
-        KITCHEN
-    } else if has(&["library", "study", "office", "lab", "archive"]) {
-        LIBRARY
-    } else if has(&["store", "cargo", "pantry", "warehouse", "locker"]) {
-        STORE
-    } else if has(&["shrine", "temple", "chapel", "altar"]) {
-        SHRINE
-    } else if has(&["throne", "hall", "audience"]) {
-        THRONE
-    } else if has(&["crypt", "tomb", "ossuary", "vault"]) {
-        CRYPT
-    } else if has(&["cell", "prison", "jail"]) {
-        CELL
-    } else if has(&["armory", "armoury", "workshop", "forge"]) {
-        ARMORY
-    } else {
-        match kind {
+    let group = KEYWORDS
+        .iter()
+        .find(|(_, ks)| ks.iter().any(|k| n.contains(k)))
+        .map(|(g, _)| *g);
+    match group {
+        Some("barracks") => BARRACKS,
+        Some("kitchen") => KITCHEN,
+        Some("library") => LIBRARY,
+        Some("store") => STORE,
+        Some("shrine") => SHRINE,
+        Some("throne") => THRONE,
+        Some("crypt") => CRYPT,
+        Some("cell") => CELL,
+        Some("armory") => ARMORY,
+        _ => match kind {
             SpaceKind::Corridor => CORRIDOR,
             SpaceKind::Area => AREA,
             SpaceKind::Room => GENERIC,
-        }
+        },
     }
 }
 
@@ -340,6 +355,21 @@ pub fn furnish_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Every keyword group has its own recipe (a group added to KEYWORDS but not to `recipe`
+    /// would silently furnish like a plain room).
+    #[test]
+    fn every_keyword_group_has_a_recipe_of_its_own() {
+        let plain = recipe("zzz", SpaceKind::Room);
+        for (group, words) in KEYWORDS {
+            for w in *words {
+                assert!(
+                    !std::ptr::eq(recipe(w, SpaceKind::Room), plain),
+                    "{group}: '{w}' furnishes like a plain room"
+                );
+            }
+        }
+    }
+
     use crate::grid::{default_space, EdgeKey, Mark, MarkKind};
     use crate::journal::Journal;
 

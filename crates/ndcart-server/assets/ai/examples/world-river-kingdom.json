@@ -1,0 +1,83 @@
+{
+  "request": "A river kingdom with farmland, a great forest and a mountain border.",
+  "spec": {
+    "name": "Valemark",
+    "cols": 192,
+    "rows": 128,
+    "land": 0.7,
+    "continent": 0.9,
+    "ridges": 0.7,
+    "rivers": 12,
+    "biomes": [
+      {
+        "biome": "forest",
+        "x": 0.3,
+        "y": 0.35,
+        "rx": 0.2,
+        "ry": 0.2,
+        "density": 1.5
+      },
+      {
+        "biome": "meadow",
+        "x": 0.6,
+        "y": 0.6,
+        "rx": 0.25,
+        "ry": 0.2,
+        "density": 2
+      },
+      {
+        "biome": "swamp",
+        "x": 0.7,
+        "y": 0.3,
+        "rx": 0.1,
+        "ry": 0.08,
+        "density": 1.5
+      }
+    ],
+    "places": [
+      {
+        "name": "Valemark",
+        "note": "The royal city on the river.",
+        "x": 0.55,
+        "y": 0.5
+      },
+      {
+        "name": "Oakhelm",
+        "note": "A forest town.",
+        "x": 0.32,
+        "y": 0.38
+      },
+      {
+        "name": "Fenwick",
+        "note": "A marsh village.",
+        "x": 0.7,
+        "y": 0.32
+      }
+    ],
+    "regions": [
+      {
+        "name": "The Crownlands",
+        "points": [
+          [
+            0.4,
+            0.35
+          ],
+          [
+            0.8,
+            0.35
+          ],
+          [
+            0.8,
+            0.75
+          ],
+          [
+            0.4,
+            0.75
+          ]
+        ],
+        "color": "#c0504d"
+      }
+    ]
+  },
+  "why": "A high 'continent' and plenty of rivers give one big landmass. Biomes are ellipses on dry land, and places stay well inside the map."
+}

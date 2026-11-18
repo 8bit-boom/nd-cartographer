@@ -1,0 +1,97 @@
+{
+  "request": "A cold archipelago kingdom with three political regions.",
+  "spec": {
+    "name": "The Frostmarch Isles",
+    "cols": 160,
+    "rows": 110,
+    "land": 0.3,
+    "continent": 0.1,
+    "ridges": 0.3,
+    "rivers": 2,
+    "biomes": [
+      {
+        "biome": "rocky",
+        "x": 0.5,
+        "y": 0.45,
+        "rx": 0.3,
+        "ry": 0.25,
+        "density": 1.5
+      },
+      {
+        "biome": "meadow",
+        "x": 0.4,
+        "y": 0.55,
+        "rx": 0.15,
+        "ry": 0.12,
+        "density": 2
+      }
+    ],
+    "places": [
+      {
+        "name": "Harbour of Gulls",
+        "note": "The capital port.",
+        "x": 0.5,
+        "y": 0.5
+      },
+      {
+        "name": "Grey Watch",
+        "note": "A lighthouse fort.",
+        "x": 0.42,
+        "y": 0.46
+      },
+      {
+        "name": "Skerry Hold",
+        "note": "An old ruin.",
+        "x": 0.58,
+        "y": 0.55
+      }
+    ],
+    "regions": [
+      {
+        "name": "Northern Reach",
+        "points": [
+          [
+            0.2,
+            0.15
+          ],
+          [
+            0.8,
+            0.15
+          ],
+          [
+            0.7,
+            0.4
+          ],
+          [
+            0.3,
+            0.4
+          ]
+        ],
+        "color": "#4f81bd"
+      },
+      {
+        "name": "Southern Isles",
+        "points": [
+          [
+            0.25,
+            0.6
+          ],
+          [
+            0.75,
+            0.6
+          ],
+          [
+            0.8,
+            0.9
+          ],
+          [
+            0.2,
+            0.9
+          ]
+        ],
+        "color": "#9bbb59"
+      }
+    ]
+  },
+  "why": "Low 'land' and a low 'continent' value make islands. Places sit near the middle, where land is most likely. Regions are polygons of at least three points."
+}

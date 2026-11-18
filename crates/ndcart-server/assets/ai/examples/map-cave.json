@@ -1,0 +1,75 @@
+{
+  "request": "A bat cave with an underground lake and a narrow back tunnel.",
+  "spec": {
+    "name": "Skarn Hollow",
+    "floors": [
+      {
+        "name": "Cavern System",
+        "rooms": [
+          {
+            "id": "mouth",
+            "name": "Cave Mouth",
+            "w": 8,
+            "h": 6,
+            "kind": "area"
+          },
+          {
+            "id": "neck",
+            "name": "Narrow Tunnel",
+            "w": 8,
+            "h": 2,
+            "kind": "corridor",
+            "lit": false
+          },
+          {
+            "id": "lake",
+            "name": "Underground Lake",
+            "w": 12,
+            "h": 9,
+            "kind": "area",
+            "lit": false
+          },
+          {
+            "id": "roost",
+            "name": "Bat Roost",
+            "w": 6,
+            "h": 6,
+            "kind": "area",
+            "lit": false
+          },
+          {
+            "id": "shaft",
+            "name": "Collapsed Shaft",
+            "w": 4,
+            "h": 4,
+            "kind": "area",
+            "lit": false
+          }
+        ],
+        "links": [
+          {
+            "a": "mouth",
+            "b": "neck",
+            "kind": "opening"
+          },
+          {
+            "a": "neck",
+            "b": "lake",
+            "kind": "opening"
+          },
+          {
+            "a": "lake",
+            "b": "roost",
+            "kind": "opening"
+          },
+          {
+            "a": "roost",
+            "b": "shaft",
+            "kind": "secret"
+          }
+        ]
+      }
+    ]
+  },
+  "why": "Caves use areas and openings, not doors. Not every room needs light: unlit rooms stay dark."
+}

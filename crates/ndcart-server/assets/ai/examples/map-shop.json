@@ -1,0 +1,44 @@
+{
+  "request": "A small apothecary shop with a stock room behind the counter.",
+  "spec": {
+    "name": "The Gilded Mortar",
+    "floors": [
+      {
+        "name": "Shop",
+        "rooms": [
+          {
+            "id": "shop",
+            "name": "Shop Floor",
+            "w": 10,
+            "h": 7
+          },
+          {
+            "id": "stock",
+            "name": "Stock Room",
+            "w": 5,
+            "h": 5
+          },
+          {
+            "id": "cellar",
+            "name": "Cellar Store",
+            "w": 6,
+            "h": 5,
+            "lit": false
+          }
+        ],
+        "links": [
+          {
+            "a": "shop",
+            "b": "stock"
+          },
+          {
+            "a": "stock",
+            "b": "cellar",
+            "kind": "secret"
+          }
+        ]
+      }
+    ]
+  },
+  "why": "Three rooms are plenty for a shop. The entrance is the first room. The cellar hangs off the stock room behind a secret link, and 'Store' in a name gets crates and barrels."
+}

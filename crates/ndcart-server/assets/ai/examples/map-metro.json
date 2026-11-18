@@ -1,0 +1,148 @@
+{
+  "request": "An abandoned metro station, 3 levels, flooded at the bottom.",
+  "spec": {
+    "name": "Old Marrow Station",
+    "floors": [
+      {
+        "name": "Street Level",
+        "rooms": [
+          {
+            "id": "hall",
+            "name": "Ticket Hall",
+            "w": 9,
+            "h": 6
+          },
+          {
+            "id": "conc",
+            "name": "Concourse",
+            "w": 14,
+            "h": 5
+          },
+          {
+            "id": "office",
+            "name": "Control Office",
+            "w": 5,
+            "h": 5,
+            "lit": false
+          }
+        ],
+        "links": [
+          {
+            "a": "hall",
+            "b": "conc",
+            "kind": "opening"
+          },
+          {
+            "a": "hall",
+            "b": "office"
+          }
+        ],
+        "stairs": [
+          {
+            "room": "conc",
+            "to_floor": "Platform",
+            "to_room": "plat",
+            "label": "Down to the platform"
+          }
+        ]
+      },
+      {
+        "name": "Platform",
+        "rooms": [
+          {
+            "id": "plat",
+            "name": "Platform",
+            "w": 16,
+            "h": 4
+          },
+          {
+            "id": "wait",
+            "name": "Waiting Room",
+            "w": 6,
+            "h": 5
+          },
+          {
+            "id": "tun",
+            "name": "Service Tunnel",
+            "w": 10,
+            "h": 3,
+            "kind": "corridor",
+            "lit": false
+          }
+        ],
+        "links": [
+          {
+            "a": "plat",
+            "b": "wait"
+          },
+          {
+            "a": "plat",
+            "b": "tun",
+            "kind": "opening"
+          }
+        ],
+        "stairs": [
+          {
+            "room": "plat",
+            "to_floor": "Street Level",
+            "to_room": "conc",
+            "label": "Up to the street"
+          },
+          {
+            "room": "tun",
+            "to_floor": "Flooded Tunnels",
+            "to_room": "tunnel",
+            "label": "Down to the sump"
+          }
+        ]
+      },
+      {
+        "name": "Flooded Tunnels",
+        "rooms": [
+          {
+            "id": "tunnel",
+            "name": "Drowned Tunnel",
+            "w": 14,
+            "h": 3,
+            "kind": "corridor",
+            "lit": false
+          },
+          {
+            "id": "pump",
+            "name": "Pump Room",
+            "w": 6,
+            "h": 6
+          },
+          {
+            "id": "sump",
+            "name": "Flooded Sump",
+            "w": 8,
+            "h": 8,
+            "kind": "area",
+            "lit": false
+          }
+        ],
+        "links": [
+          {
+            "a": "tunnel",
+            "b": "pump"
+          },
+          {
+            "a": "tunnel",
+            "b": "sump",
+            "kind": "opening"
+          }
+        ],
+        "stairs": [
+          {
+            "room": "tunnel",
+            "to_floor": "Platform",
+            "to_room": "tun",
+            "label": "Up to the platform"
+          }
+        ]
+      }
+    ]
+  },
+  "why": "Three floors joined by stairs both ways, each floor with a small graph. Stairs name the other floor by its name and a room id on it. The lowest floor uses an area for open flooded ground."
+}

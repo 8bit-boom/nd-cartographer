@@ -1,0 +1,75 @@
+{
+  "request": "A desert empire with a few oases and a sea to the north.",
+  "spec": {
+    "name": "The Amber Reach",
+    "cols": 160,
+    "rows": 110,
+    "land": 0.75,
+    "continent": 0.8,
+    "ridges": 0.4,
+    "rivers": 1,
+    "biomes": [
+      {
+        "biome": "desert",
+        "x": 0.5,
+        "y": 0.55,
+        "rx": 0.4,
+        "ry": 0.3,
+        "density": 3
+      },
+      {
+        "biome": "rocky",
+        "x": 0.25,
+        "y": 0.6,
+        "rx": 0.12,
+        "ry": 0.12,
+        "density": 1.5
+      }
+    ],
+    "places": [
+      {
+        "name": "Sunspire",
+        "note": "The empire's capital.",
+        "x": 0.5,
+        "y": 0.55
+      },
+      {
+        "name": "Palm Well",
+        "note": "An oasis town.",
+        "x": 0.38,
+        "y": 0.6
+      },
+      {
+        "name": "Dune Gate",
+        "note": "A caravan stop.",
+        "x": 0.62,
+        "y": 0.5
+      }
+    ],
+    "regions": [
+      {
+        "name": "The Amber Empire",
+        "points": [
+          [
+            0.2,
+            0.3
+          ],
+          [
+            0.8,
+            0.3
+          ],
+          [
+            0.85,
+            0.85
+          ],
+          [
+            0.15,
+            0.85
+          ]
+        ],
+        "color": "#f79646"
+      }
+    ]
+  },
+  "why": "A sparse biome density (high number) keeps the desert open. Few places, each with a note."
+}

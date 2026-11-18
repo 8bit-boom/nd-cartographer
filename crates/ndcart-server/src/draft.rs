@@ -10,33 +10,11 @@
 //! `ND_CARTO_SERVER`, `ND_CARTO_EMAIL`, `ND_CARTO_PASSWORD[_FILE]` (never typed
 //! into a prompt or an argument).
 
+use crate::aipack::{self, Kind};
 use crate::specshape::{unknown_fields_complaint, SpecKind};
 use ndcart_bridge::Bridge;
 use ndcart_core::mapspec::MapSpec;
 use std::future::Future;
-
-pub const SYSTEM_PROMPT: &str = r#"You design tabletop battle maps as a room graph. Reply with ONE JSON object and nothing else (no prose, no code fences).
-
-Schema:
-{
-  "name": string (1-80 chars),
-  "floors": [                       // 1-12 floors
-    {
-      "name": string (unique, 1-40 chars),
-      "rooms": [                    // 1-60 rooms per floor
-        {"id": string (1-40 chars of A-Z a-z 0-9 _ -; lowercase is best), "name": string, "w": 2-30, "h": 2-30, "kind": "room"|"corridor"|"area", "lit": true|false}
-      ],
-      "links": [                    // how rooms connect; EVERY room must be reachable from the first room
-        {"a": room id, "b": room id, "kind": "door"|"opening"|"secret"}
-      ],
-      "stairs": [                   // optional, to ANOTHER floor
-        {"room": room id, "to_floor": floor name, "to_room": room id on that floor, "label": string}
-      ]
-    }
-  ]
-}
-
-Rules: sizes are in squares (a normal room is 4-10). Give rooms evocative names. Use "secret" sparingly. Do not invent fields. Do not describe positions; the layout is computed for you."#;
 
 /// The first JSON object in `text`, tolerating code fences and chatter around it.
 pub fn extract_json(text: &str) -> Option<&str> {
@@ -161,23 +139,6 @@ where
         repairs + 1
     ))
 }
-
-pub const WORLD_SYSTEM_PROMPT: &str = r##"You design overland fantasy/sci-fi maps. Reply with ONE JSON object and nothing else (no prose, no code fences).
-
-Schema (every coordinate is 0..1 across the map: x left to right, y top to bottom):
-{
-  "name": string (1-80 chars),
-  "cols": 16-512 (default 160), "rows": 16-512 (default 110),
-  "land": 0.05-0.95        // fraction of the map that is dry land
-  "continent": 0-1         // 0 = scattered islands, 1 = one central continent
-  "ridges": 0-1            // mountain chains
-  "rivers": 0-40,
-  "biomes": [ {"biome": "forest"|"meadow"|"rocky"|"swamp"|"desert", "x": 0-1, "y": 0-1, "rx": 0.02-0.5, "ry": 0.02-0.5, "density": 0.5-4 (higher = sparser)} ],
-  "places": [ {"name": string, "note": string, "x": 0-1, "y": 0-1} ],     // cities, ruins, landmarks
-  "regions": [ {"name": string, "points": [[x,y], ...3-100 points], "color": "#rrggbb"} ] // kingdoms, wilds
-}
-
-Rules: biomes are ellipses where props grow, and only on dry land. Put places on land (near the middle of the map is safest for islands). Use few, meaningful features. Do not invent fields."##;
 
 /// Parse and validate one world reply (the error goes back to the model).
 pub fn parse_world_reply(reply: &str) -> Result<crate::worldspec::WorldSpec, String> {
@@ -350,7 +311,7 @@ fn too_long(prompt: &str) -> Result<(), String> {
 pub async fn draft(cfg: &Config, prompt: &str, ctx: &Context) -> Result<Drafted, String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
-    let system = with_context(SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
+    let system = with_context(aipack::system(Kind::Map), &ctx.with_lore(&backend).await?);
     let spec = draft_with(prompt, 2, |user| {
         let (backend, system) = (&backend, system.clone());
         async move { backend.chat(&system, &user).await }
@@ -368,7 +329,7 @@ pub async fn draft_world(
 ) -> Result<crate::worldspec::WorldSpec, String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
-    let system = with_context(WORLD_SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
+    let system = with_context(aipack::system(Kind::World), &ctx.with_lore(&backend).await?);
     draft_loop(
         prompt,
         2,
@@ -380,10 +341,6 @@ pub async fn draft_world(
     )
     .await
 }
-
-pub const REFINE_SYSTEM_PROMPT: &str = r##"You revise an existing tabletop battle-map floor, given as a room graph. Reply with ONE JSON object and nothing else: the COMPLETE revised map spec in the same schema as the one you are shown (name, floors[], rooms[], links[], stairs[]), with exactly one floor.
-
-Rules: PINNED rooms must come back unchanged: same id, name, w, h and kind. Every other room may be changed, replaced or removed, and new rooms may be added (give them new unique ids). Keep every room reachable from the first through links. Do not describe positions; the layout is computed."##;
 
 /// The user turn for a refinement: the current floor, the pins, the request.
 pub fn refine_user_turn(
@@ -442,7 +399,10 @@ pub async fn refine(
 ) -> Result<MapSpec, String> {
     too_long(instruction)?;
     let backend = Backend::connect(cfg).await?;
-    let system = with_context(REFINE_SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
+    let system = with_context(
+        aipack::system(Kind::Refine),
+        &ctx.with_lore(&backend).await?,
+    );
     let first = refine_user_turn(current, pins, instruction)?;
     let judge = judge_refine(current, pins.to_vec());
     // The repair rounds quote the complaint after the same current map and request.
@@ -483,8 +443,6 @@ pub fn clean_tags(raw: &[String]) -> Vec<String> {
     out
 }
 
-pub const TAG_SYSTEM_PROMPT: &str = r##"You label props for a tabletop map editor so they can be found by search. Reply with ONE JSON object and nothing else: {"tags": ["word", ...]} with 3 to 8 short lowercase tags (1-24 characters: letters, digits, spaces, hyphens). Cover what it is, its material, its setting or mood, and where it would be placed (e.g. "crate", "wooden", "storage", "dungeon", "cargo")."##;
-
 fn judge_tags(reply: &str) -> Result<Vec<String>, String> {
     let json = extract_json(reply)
         .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
@@ -524,7 +482,7 @@ pub async fn suggest_tags(cfg: &Config, name: &str, prompt: &str) -> Result<Vec<
         1,
         |user| {
             let backend = &backend;
-            async move { backend.chat(TAG_SYSTEM_PROMPT, &user).await }
+            async move { backend.chat(aipack::system(Kind::Tags), &user).await }
         },
         judge_tags,
     )
@@ -717,25 +675,27 @@ mod tests {
         .unwrap();
         assert_eq!(spec.name, "Isles");
         assert!(seen[1].contains("land must be"), "{}", seen[1]);
-        assert!(WORLD_SYSTEM_PROMPT.contains("biomes") && WORLD_SYSTEM_PROMPT.contains("0..1"));
+        let world_prompt = aipack::system(Kind::World);
+        assert!(world_prompt.contains("biomes") && world_prompt.contains("0..1"));
     }
 
     #[test]
     fn style_and_lore_are_added_to_the_system_prompt_only_when_present() {
+        let system_prompt = aipack::system(Kind::Map);
         assert_eq!(
-            with_context(SYSTEM_PROMPT, &Context::default()),
-            SYSTEM_PROMPT
+            with_context(system_prompt, &Context::default()),
+            system_prompt
         );
         let ctx = Context {
             tone: Some("gritty cyberpunk".into()),
             locations: vec!["Port Neon".into(), "The Drowned Abbey".into()],
             lore: false,
         };
-        let s = with_context(SYSTEM_PROMPT, &ctx);
+        let s = with_context(system_prompt, &ctx);
         assert!(
             s.contains("gritty cyberpunk")
                 && s.contains("Port Neon; The Drowned Abbey")
-                && s.starts_with(SYSTEM_PROMPT)
+                && s.starts_with(system_prompt)
         );
     }
 
@@ -822,7 +782,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(got, ["crate", "cargo"]);
-        assert!(TAG_SYSTEM_PROMPT.contains("\"tags\""));
+        assert!(aipack::system(Kind::Tags).contains("\"tags\""));
     }
 
     #[tokio::test]
@@ -837,6 +797,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(e, "nd-world refused it");
-        assert!(SYSTEM_PROMPT.contains("\"links\"") && SYSTEM_PROMPT.contains("reachable"));
+        let system_prompt = aipack::system(Kind::Map);
+        assert!(system_prompt.contains("\"links\"") && system_prompt.contains("reachable"));
     }
 }

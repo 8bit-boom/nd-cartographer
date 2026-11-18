@@ -10,6 +10,31 @@ use crate::MAX_LIGHTS;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Every problem code the linter (floor, link and marker checks) can report. A test keeps
+/// this list equal to the codes used in this file; the AI instruction pack explains each.
+pub const ALL_CODES: &[&str] = &[
+    "unreachable_room",
+    "secret_only_room",
+    "duplicate_room_name",
+    "corridor_dead_end",
+    "door_to_void",
+    "mark_on_nothing",
+    "mark_inside_room",
+    "light_in_void",
+    "space_unused",
+    "empty_floor",
+    "walls_over_cap",
+    "lights_over_cap",
+    "link_to_missing_floor",
+    "link_to_same_floor",
+    "link_not_returned",
+    "zone_stale_room",
+    "zone_empty",
+    "entity_link_stale",
+    "encounter_in_missing_room",
+    "marker_link_unpublished",
+];
+
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -523,6 +548,42 @@ pub fn blocks_publish(problems: &[Problem]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// `ALL_CODES` is exactly the set of codes this file can report.
+    #[test]
+    fn all_codes_lists_every_code_the_linter_uses() {
+        let src = include_str!("lint.rs");
+        let body = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        let list_end = body.find("#[derive(Serialize, Clone, Copy").unwrap();
+        let (list, code) = body.split_at(list_end);
+        // Every string literal in the code that looks like a problem code ...
+        let mut used: BTreeSet<&str> = BTreeSet::new();
+        for part in code.split('"').skip(1).step_by(2) {
+            let snake = part.contains('_')
+                && part.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                && !part.starts_with('_')
+                && !part.ends_with('_');
+            if snake {
+                used.insert(part);
+            }
+        }
+        let listed: BTreeSet<&str> = ALL_CODES.iter().copied().collect();
+        assert_eq!(listed.len(), ALL_CODES.len(), "a code is listed twice");
+        // ... must be listed, and every listed code must appear in the code.
+        for u in &used {
+            assert!(
+                listed.contains(u),
+                "'{u}' is used but missing from ALL_CODES"
+            );
+        }
+        for l in &listed {
+            assert!(
+                code.contains(&format!("\"{l}\"")),
+                "'{l}' is listed but never used"
+            );
+        }
+        assert!(list.contains("unreachable_room"));
+    }
+
     #[test]
     fn finer_checks_find_zones_dead_ends_secret_rooms_and_repeats() {
         let mut f = FloorDoc::new("f".into(), "G".into());

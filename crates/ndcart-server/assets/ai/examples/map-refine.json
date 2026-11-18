@@ -1,0 +1,54 @@
+{
+  "request": "Refine this floor: add a barracks next to the entrance. Pinned rooms: hall, armory.",
+  "spec": {
+    "name": "Fort Gate",
+    "floors": [
+      {
+        "name": "Gatehouse",
+        "rooms": [
+          {
+            "id": "hall",
+            "name": "Entrance Hall",
+            "w": 9,
+            "h": 6
+          },
+          {
+            "id": "armory",
+            "name": "Armory",
+            "w": 6,
+            "h": 5
+          },
+          {
+            "id": "barracks",
+            "name": "Barracks",
+            "w": 9,
+            "h": 5
+          },
+          {
+            "id": "yard",
+            "name": "Yard",
+            "w": 12,
+            "h": 8,
+            "kind": "area"
+          }
+        ],
+        "links": [
+          {
+            "a": "hall",
+            "b": "armory"
+          },
+          {
+            "a": "hall",
+            "b": "barracks"
+          },
+          {
+            "a": "hall",
+            "b": "yard",
+            "kind": "opening"
+          }
+        ]
+      }
+    ]
+  },
+  "why": "A refine reply is the whole revised floor. The pinned rooms (hall, armory) keep their id, name, w, h and kind exactly; the new room has a new id and is linked to the entrance."
+}

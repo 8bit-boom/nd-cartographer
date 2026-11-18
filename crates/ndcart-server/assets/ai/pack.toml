@@ -1,0 +1,28 @@
+# The AI instruction pack (see docs/AI_INSTRUCTIONS.md). Bump `version` when any file below
+# changes in a way a model or agent would notice; bump `schema_version` when the MapSpec or
+# WorldSpec shape changes. A test keeps `files` equal to the files in this folder.
+version = "1.0.0"
+schema_version = 1
+files = [
+  "system_map.md",
+  "system_world.md",
+  "system_refine.md",
+  "system_tags.md",
+  "system_theme_pack.md",
+  "reference.md",
+  "repair.md",
+  "mistakes.md",
+  "mapspec.schema.json",
+  "worldspec.schema.json",
+  "examples/map-shop.json",
+  "examples/map-metro.json",
+  "examples/map-crypt.json",
+  "examples/map-ship.json",
+  "examples/map-tower.json",
+  "examples/map-city-block.json",
+  "examples/map-cave.json",
+  "examples/map-refine.json",
+  "examples/world-archipelago.json",
+  "examples/world-river-kingdom.json",
+  "examples/world-desert.json",
+]

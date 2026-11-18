@@ -13,6 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_FLOORS: usize = 12;
 pub const MAX_ROOMS: usize = 60;
+/// A room is this many squares across at least, and at most.
+pub const ROOM_MIN: i32 = 2;
+pub const ROOM_MAX: i32 = 30;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct MapSpec {
@@ -133,8 +136,11 @@ impl MapSpec {
                 if n == 0 || n > 60 {
                     return bad(format!("room '{}' needs a name of 1-60 characters", r.id));
                 }
-                if !(2..=30).contains(&r.w) || !(2..=30).contains(&r.h) {
-                    return bad(format!("room '{}' must be 2-30 squares each way", r.id));
+                if !(ROOM_MIN..=ROOM_MAX).contains(&r.w) || !(ROOM_MIN..=ROOM_MAX).contains(&r.h) {
+                    return bad(format!(
+                        "room '{}' must be {ROOM_MIN}-{ROOM_MAX} squares each way",
+                        r.id
+                    ));
                 }
             }
             for l in &f.links {

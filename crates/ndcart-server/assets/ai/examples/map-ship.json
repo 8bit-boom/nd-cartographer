@@ -1,0 +1,75 @@
+{
+  "request": "The main deck of a small cargo ship: bridge, crew quarters, galley, hold and engine room.",
+  "spec": {
+    "name": "The Salt Heron",
+    "floors": [
+      {
+        "name": "Main Deck",
+        "rooms": [
+          {
+            "id": "corr",
+            "name": "Main Passage",
+            "w": 14,
+            "h": 2,
+            "kind": "corridor"
+          },
+          {
+            "id": "bridge",
+            "name": "Bridge",
+            "w": 6,
+            "h": 5
+          },
+          {
+            "id": "crew",
+            "name": "Crew Quarters",
+            "w": 7,
+            "h": 5
+          },
+          {
+            "id": "galley",
+            "name": "Galley",
+            "w": 5,
+            "h": 5
+          },
+          {
+            "id": "hold",
+            "name": "Cargo Hold",
+            "w": 10,
+            "h": 6
+          },
+          {
+            "id": "engine",
+            "name": "Engine Room",
+            "w": 6,
+            "h": 6,
+            "lit": false
+          }
+        ],
+        "links": [
+          {
+            "a": "corr",
+            "b": "bridge"
+          },
+          {
+            "a": "corr",
+            "b": "crew"
+          },
+          {
+            "a": "corr",
+            "b": "galley"
+          },
+          {
+            "a": "corr",
+            "b": "hold",
+            "kind": "opening"
+          },
+          {
+            "a": "hold",
+            "b": "engine"
+          }
+        ]
+      }
+    ]
+  },
+  "why": "A corridor is the hub that joins the rooms, as on a real ship. Names such as Crew Quarters, Galley and Cargo Hold pick sensible props."
+}

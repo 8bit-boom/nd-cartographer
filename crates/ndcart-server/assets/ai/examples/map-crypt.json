@@ -1,0 +1,65 @@
+{
+  "request": "A crypt under a chapel with a hidden burial chamber.",
+  "spec": {
+    "name": "The Hollow Chapel Crypt",
+    "floors": [
+      {
+        "name": "Crypt",
+        "rooms": [
+          {
+            "id": "stair",
+            "name": "Entry Stair",
+            "w": 4,
+            "h": 4
+          },
+          {
+            "id": "nave",
+            "name": "Crypt Nave",
+            "w": 12,
+            "h": 6
+          },
+          {
+            "id": "ossuary",
+            "name": "Ossuary",
+            "w": 7,
+            "h": 5
+          },
+          {
+            "id": "tombs",
+            "name": "Tomb Row",
+            "w": 5,
+            "h": 9
+          },
+          {
+            "id": "vault",
+            "name": "Hidden Vault",
+            "w": 5,
+            "h": 5,
+            "lit": false
+          }
+        ],
+        "links": [
+          {
+            "a": "stair",
+            "b": "nave"
+          },
+          {
+            "a": "nave",
+            "b": "ossuary"
+          },
+          {
+            "a": "nave",
+            "b": "tombs",
+            "kind": "opening"
+          },
+          {
+            "a": "ossuary",
+            "b": "vault",
+            "kind": "secret"
+          }
+        ]
+      }
+    ]
+  },
+  "why": "One secret door guards the vault: use 'secret' sparingly, once or twice a floor. Names such as Ossuary and Vault furnish as crypts. The vault is not lit, so it feels hidden."
+}

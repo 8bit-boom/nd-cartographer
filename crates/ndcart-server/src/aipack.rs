@@ -2,14 +2,280 @@
 //! an external agent) how to write a spec. The files live in `assets/ai/` and are compiled in
 //! with `include_str!`; this module serves them. Everything here is pure (no network, no
 //! model), so it works with or without the `bridge` feature.
+//!
+//! Text files hold `{{PLACEHOLDERS}}` that [`render`] fills from the real constants (limits,
+//! material ids, furnishing keywords, ...), so a prompt can never drift from the code. The
+//! `sync` tests fail when the pack and the code disagree.
 
-// Used by the draft prompts and the HTTP/MCP routes as the pack grows (AI 2.2 - 2.4).
+// The HTTP and MCP routes (AI 2.3, 2.4) use the rest of this API.
 #![allow(dead_code)]
+
+use serde_json::Value;
+use std::sync::LazyLock;
+
+/// Every file of the pack, by its path under `assets/ai/`. `pack.toml` lists the same paths.
+pub const FILES: &[(&str, &str)] = &[
+    ("system_map.md", include_str!("../assets/ai/system_map.md")),
+    (
+        "system_world.md",
+        include_str!("../assets/ai/system_world.md"),
+    ),
+    (
+        "system_refine.md",
+        include_str!("../assets/ai/system_refine.md"),
+    ),
+    (
+        "system_tags.md",
+        include_str!("../assets/ai/system_tags.md"),
+    ),
+    (
+        "system_theme_pack.md",
+        include_str!("../assets/ai/system_theme_pack.md"),
+    ),
+    ("reference.md", include_str!("../assets/ai/reference.md")),
+    ("repair.md", include_str!("../assets/ai/repair.md")),
+    ("mistakes.md", include_str!("../assets/ai/mistakes.md")),
+    (
+        "mapspec.schema.json",
+        include_str!("../assets/ai/mapspec.schema.json"),
+    ),
+    (
+        "worldspec.schema.json",
+        include_str!("../assets/ai/worldspec.schema.json"),
+    ),
+    (
+        "examples/map-shop.json",
+        include_str!("../assets/ai/examples/map-shop.json"),
+    ),
+    (
+        "examples/map-metro.json",
+        include_str!("../assets/ai/examples/map-metro.json"),
+    ),
+    (
+        "examples/map-crypt.json",
+        include_str!("../assets/ai/examples/map-crypt.json"),
+    ),
+    (
+        "examples/map-ship.json",
+        include_str!("../assets/ai/examples/map-ship.json"),
+    ),
+    (
+        "examples/map-tower.json",
+        include_str!("../assets/ai/examples/map-tower.json"),
+    ),
+    (
+        "examples/map-city-block.json",
+        include_str!("../assets/ai/examples/map-city-block.json"),
+    ),
+    (
+        "examples/map-cave.json",
+        include_str!("../assets/ai/examples/map-cave.json"),
+    ),
+    (
+        "examples/map-refine.json",
+        include_str!("../assets/ai/examples/map-refine.json"),
+    ),
+    (
+        "examples/world-archipelago.json",
+        include_str!("../assets/ai/examples/world-archipelago.json"),
+    ),
+    (
+        "examples/world-river-kingdom.json",
+        include_str!("../assets/ai/examples/world-river-kingdom.json"),
+    ),
+    (
+        "examples/world-desert.json",
+        include_str!("../assets/ai/examples/world-desert.json"),
+    ),
+];
+
+/// `pack.toml`: the version and the file list.
+pub const MANIFEST: &str = include_str!("../assets/ai/pack.toml");
 
 /// The JSON Schema (draft 2020-12) a MapSpec reply must follow.
 pub const MAPSPEC_SCHEMA: &str = include_str!("../assets/ai/mapspec.schema.json");
 /// The JSON Schema a WorldSpec reply must follow.
 pub const WORLDSPEC_SCHEMA: &str = include_str!("../assets/ai/worldspec.schema.json");
+
+#[derive(serde::Deserialize)]
+pub struct Manifest {
+    pub version: String,
+    pub schema_version: u32,
+    pub files: Vec<String>,
+}
+
+static PACK: LazyLock<Manifest> =
+    LazyLock::new(|| toml::from_str(MANIFEST).expect("assets/ai/pack.toml is valid"));
+
+/// The pack's own version (`pack.toml`).
+pub fn version() -> &'static str {
+    &PACK.version
+}
+
+pub fn schema_version() -> u32 {
+    PACK.schema_version
+}
+
+pub fn manifest() -> &'static Manifest {
+    &PACK
+}
+
+/// One file of the pack, as written (placeholders not filled).
+pub fn raw(path: &str) -> Option<&'static str> {
+    FILES.iter().find(|(p, _)| *p == path).map(|(_, t)| *t)
+}
+
+/// Which prompt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Map,
+    World,
+    Refine,
+    Tags,
+    ThemePack,
+}
+
+impl Kind {
+    pub fn parse(s: &str) -> Option<Kind> {
+        Some(match s {
+            "map" => Kind::Map,
+            "world" => Kind::World,
+            "refine" => Kind::Refine,
+            "tags" => Kind::Tags,
+            "theme_pack" | "theme-pack" => Kind::ThemePack,
+            _ => return None,
+        })
+    }
+    fn file(self) -> &'static str {
+        match self {
+            Kind::Map => "system_map.md",
+            Kind::World => "system_world.md",
+            Kind::Refine => "system_refine.md",
+            Kind::Tags => "system_tags.md",
+            Kind::ThemePack => "system_theme_pack.md",
+        }
+    }
+}
+
+fn code_list<'a>(items: impl Iterator<Item = &'a str>) -> String {
+    items
+        .map(|i| format!("`{i}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Fill the `{{PLACEHOLDERS}}` a pack text may use from the real constants. Unknown
+/// placeholders (`{{problems}}` in `repair.md`) are left for the caller.
+pub fn render(text: &str) -> String {
+    use ndcart_core::mapspec::{MAX_FLOORS, MAX_ROOMS, ROOM_MAX, ROOM_MIN};
+    let furnish = ndcart_core::furnish::KEYWORDS
+        .iter()
+        .map(|(group, words)| format!("- {group}: {}", code_list(words.iter().copied())))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let subs: [(&str, String); 12] = [
+        ("PACK_VERSION", version().to_string()),
+        ("SCHEMA_VERSION", schema_version().to_string()),
+        ("CARGO_PKG_VERSION", env!("CARGO_PKG_VERSION").to_string()),
+        ("MAX_FLOORS", MAX_FLOORS.to_string()),
+        ("MAX_ROOMS", MAX_ROOMS.to_string()),
+        ("ROOM_MIN", ROOM_MIN.to_string()),
+        ("ROOM_MAX", ROOM_MAX.to_string()),
+        ("MAX_LIGHTS", ndcart_core::MAX_LIGHTS.to_string()),
+        ("WALL_CAP", ndcart_core::ND_WORLD_WALL_CAP.to_string()),
+        (
+            "MATERIALS",
+            code_list(ndcart_paint::starter().iter().map(|m| m.id)),
+        ),
+        (
+            "STAMPS",
+            code_list(ndcart_paint::stamps().iter().map(|s| s.id)),
+        ),
+        ("FURNISH", furnish),
+    ];
+    let mut out = text.trim_end().to_string();
+    for (k, v) in &subs {
+        out = out.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    out
+}
+
+static SYSTEMS: LazyLock<[String; 5]> = LazyLock::new(|| {
+    [
+        Kind::Map,
+        Kind::World,
+        Kind::Refine,
+        Kind::Tags,
+        Kind::ThemePack,
+    ]
+    .map(|k| render(raw(k.file()).expect("pack file")))
+});
+
+/// The rendered system prompt for `kind`.
+pub fn system(kind: Kind) -> &'static str {
+    let i = match kind {
+        Kind::Map => 0,
+        Kind::World => 1,
+        Kind::Refine => 2,
+        Kind::Tags => 3,
+        Kind::ThemePack => 4,
+    };
+    &SYSTEMS[i]
+}
+
+static REFERENCE: LazyLock<String> = LazyLock::new(|| render(raw("reference.md").expect("pack")));
+static MISTAKES: LazyLock<String> = LazyLock::new(|| render(raw("mistakes.md").expect("pack")));
+
+/// The full reference (rendered).
+pub fn reference() -> &'static str {
+    &REFERENCE
+}
+
+/// The common-mistakes list (rendered).
+pub fn mistakes() -> &'static str {
+    &MISTAKES
+}
+
+/// The repair-turn text with the problems filled in.
+pub fn repair(problems: &str) -> String {
+    render(raw("repair.md").expect("pack")).replace("{{problems}}", problems)
+}
+
+/// The schema text for a spec kind.
+pub fn schema(kind: crate::specshape::SpecKind) -> &'static str {
+    match kind {
+        crate::specshape::SpecKind::Map => MAPSPEC_SCHEMA,
+        crate::specshape::SpecKind::World => WORLDSPEC_SCHEMA,
+    }
+}
+
+/// One worked example: what was asked, the spec that answers it, and why it looks so.
+#[derive(Clone, Debug)]
+pub struct Example {
+    pub file: &'static str,
+    pub request: String,
+    pub why: String,
+    pub spec: Value,
+}
+
+/// The worked examples, in file order (map examples first; `world-*` are WorldSpecs and
+/// `map-refine` is a one-floor revision).
+pub fn examples() -> Vec<Example> {
+    FILES
+        .iter()
+        .filter(|(p, _)| p.starts_with("examples/"))
+        .map(|(p, t)| {
+            let v: Value = serde_json::from_str(t).expect("example is valid JSON");
+            let text = |k: &str| v[k].as_str().unwrap_or_default().to_string();
+            Example {
+                file: p,
+                request: text("request"),
+                why: text("why"),
+                spec: v["spec"].clone(),
+            }
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod sync {
@@ -558,5 +824,200 @@ mod sync {
             }
             forbidden(&s, "$");
         }
+    }
+}
+
+#[cfg(test)]
+mod pack {
+    //! The pack's text files agree with the code: examples work, placeholders are filled, every
+    //! linter code, material, prop and furnishing keyword is explained, and `pack.toml` lists
+    //! exactly the files that exist.
+    use super::*;
+    use crate::specshape::{unknown_fields, SpecKind};
+    use ndcart_core::mapspec::{compile, MapSpec};
+    use std::collections::BTreeSet;
+
+    fn is_world(e: &Example) -> bool {
+        e.file.contains("world-")
+    }
+
+    #[test]
+    fn every_example_parses_validates_compiles_and_lints_without_errors() {
+        let ex = examples();
+        assert!(ex.iter().filter(|e| !is_world(e)).count() >= 8);
+        assert!(ex.iter().filter(|e| is_world(e)).count() >= 3);
+        for e in &ex {
+            assert!(!e.request.is_empty() && !e.why.is_empty(), "{}", e.file);
+            if is_world(e) {
+                assert!(
+                    unknown_fields(&e.spec, SpecKind::World).is_empty(),
+                    "{}",
+                    e.file
+                );
+                let w: crate::worldspec::WorldSpec = serde_json::from_value(e.spec.clone())
+                    .unwrap_or_else(|er| panic!("{}: {er}", e.file));
+                w.validate().unwrap_or_else(|er| panic!("{}: {er}", e.file));
+                crate::worldspec::compile(&w, 1, &[])
+                    .unwrap_or_else(|er| panic!("{}: {er}", e.file));
+            } else {
+                assert!(
+                    unknown_fields(&e.spec, SpecKind::Map).is_empty(),
+                    "{}",
+                    e.file
+                );
+                let m: MapSpec = serde_json::from_value(e.spec.clone())
+                    .unwrap_or_else(|er| panic!("{}: {er}", e.file));
+                m.validate().unwrap_or_else(|er| panic!("{}: {er}", e.file));
+                if e.file.ends_with("map-refine.json") {
+                    assert_eq!(m.floors.len(), 1, "a refine reply holds one floor");
+                }
+                let laid = compile(&m, 1).unwrap_or_else(|er| panic!("{}: {er}", e.file));
+                let problems = ndcart_core::speclint::lint_compiled(&m, &laid).unwrap();
+                let errors: Vec<_> = problems
+                    .iter()
+                    .filter(|p| p.severity == ndcart_core::Severity::Error)
+                    .collect();
+                assert!(errors.is_empty(), "{}: {errors:?}", e.file);
+                // Other seeds lay out too (the GM can press "Another layout").
+                for seed in [2, 3, 4] {
+                    compile(&m, seed).unwrap_or_else(|er| panic!("{} seed {seed}: {er}", e.file));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_rendered_keeps_a_placeholder() {
+        for k in [
+            Kind::Map,
+            Kind::World,
+            Kind::Refine,
+            Kind::Tags,
+            Kind::ThemePack,
+        ] {
+            assert!(!system(k).contains("{{"), "{k:?}");
+        }
+        assert!(!reference().contains("{{") && !mistakes().contains("{{"));
+        let r = repair("a room is unlinked");
+        assert!(r.contains("a room is unlinked") && !r.contains("{{"), "{r}");
+        // The raw files use only placeholders `render` knows (or `problems`).
+        for (path, text) in FILES.iter().filter(|(p, _)| p.ends_with(".md")) {
+            let rendered = render(text).replace("{{problems}}", "");
+            assert!(
+                !rendered.contains("{{"),
+                "{path} has an unknown placeholder"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reference_says_which_pack_it_is_and_the_limits_come_from_code() {
+        let r = reference();
+        assert!(
+            r.contains(&format!("pack {} · schema {}", version(), schema_version())),
+            "{r}"
+        );
+        assert!(r.contains(env!("CARGO_PKG_VERSION")));
+        assert!(r.contains(&format!("1-{} floors", ndcart_core::mapspec::MAX_FLOORS)));
+        assert!(
+            system(Kind::Map).contains("1-12 floors") && system(Kind::Map).contains("1-60 rooms")
+        );
+        assert!(system(Kind::Map).contains("\"links\"") && system(Kind::Map).contains("reachable"));
+        assert!(system(Kind::World).contains("biomes") && system(Kind::World).contains("0..1"));
+    }
+
+    #[test]
+    fn every_linter_code_is_explained_in_the_reference() {
+        for code in ndcart_core::lint::ALL_CODES {
+            assert!(reference().contains(code), "{code} is not in reference.md");
+        }
+    }
+
+    #[test]
+    fn every_material_prop_and_furnishing_keyword_is_in_the_reference() {
+        let r = reference();
+        for m in ndcart_paint::starter() {
+            assert!(r.contains(m.id), "material {}", m.id);
+        }
+        for s in ndcart_paint::stamps() {
+            assert!(r.contains(s.id), "prop {}", s.id);
+        }
+        for (group, words) in ndcart_core::furnish::KEYWORDS {
+            assert!(r.contains(group), "furnish group {group}");
+            for w in *words {
+                assert!(r.contains(w), "furnish keyword {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_system_prompt_names_every_field_of_its_schema() {
+        use crate::specshape::*;
+        for f in MAP_FIELDS
+            .iter()
+            .chain(FLOOR_FIELDS)
+            .chain(ROOM_FIELDS)
+            .chain(LINK_FIELDS)
+            .chain(STAIR_FIELDS)
+        {
+            assert!(
+                system(Kind::Map).contains(&format!("\"{f}\"")),
+                "map prompt lacks {f}"
+            );
+        }
+        for f in WORLD_FIELDS
+            .iter()
+            .chain(BIOME_FIELDS)
+            .chain(PLACE_FIELDS)
+            .chain(REGION_FIELDS)
+        {
+            assert!(
+                system(Kind::World).contains(&format!("\"{f}\"")),
+                "world prompt lacks {f}"
+            );
+        }
+        // The refine prompt shares the map schema and names its parts.
+        for f in ["rooms", "links", "stairs", "id", "name", "w", "h", "kind"] {
+            assert!(system(Kind::Refine).contains(f), "refine prompt lacks {f}");
+        }
+    }
+
+    #[test]
+    fn pack_toml_lists_exactly_the_files_present() {
+        let listed: BTreeSet<&str> = manifest().files.iter().map(String::as_str).collect();
+        assert_eq!(
+            listed.len(),
+            manifest().files.len(),
+            "a file is listed twice"
+        );
+        let compiled_in: BTreeSet<&str> = FILES.iter().map(|(p, _)| *p).collect();
+        assert_eq!(listed, compiled_in, "pack.toml and FILES differ");
+        // On disk: the markdown and JSON files here, and examples/*.json (other files in this
+        // folder, such as models.toml or evals/, are not part of the pack).
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/ai");
+        let mut on_disk: BTreeSet<String> = BTreeSet::new();
+        let mut scan = |dir: &std::path::Path, prefix: &str| {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                let ext = p.extension().and_then(|x| x.to_str()).unwrap_or("");
+                if p.is_file() && matches!(ext, "md" | "json") {
+                    on_disk.insert(format!("{prefix}{}", e.file_name().to_string_lossy()));
+                }
+            }
+        };
+        scan(&root, "");
+        scan(&root.join("examples"), "examples/");
+        let on_disk: BTreeSet<&str> = on_disk.iter().map(String::as_str).collect();
+        assert_eq!(listed, on_disk, "pack.toml and the folder differ");
+        for (p, t) in FILES {
+            assert!(!t.trim().is_empty(), "{p} is empty");
+        }
+        // The version is semver-shaped.
+        let parts: Vec<&str> = version().split('.').collect();
+        assert!(
+            parts.len() == 3 && parts.iter().all(|x| x.parse::<u32>().is_ok()),
+            "{}",
+            version()
+        );
     }
 }
