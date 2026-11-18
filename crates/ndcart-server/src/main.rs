@@ -26,6 +26,7 @@ mod pdf;
 #[cfg(feature = "bridge")]
 mod publish;
 mod routes;
+mod specshape;
 mod state;
 mod store;
 mod synth;

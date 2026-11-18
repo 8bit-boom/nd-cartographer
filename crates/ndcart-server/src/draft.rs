@@ -10,6 +10,7 @@
 //! `ND_CARTO_SERVER`, `ND_CARTO_EMAIL`, `ND_CARTO_PASSWORD[_FILE]` (never typed
 //! into a prompt or an argument).
 
+use crate::specshape::{unknown_fields_complaint, SpecKind};
 use ndcart_bridge::Bridge;
 use ndcart_core::mapspec::MapSpec;
 use std::future::Future;
@@ -67,10 +68,24 @@ pub fn extract_json(text: &str) -> Option<&str> {
     None
 }
 
+/// An AI reply may not carry fields the spec does not have: they would be dropped silently.
+/// (A person's pasted spec stays lenient; only the AI paths call this.)
+fn reject_unknown_fields(json: &str, kind: SpecKind) -> Result<(), String> {
+    match serde_json::from_str::<serde_json::Value>(json) {
+        Ok(v) => match unknown_fields_complaint(&v, kind) {
+            Some(m) => Err(m),
+            None => Ok(()),
+        },
+        // Malformed JSON gets serde's own message from the typed parse that follows.
+        Err(_) => Ok(()),
+    }
+}
+
 /// Parse and validate one reply. The error text is what is sent back to the model.
 pub fn parse_reply(reply: &str) -> Result<MapSpec, String> {
     let json = extract_json(reply)
         .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
+    reject_unknown_fields(json, SpecKind::Map)?;
     let spec: MapSpec = serde_json::from_str(json)
         .map_err(|e| format!("The JSON did not match the schema: {e}."))?;
     spec.validate()
@@ -143,6 +158,7 @@ Rules: biomes are ellipses where props grow, and only on dry land. Put places on
 pub fn parse_world_reply(reply: &str) -> Result<crate::worldspec::WorldSpec, String> {
     let json = extract_json(reply)
         .ok_or("The reply contained no JSON object. Reply with only the JSON object.")?;
+    reject_unknown_fields(json, SpecKind::World)?;
     let spec: crate::worldspec::WorldSpec = serde_json::from_str(json)
         .map_err(|e| format!("The JSON did not match the schema: {e}."))?;
     spec.validate()
@@ -575,6 +591,37 @@ mod tests {
         assert!(parse_reply(&unlinked).unwrap_err().contains("not linked"));
         let huge = GOOD.replace(r#""w":8"#, r#""w":80"#);
         assert!(parse_reply(&huge).unwrap_err().contains("2-30"));
+    }
+
+    #[tokio::test]
+    async fn an_invented_field_is_a_repair_round_not_silently_dropped() {
+        let with_props = GOOD.replace(
+            r#""id":"b","name":"Ossuary""#,
+            r#""id":"b","props":["bones"],"name":"Ossuary""#,
+        );
+        let e = parse_reply(&with_props).unwrap_err();
+        assert!(e.contains("floors[0].rooms[1].props"), "{e}");
+        assert!(
+            e.contains("Allowed in a room: id, name, kind, w, h, lit"),
+            "{e}"
+        );
+        let replies = [with_props, GOOD.to_string()];
+        let (mut i, mut seen) = (0, Vec::new());
+        let spec = draft_with("a crypt", 2, |u| {
+            seen.push(u);
+            let r = replies[i].clone();
+            i += 1;
+            async move { Ok(r) }
+        })
+        .await
+        .unwrap();
+        assert_eq!(spec.name, "Crypt");
+        assert_eq!(seen.len(), 2);
+        assert!(seen[1].contains("Unknown field(s)"), "{}", seen[1]);
+        let w =
+            parse_world_reply(r#"{"name":"X","places":[{"name":"P","x":0.5,"y":0.5,"icon":"s"}]}"#)
+                .unwrap_err();
+        assert!(w.contains("places[0].icon"), "{w}");
     }
 
     #[tokio::test]
