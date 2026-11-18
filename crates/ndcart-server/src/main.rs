@@ -3164,6 +3164,7 @@ async fn post_ai_settings(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let Json(b) = body.map_err(|e| ApiError(CoreError::Invalid(format!("bad request: {e}"))))?;
     let mut stored = app.ai.lock().expect("ai settings").clone();
+    let mut key_cleared = false;
     if let Some(u) = b.direct_url {
         let u = u.trim().to_string();
         if !u.is_empty() && !u.starts_with("http://") && !u.starts_with("https://") {
@@ -3171,7 +3172,14 @@ async fn post_ai_settings(
                 "the model address must start with http:// or https://".into(),
             )));
         }
-        stored.direct_url = (!u.is_empty()).then_some(u);
+        let new_url = (!u.is_empty()).then_some(u);
+        // A new address must not inherit the old key: that would let a forged
+        // request send the saved key to a host of the attacker's choosing.
+        if new_url != stored.direct_url && b.key.is_none() && stored.key.is_some() {
+            stored.key = None;
+            key_cleared = true;
+        }
+        stored.direct_url = new_url;
     }
     if let Some(m) = b.direct_model {
         let m = m.trim().to_string();
@@ -3186,7 +3194,7 @@ async fn post_ai_settings(
     *app.ai.lock().expect("ai settings") = stored.clone();
     let view = ai_settings::view(&stored);
     Ok(Json(
-        serde_json::json!({ "ok": true, "settings": view, "status": ai_status_value(&app) }),
+        serde_json::json!({ "ok": true, "settings": view, "status": ai_status_value(&app), "key_cleared": key_cleared }),
     ))
 }
 
@@ -7193,6 +7201,23 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Posting the same address again (no key) keeps the key; a different
+        // address without a key drops it and says so.
+        let same = serde_json::json!({"direct_url": "http://127.0.0.1:3915/v1"});
+        let v: serde_json::Value = serde_json::from_str(
+            &body_string(post("/api/ai-settings".into(), same.to_string()).await).await,
+        )
+        .unwrap();
+        assert_eq!(v["settings"]["key_set"], serde_json::json!(true));
+        assert_eq!(v["key_cleared"], serde_json::json!(false));
+        let other = serde_json::json!({"direct_url": "https://attacker.example/v1"});
+        let v: serde_json::Value = serde_json::from_str(
+            &body_string(post("/api/ai-settings".into(), other.to_string()).await).await,
+        )
+        .unwrap();
+        assert_eq!(v["settings"]["key_set"], serde_json::json!(false));
+        assert_eq!(v["key_cleared"], serde_json::json!(true));
     }
 
     #[tokio::test]

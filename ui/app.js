@@ -2472,7 +2472,9 @@ document.getElementById('ai-save').onclick = async () => {
   if (key) body.key = key;
   try {
     const out = await api('POST', '/api/ai-settings', body);
-    res.textContent = `Saved. ${out.status.detail}`;
+    res.textContent = `Saved. ${out.status.detail}`
+      + (out.key_cleared ? ' The address changed, so the saved key was removed: re-enter the key for the new address.' : '');
+    if (out.key_cleared) document.getElementById('ai-key').placeholder = 'leave empty if none';
     await loadAiModels();
   } catch (e) { res.textContent = `Not saved: ${e.message}`; }
 };

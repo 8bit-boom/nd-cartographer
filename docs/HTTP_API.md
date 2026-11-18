@@ -53,6 +53,7 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 | POST | `/api/docs/{id}/refine` | `{floor? \| spec (a floor spec being previewed), pins:[room ids], instruction}` | AI revises the floor (described as a spec) keeping the pinned rooms; returns `{spec}` to preview as a new floor. Needs an AI configured. |
 | POST | `/api/docs/{id}/style` | `{tone, palette:[#rrggbb…]}` | The project's house style (fed to drafts; the palette colours generated rooms). Empty clears. |
 | POST | `/api/draft-world` | `{prompt, doc?, lore?}` | Like `/api/draft` for a WorldSpec. `lore:true` reuses the world's location names (nd-world). |
+| POST | `/api/ai-settings` | `{direct_url?, direct_model?, key?}` | Save the standalone model settings. Changing `direct_url` without sending a new `key` drops the stored key and returns `key_cleared: true`, so a changed address never inherits the old key. |
 | GET | `/api/ai/status` | – | `{mode: nd-world\|standalone\|off, detail}`. Standalone = `ND_CARTO_LLM_URL` + `ND_CARTO_LLM_MODEL` (+ `ND_CARTO_LLM_KEY[_FILE]`), an OpenAI-compatible endpoint. |
 | POST | `/api/ai/image` | `{kind: underlay\|material\|prop, prompt, width?, height?, count?, seed?, like?: {job, index}, strength?, upscale?}` | Queue pictures through nd-world's imagegen in the background → `{job}`. nd-world only. |
 | GET | `/api/ai/jobs/{id}` | – | `{status: running\|done\|error\|cancelled, message, assets:[ids], seeds}`; POST `…/cancel`. |
