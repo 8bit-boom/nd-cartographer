@@ -102,7 +102,7 @@ instead and pass the devices they document (`/dev/kfd`, `/dev/dri`); see llama.c
   profile (no images are pulled), and the container's behaviour is the same `llama-server`
   the `ndcart ai serve` command manages on a desktop.
 
-Without Docker, `ndcart ai setup` does all of this on one computer (see `ndcart ai --help`).
+Without Docker, `ndcart ai setup` does all of this on one computer (see `ndcart ai --help`). The full guide is [LOCAL_AI.md](LOCAL_AI.md); scheduled drafting from a container is in [AI_RECIPES.md](AI_RECIPES.md#docker-manual).
 
 ## Notes
 

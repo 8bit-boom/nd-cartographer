@@ -54,6 +54,10 @@ ndcart ai status [--json]                      # runtime, models, server, endpoi
 ndcart ai test                                 # good | usable | too weak (exit 0, 0, 3)
 ```
 
+The full walkthrough (install per system, choosing a model, troubleshooting, privacy, the
+optional fine-tuning appendix) is [LOCAL_AI.md](LOCAL_AI.md); scripts and schedules are in
+[AI_RECIPES.md](AI_RECIPES.md).
+
 `ndcart ai test` runs the same validate, lint and repair loop as a real draft on three
 requests: **good** means all three were valid on the first ask, **usable** that repairs fixed
 them, **too weak** that one failed even so. A model counts as "tested" only on the computer
@@ -64,6 +68,10 @@ the repository's files if one is not there). Add `--autostart` to `setup` (or se
 settings) to have `ndcart serve` start and supervise the model. `ndcart doctor` checks the
 runtime, the model file's checksum, the server and the GPU. For Docker and TrueNAS see
 [DOCKER.md](DOCKER.md).
+
+`ndcart ai eval` is the longer scorecard (22 prompts: single- and multi-floor maps, world
+maps, floor revisions and typed edits), with `--set`, `--repeat`, `--json`, `--markdown` and
+`--record`; see [LOCAL_AI.md](LOCAL_AI.md#8-testing-a-model-ai-test-and-ai-eval).
 
 **By hand: llama.cpp's `llama-server` serving an Unsloth GGUF** (Unsloth publishes the
 quantised GGUF files; llama.cpp runs them):

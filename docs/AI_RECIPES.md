@@ -6,7 +6,7 @@ operating system's job: the studio has no scheduler of its own.
 
 Every recipe here is either covered by a test (marked **tested**) or has to be tried on your
 machine (marked **manual**). The tests use the built-in stand-in model server, never a real
-model. Which model to run is in `LOCAL_AI.md` (written next); how a model is told what to write
+model. Which model to run is in [LOCAL_AI.md](LOCAL_AI.md); how a model is told what to write
 is in [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md).
 
 ## The command

@@ -48,6 +48,11 @@ you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
   reject; revise a floor while keeping the rooms you pin; pictures through
   nd-world's image queue. See [docs/AI_CARTOGRAPHER_GUIDE.md](docs/AI_CARTOGRAPHER_GUIDE.md)
   and [docs/MAP_SPEC.md](docs/MAP_SPEC.md).
+- **A model on your own computer** (optional): `ndcart ai setup` finds llama.cpp's
+  `llama-server`, downloads a GGUF model (never a program) after showing its size, runs it
+  on loopback and tests it; `ndcart ai eval` scores a model on 22 golden prompts. Scripts,
+  cron and timers can draft maps in batches with `ndcart draft`. See
+  [docs/LOCAL_AI.md](docs/LOCAL_AI.md) and [docs/AI_RECIPES.md](docs/AI_RECIPES.md).
 
 ## Commands
 
@@ -58,7 +63,8 @@ you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
 | `ndcart import-pack FILE_OR_FOLDER --data-dir DIR` | add a Dungeondraft pack or a folder of art |
 | `ndcart open-published SLUG --server URL --email E --data-dir DIR` | bring a published map back as a project (picture, walls, lights) |
 | `ndcart publish DOC --server URL --email E [--all-floors] [--all-docs] [--report FILE]` | publish to nd-world |
-| `ndcart draft "a flooded crypt" ...` | ask an AI for a map spec |
+| `ndcart draft "a flooded crypt" ...` | ask an AI for a map spec; also `--batch FILE --out-dir DIR`, `--template` (no model), `--check FILE`, `--accept-into PROJECT` ([recipes](docs/AI_RECIPES.md)) |
+| `ndcart ai setup` \| `models` \| `pull ID` \| `serve` \| `stop` \| `status` \| `test` \| `eval` | run a model on this computer and test it ([guide](docs/LOCAL_AI.md)) |
 | `ndcart bundle DOC --out FILE.ndmapz --data-dir DIR [--embed-assets]` | write a project backup (the same file the studio's Backup link serves) |
 | `ndcart convert IN OUT` | convert pictures between PNG, WebP and AVIF |
 | `ndcart bench` | time the renderer |
@@ -77,7 +83,10 @@ but not tried in a running Foundry; the Dungeondraft pack reader follows the God
 archive format but has not been tried on many real packs; Windows and macOS builds
 are set up (a release workflow) but have never been run; and the AI features have
 been exercised against stand-ins for nd-world and a model, not a real model's
-output. The plan and what is done are tracked in
+output: no real model has been run through the studio, no real Hugging Face download
+has been made, the model catalog's repository and file names are unchecked against the
+live Hub, and the Windows and macOS builds of the local-model commands have not been
+compiled or run ([docs/LOCAL_AI.md](docs/LOCAL_AI.md) lists each unverified claim). The plan and what is done are tracked in
 [docs/ND_CARTOGRAPHER_PLAN.md](docs/ND_CARTOGRAPHER_PLAN.md) §20.
 
 ## Layout

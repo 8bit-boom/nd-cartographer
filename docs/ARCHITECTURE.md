@@ -302,6 +302,11 @@ ai_local/      local AI (bridge): `catalog` (assets/ai/models.toml), `hw` (hardw
                (finds llama-server), `pull` (safe GGUF downloads), `serve` (the managed server and its
                supervisor), `selftest`, `status`, `setup` (the `ndcart ai …` commands) and `http`
                (`/api/ai/local/*`); tests/ai_local*.rs and tests/ai_local_serve.rs (real processes)
+aieval.rs      `ndcart ai eval`: golden prompts (assets/ai/evals/*.toml), scoring and the report (bridge);
+               tests/ai_eval_cli.rs runs it as a process against the stand-in
+draftcli.rs    the `ndcart draft` command line: batches, `--template`, `--check`, `--accept-into`
+               (bridge); datalock.rs the data-folder lock `serve` holds and `--accept-into` checks;
+               tests/draft_cli.rs
 mcp.rs, ask.rs, aijobs.rs, ai_settings.rs, doctor.rs, packs.rs, pdf.rs, convert.rs, synth.rs,
 text.rs, worldspec.rs, golden.rs   feature modules
 tests/mod.rs   router-level tests and their helpers (`test_app`, `call`, `new_doc`, `post_ops_json`)
