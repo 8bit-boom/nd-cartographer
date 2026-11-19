@@ -24,9 +24,12 @@ mod bench;
 mod bundle;
 mod cache;
 mod convert;
+mod datalock;
 mod doctor;
 #[cfg(feature = "bridge")]
 mod draft;
+#[cfg(feature = "bridge")]
+mod draftcli;
 mod golden;
 mod mcp;
 mod packs;
@@ -498,7 +501,7 @@ async fn main() {
         }
         #[cfg(feature = "bridge")]
         "draft" => {
-            if let Err(m) = draft::run(args.collect()).await {
+            if let Err(m) = draftcli::run(args.collect()).await {
                 eprintln!("ndcart: {m}");
                 std::process::exit(1);
             }
@@ -556,6 +559,19 @@ async fn main() {
             let data_dir =
                 data_dir.or_else(|| std::env::var("ND_CARTO_DATA_DIR").ok().map(PathBuf::from));
 
+            // Commands that write projects without the studio (`ndcart draft --accept-into`)
+            // check this lock and refuse while it is held.
+            let _data_lock = data_dir.as_deref().map(|d| match datalock::take(d) {
+                datalock::Taken::Busy => {
+                    eprintln!("ndcart: another ndcart is already using {}", d.display());
+                    None
+                }
+                datalock::Taken::Unavailable(why) => {
+                    eprintln!("ndcart: note: {why}");
+                    None
+                }
+                datalock::Taken::Held(h) => Some(h),
+            });
             let mut store = store::Store::default();
             if let Some(dir) = &data_dir {
                 if let Err(e) = store.load_dir(dir) {

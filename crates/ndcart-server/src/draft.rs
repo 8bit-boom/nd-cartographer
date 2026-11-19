@@ -3,8 +3,10 @@
 //! our own deterministic code, and a spec that breaks a rule is handed back to
 //! the model with the exact complaint (twice at most) before giving up.
 //!
-//!   ndcart draft "abandoned metro station, 3 levels, flooded bottom"
-//!                --server URL [--world SLUG] --email EMAIL [--model NAME] [--out FILE]
+//!   ndcart draft "abandoned metro station, 3 levels, flooded bottom" [--out FILE]
+//!
+//! The command line (flags, batches, `--check`, `--accept-into`) is `draftcli`; this file is the
+//! loop it and the studio's routes share.
 //!
 //! The studio uses the same code for its "Draft with AI" button, configured by
 //! `ND_CARTO_SERVER`, `ND_CARTO_EMAIL`, `ND_CARTO_PASSWORD[_FILE]` (never typed
@@ -883,70 +885,6 @@ pub async fn edit_plan(
     .await?;
     let (plan, op) = out.value;
     Ok((plan, op, out.attempts))
-}
-
-pub async fn run(args: Vec<String>) -> Result<(), String> {
-    let (mut prompt, mut server, mut world, mut email, mut model, mut out) =
-        (None, None, None, None, None, None);
-    let (mut llm_url, mut llm_model) = (None, None);
-    let mut it = args.into_iter();
-    while let Some(a) = it.next() {
-        let mut val = |n: &str| it.next().ok_or(format!("{n} needs a value"));
-        match a.as_str() {
-            "--server" => server = Some(val("--server")?),
-            "--world" => world = Some(val("--world")?),
-            "--email" => email = Some(val("--email")?),
-            "--model" => model = Some(val("--model")?),
-            "--llm-url" => llm_url = Some(val("--llm-url")?),
-            "--llm-model" => llm_model = Some(val("--llm-model")?),
-            "--out" => out = Some(val("--out")?),
-            o if !o.starts_with("--") && prompt.is_none() => prompt = Some(o.to_string()),
-            o => return Err(format!("unknown argument: {o}")),
-        }
-    }
-    let direct = match (llm_url, llm_model) {
-        (Some(u), Some(m)) => Some((u, m)),
-        (None, None) => None,
-        _ => return Err("--llm-url and --llm-model go together".into()),
-    };
-    if direct.is_none() && (server.is_none() || email.is_none()) {
-        return Err("use --server and --email (nd-world), or --llm-url and --llm-model (a model you run yourself)".into());
-    }
-    let key = std::env::var("ND_CARTO_LLM_KEY").ok().or_else(|| {
-        std::env::var("ND_CARTO_LLM_KEY_FILE")
-            .ok()
-            .and_then(|f| std::fs::read_to_string(f).ok())
-            .map(|k| k.trim().to_string())
-    });
-    let cfg = Config {
-        server,
-        world,
-        email,
-        model,
-        direct,
-        key,
-        thinking: false,
-        cache: Default::default(),
-        stepwise: false,
-    };
-    let spec = draft(
-        &cfg,
-        &prompt.ok_or("describe the map, in quotes")?,
-        &Context::default(),
-    )
-    .await?;
-    for w in &spec.warnings {
-        eprintln!("note ({}): {}", w.floor, w.message);
-    }
-    let text = serde_json::to_string_pretty(&spec.spec).map_err(|e| e.to_string())?;
-    match out {
-        Some(f) => {
-            std::fs::write(&f, text).map_err(|e| format!("cannot write {f}: {e}"))?;
-            println!("wrote {f}; paste it into the studio's \u{2728} From a spec dialog");
-        }
-        None => println!("{text}"),
-    }
-    Ok(())
 }
 
 #[cfg(test)]
