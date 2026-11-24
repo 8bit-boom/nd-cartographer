@@ -1,0 +1,38 @@
+# cargo-fuzz targets for the parsers that eat untrusted files. Run with a
+# nightly toolchain: `cargo install cargo-fuzz` then `cargo fuzz run fuzz_uvtt`.
+# This crate is its own workspace root so it never enters the stable workspace
+# build or CI (libfuzzer-sys needs nightly).
+[package]
+name = "ndcart-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ndcart-formats = { path = "../crates/ndcart-formats" }
+ndcart-core = { path = "../crates/ndcart-core" }
+
+# Keep this crate out of the parent workspace.
+[workspace]
+
+[[bin]]
+name = "fuzz_uvtt"
+path = "fuzz_targets/fuzz_uvtt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_foundry"
+path = "fuzz_targets/fuzz_foundry.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_journal"
+path = "fuzz_targets/fuzz_journal.rs"
+test = false
+doc = false

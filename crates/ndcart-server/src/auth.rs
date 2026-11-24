@@ -8,7 +8,6 @@ use axum::extract::Request;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use std::io::Read;
 use std::path::Path;
 
 pub fn is_loopback(listen: &str) -> bool {
@@ -20,11 +19,44 @@ pub fn is_loopback(listen: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// DNS-rebinding guard for the token-less loopback mode: a malicious web page
+/// can resolve its own domain to 127.0.0.1 and then read/write the studio
+/// same-origin. The browser still sends the attacker's domain in `Host`, so
+/// only loopback hostnames are accepted. `/health` stays open for probes.
+pub async fn host_guard(req: Request, next: Next) -> Response {
+    if req.uri().path() == "/health" {
+        return next.run(req).await;
+    }
+    let ok = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| {
+            let host = h.rsplit_once(':').map(|(x, _)| x).unwrap_or(h);
+            let host = host.trim_matches(|c| c == '[' || c == ']');
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+        .unwrap_or(false);
+    if !ok {
+        return (
+            StatusCode::FORBIDDEN,
+            "ndcart: request Host is not this loopback server",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 fn random_token() -> String {
+    // OsRng is the OS CSPRNG on every platform (/dev/urandom on Unix,
+    // BCryptGenRandom on Windows) — reading the device file directly used to
+    // panic on Windows starts with a non-loopback listener.
+    use rand::RngCore;
     let mut buf = [0u8; 24];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut buf))
-        .expect("cannot read /dev/urandom for the access token");
+    rand::rngs::OsRng.fill_bytes(&mut buf);
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -136,5 +168,60 @@ mod tests {
         assert!(ct_eq("abc", "abc"));
         assert!(!ct_eq("abc", "abd"));
         assert!(!ct_eq("abc", "abcd"));
+    }
+
+    #[test]
+    fn random_token_is_hex_and_unique() {
+        // OsRng works on every platform (this used to read /dev/urandom and
+        // panic on Windows). Two draws must differ and look like 48 hex chars.
+        let a = random_token();
+        let b = random_token();
+        assert_eq!(a.len(), 48);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
+    }
+
+    #[tokio::test]
+    async fn host_guard_rejects_rebinding() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+        let app = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .route("/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(host_guard));
+        let req = |host: Option<&str>, path: &str| {
+            let mut b = Request::get(path);
+            if let Some(h) = host {
+                b = b.header("host", h);
+            }
+            b.body(Body::empty()).unwrap()
+        };
+        // Loopback hosts (any port) pass.
+        for h in [
+            "localhost:8300",
+            "127.0.0.1:8300",
+            "[::1]:8300",
+            "LOCALHOST:1234",
+        ] {
+            let r = app.clone().oneshot(req(Some(h), "/")).await.unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "host {h}");
+        }
+        // A rebinding attacker's domain is refused.
+        for h in ["evil.example", "evil.example:8300", "192.168.1.5:8300"] {
+            let r = app.clone().oneshot(req(Some(h), "/")).await.unwrap();
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "host {h}");
+        }
+        // Missing Host is refused; /health stays open regardless.
+        let r = app.clone().oneshot(req(None, "/")).await.unwrap();
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        let r = app
+            .clone()
+            .oneshot(req(Some("evil.example"), "/health"))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
     }
 }

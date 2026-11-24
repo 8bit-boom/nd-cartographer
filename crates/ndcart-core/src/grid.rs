@@ -230,6 +230,25 @@ impl RoomGrid {
         self.cells.iter().map(|(k, v)| (*k, v.as_str()))
     }
 
+    /// Cells inside an inclusive rectangle, using the `(x, y)` BTreeMap order
+    /// to skip whole columns outside the band instead of scanning the map.
+    /// The tile baker calls this per tile; a full-map scan per tile is
+    /// O(map) x O(tiles), this is O(the tile's columns).
+    pub fn cells_in_rect(
+        &self,
+        x0: i32,
+        x1: i32,
+        y0: i32,
+        y1: i32,
+    ) -> impl Iterator<Item = (CellKey, &str)> + '_ {
+        let lo = CellKey { x: x0, y: y0 };
+        let hi = CellKey { x: x1, y: y1 };
+        self.cells
+            .range(lo..=hi)
+            .filter(move |(c, _)| c.y >= y0 && c.y <= y1)
+            .map(|(k, v)| (*k, v.as_str()))
+    }
+
     pub fn cell_count(&self) -> usize {
         self.cells.len()
     }
@@ -481,6 +500,36 @@ mod tests {
         let back: RoomGrid = serde_json::from_str(&s).unwrap();
         assert_eq!(back, g);
         assert_eq!(back.cell_count(), 2);
+    }
+
+    #[test]
+    fn cells_in_rect_matches_a_full_scan_filter() {
+        let mut g = RoomGrid::default();
+        g.upsert_space(default_space("a", "A", SpaceKind::Room))
+            .unwrap();
+        // A spread of cells, including negative coordinates and a wide band.
+        let cells: Vec<CellKey> = (-5..8)
+            .flat_map(|x| (-4..6).map(move |y| CellKey::new(x, y)))
+            .collect();
+        g.paint(&cells, Some("a")).unwrap();
+        for (x0, x1, y0, y1) in [
+            (0, 3, 0, 3),
+            (-5, -1, -4, 5),
+            (2, 2, -4, 5),
+            (-100, 100, -100, 100),
+            (50, 60, 50, 60), // empty region
+        ] {
+            let mut via_rect: Vec<CellKey> =
+                g.cells_in_rect(x0, x1, y0, y1).map(|(c, _)| c).collect();
+            let mut via_scan: Vec<CellKey> = g
+                .cells()
+                .filter(|(c, _)| c.x >= x0 && c.x <= x1 && c.y >= y0 && c.y <= y1)
+                .map(|(c, _)| c)
+                .collect();
+            via_rect.sort();
+            via_scan.sort();
+            assert_eq!(via_rect, via_scan, "rect ({x0},{x1},{y0},{y1})");
+        }
     }
 
     #[test]

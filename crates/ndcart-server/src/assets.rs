@@ -42,11 +42,75 @@ pub struct Custom {
     pub meta: ndcart_core::assetmeta::AssetMeta,
 }
 
+/// A bounded cache with least-recently-used eviction. The decoded-pixmap cache
+/// used to clear *wholesale* at 24 entries, re-decoding everything under load;
+/// an LRU keeps the hot pictures and drops only the coldest.
+struct Lru<V> {
+    cap: usize,
+    map: HashMap<String, (V, u64)>,
+    tick: u64,
+}
+
+impl<V: Clone> Lru<V> {
+    fn new(cap: usize) -> Self {
+        Lru {
+            cap,
+            map: HashMap::new(),
+            tick: 0,
+        }
+    }
+    fn get(&mut self, key: &str) -> Option<V> {
+        self.tick += 1;
+        let tick = self.tick;
+        let entry = self.map.get_mut(key)?;
+        entry.1 = tick;
+        Some(entry.0.clone())
+    }
+    fn insert(&mut self, key: String, value: V) {
+        self.tick += 1;
+        let tick = self.tick;
+        self.map.insert(key, (value, tick));
+        if self.map.len() > self.cap {
+            if let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (_, t))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                self.map.remove(&oldest);
+            }
+        }
+    }
+}
+
+/// Keep the resident byte cache under a budget by dropping entries (never the
+/// one just requested). Only called when a data directory backs the store, so
+/// an evicted picture can be re-read from disk; in-memory mode must keep all.
+fn evict_bytes_over_budget(cache: &mut HashMap<String, Arc<Vec<u8>>>, keep: &str) {
+    const BUDGET: usize = 128 << 20; // 128 MiB
+    let mut total: usize = cache.values().map(|v| v.len()).sum();
+    if total <= BUDGET {
+        return;
+    }
+    let keys: Vec<String> = cache.keys().cloned().collect();
+    for k in keys {
+        if total <= BUDGET {
+            break;
+        }
+        if k == keep {
+            continue;
+        }
+        if let Some(v) = cache.remove(&k) {
+            total -= v.len();
+        }
+    }
+}
+
 pub struct Assets {
     dir: Option<PathBuf>,
     custom: Mutex<Vec<Custom>>,
     bytes: Mutex<HashMap<String, Arc<Vec<u8>>>>,
-    decoded: Mutex<HashMap<String, Arc<tiny_skia::Pixmap>>>,
+    decoded: Mutex<Lru<Arc<tiny_skia::Pixmap>>>,
 }
 
 static GLOBAL: OnceLock<Assets> = OnceLock::new();
@@ -66,7 +130,7 @@ pub fn init(dir: Option<PathBuf>) -> &'static Assets {
             dir,
             custom: Mutex::new(custom),
             bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            decoded: Mutex::new(Lru::new(64)),
         }
     })
 }
@@ -78,7 +142,7 @@ pub(crate) fn new_for_tests() -> Assets {
         dir: None,
         custom: Mutex::new(Vec::new()),
         bytes: Mutex::new(HashMap::new()),
-        decoded: Mutex::new(HashMap::new()),
+        decoded: Mutex::new(Lru::new(64)),
     }
 }
 
@@ -100,10 +164,11 @@ impl Assets {
                     .map_err(|e| format!("cannot store the asset: {e}"))?;
             }
         }
-        self.bytes
-            .lock()
-            .expect("assets")
-            .insert(id.clone(), Arc::new(data.to_vec()));
+        let mut cache = self.bytes.lock().expect("assets");
+        cache.insert(id.clone(), Arc::new(data.to_vec()));
+        if self.dir.is_some() {
+            evict_bytes_over_budget(&mut cache, &id);
+        }
         Ok(id)
     }
 
@@ -194,10 +259,11 @@ impl Assets {
         }
         let data = std::fs::read(self.dir.as_ref()?.join(id)).ok()?;
         let data = Arc::new(data);
-        self.bytes
-            .lock()
-            .expect("assets")
-            .insert(id.to_string(), data.clone());
+        let mut cache = self.bytes.lock().expect("assets");
+        cache.insert(id.to_string(), data.clone());
+        if self.dir.is_some() {
+            evict_bytes_over_budget(&mut cache, id);
+        }
         Some(data)
     }
 
@@ -205,7 +271,7 @@ impl Assets {
     #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
     pub fn get_pixmap(&self, id: &str) -> Option<Arc<tiny_skia::Pixmap>> {
         if let Some(p) = self.decoded.lock().expect("assets").get(id) {
-            return Some(p.clone());
+            return Some(p);
         }
         let bytes = self.get_bytes(id)?;
         let (rgba, w, h) = crate::convert::decode_rgba(&bytes).ok()?;
@@ -214,11 +280,59 @@ impl Assets {
             *dst = tiny_skia::ColorU8::from_rgba(px[0], px[1], px[2], px[3]).premultiply();
         }
         let pm = Arc::new(pm);
-        let mut cache = self.decoded.lock().expect("assets");
-        if cache.len() >= 24 {
-            cache.clear();
+        self.decoded
+            .lock()
+            .expect("assets")
+            .insert(id.to_string(), pm.clone());
+        Some(pm)
+    }
+
+    /// A power-of-two downscaled level of a picture (level 0 is full size), for
+    /// minifying large underlays without the aliasing and wide pixel footprint
+    /// of bilinear-sampling the full resolution at low zoom. Each level is a
+    /// 2x2 box filter of the one above (correct for premultiplied pixels) and
+    /// is cached alongside the full pixmaps.
+    pub fn get_pixmap_mip(&self, id: &str, level: u32) -> Option<Arc<tiny_skia::Pixmap>> {
+        if level == 0 {
+            return self.get_pixmap(id);
         }
-        cache.insert(id.to_string(), pm.clone());
+        let key = format!("{id}:{level}");
+        if let Some(p) = self.decoded.lock().expect("assets").get(&key) {
+            return Some(p);
+        }
+        let prev = self.get_pixmap_mip(id, level - 1)?;
+        let (w, h) = (prev.width() / 2, prev.height() / 2);
+        if w == 0 || h == 0 {
+            return Some(prev); // cannot halve further
+        }
+        let mut pm = tiny_skia::Pixmap::new(w, h)?;
+        let src = prev.pixels();
+        let pw = prev.width() as usize;
+        let avg = |a: tiny_skia::PremultipliedColorU8,
+                   b: tiny_skia::PremultipliedColorU8,
+                   c: tiny_skia::PremultipliedColorU8,
+                   d: tiny_skia::PremultipliedColorU8| {
+            let m = |x: u8, y: u8, z: u8, w: u8| {
+                ((u16::from(x) + u16::from(y) + u16::from(z) + u16::from(w)) / 4) as u8
+            };
+            tiny_skia::PremultipliedColorU8::from_rgba(
+                m(a.red(), b.red(), c.red(), d.red()),
+                m(a.green(), b.green(), c.green(), d.green()),
+                m(a.blue(), b.blue(), c.blue(), d.blue()),
+                m(a.alpha(), b.alpha(), c.alpha(), d.alpha()),
+            )
+            // Averaging premultiplied colours keeps every channel <= alpha, so
+            // the checked constructor always succeeds.
+            .expect("average of premultiplied pixels is premultiplied")
+        };
+        for (y, row) in pm.pixels_mut().chunks_mut(w as usize).enumerate() {
+            for (x, dst) in row.iter_mut().enumerate() {
+                let i = (2 * y) * pw + 2 * x;
+                *dst = avg(src[i], src[i + 1], src[i + pw], src[i + pw + 1]);
+            }
+        }
+        let pm = Arc::new(pm);
+        self.decoded.lock().expect("assets").insert(key, pm.clone());
         Some(pm)
     }
 }
@@ -239,7 +353,7 @@ mod tests {
             dir: None,
             custom: Mutex::new(Vec::new()),
             bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            decoded: Mutex::new(Lru::new(64)),
         };
         let png = red_png(4, 3);
         let id = a.put(&png).unwrap();
@@ -252,12 +366,44 @@ mod tests {
     }
 
     #[test]
+    fn mipmaps_halve_and_keep_the_colour() {
+        let a = new_for_tests();
+        let id = a.put(&red_png(8, 8)).unwrap();
+        for (level, side) in [(0, 8), (1, 4), (2, 2), (3, 1)] {
+            let pm = a.get_pixmap_mip(&id, level).unwrap();
+            assert_eq!((pm.width(), pm.height()), (side, side), "level {level}");
+            assert_eq!(pm.pixel(0, 0).unwrap().red(), 255, "still red at {level}");
+        }
+        // Cannot halve a 1x1 further: it stays 1x1 rather than vanishing.
+        let pm = a.get_pixmap_mip(&id, 9).unwrap();
+        assert_eq!((pm.width(), pm.height()), (1, 1));
+    }
+
+    #[test]
+    fn the_decoded_cache_evicts_the_coldest_not_everything() {
+        let a = new_for_tests();
+        // Fill past the cap with distinct pictures; the first ones age out.
+        let mut ids = Vec::new();
+        for i in 0..70u32 {
+            ids.push(a.put(&red_png(2 + i, 3)).unwrap());
+        }
+        for id in &ids {
+            a.get_pixmap(id).unwrap();
+        }
+        // The most recently used picture is still cached (no decode needed);
+        // the cache stayed bounded rather than clearing wholesale.
+        let last = ids.last().unwrap();
+        assert!(a.get_pixmap(last).is_some());
+        assert!(a.decoded.lock().unwrap().map.len() <= 64);
+    }
+
+    #[test]
     fn junk_and_traversal_are_refused() {
         let a = Assets {
             dir: None,
             custom: Mutex::new(Vec::new()),
             bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            decoded: Mutex::new(Lru::new(64)),
         };
         assert!(a.put(b"not an image").is_err());
         assert!(a.put(b"").is_err());
@@ -280,14 +426,14 @@ mod tests {
             dir: Some(dir.clone()),
             custom: Mutex::new(Vec::new()),
             bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            decoded: Mutex::new(Lru::new(64)),
         };
         let id = a.put(&red_png(2, 2)).unwrap();
         let b = Assets {
             dir: Some(dir.clone()),
             custom: Mutex::new(Vec::new()),
             bytes: Mutex::new(HashMap::new()),
-            decoded: Mutex::new(HashMap::new()),
+            decoded: Mutex::new(Lru::new(64)),
         };
         assert!(
             b.get_bytes(&id).is_some(),

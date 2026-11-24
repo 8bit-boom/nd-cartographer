@@ -7,3 +7,12 @@
 Cargo.lock.bak
 binaries/
 crates/ndcart-desktop/binaries/
+# UI quality gates (Playwright) and cargo-fuzz artifacts.
+/test-results
+/playwright-report
+/blob-report
+/.e2e-data
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage

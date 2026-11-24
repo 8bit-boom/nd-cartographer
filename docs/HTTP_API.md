@@ -1,11 +1,12 @@
-# nd-cartographer HTTP API — M0
+# nd-cartographer HTTP API
 
 The studio's own HTTP surface is a product contract (the desktop shell, browser
-mode and the CLI all sit on it; a future MCP surface wraps the same calls — plan
-§17.6). This file documents what exists in M0 and evolves with the code.
+mode and the CLI all sit on it; the MCP surface wraps the same calls — plan
+§17.6). This file documents what exists and evolves with the code.
 
-Everything is JSON unless noted. No auth in M0 (loopback; the token gate for
-non-loopback listeners is specified in plan §11.2 and lands before any LAN use).
+Everything is JSON unless noted. Loopback listeners are open but reject a
+non-loopback `Host` header (DNS-rebinding guard); non-loopback listeners require
+a token (see [Access control](#access-control)).
 
 ## Health
 
@@ -17,9 +18,11 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| GET | `/api/docs` | – | `{"docs":[{id,name,kind,rev,floors:[names]}]}` |
+| GET | `/api/docs` | – | `{"docs":[{id,name,kind,rev,floors:[names],slug?}]}` |
 | POST | `/api/docs` | `{name, kind?}` | kind: `battle` (default) / `region` / `schematic`. Returns the `Manifest`. Creates floor "Ground". |
 | GET | `/api/docs/{id}` | – | `{"manifest", "rev", "floors":[FloorView]}` |
+| PATCH | `/api/docs/{id}` | `{name}` | Rename the project (1–120 chars). `{"ok":true,"id","name"}`. |
+| DELETE | `/api/docs/{id}` | – | Delete the project and its files. `{"ok":true,"deleted":id}`. 404 if unknown. The UI confirms first. |
 
 `FloorView` = `{id, name, digest, grid, walls, wall_tally, lights, labels}` —
 `grid` is the room grid (`spaces`, `marks`, `cells` as `{x,y,space}` triples);
@@ -30,10 +33,10 @@ non-loopback listeners is specified in plan §11.2 and lands before any LAN use)
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/api/docs/{id}/ops` | `{floor, ops:[…]}` | Applies a batch as journal entries; `{"ok":true,"rev":N}`. ≤ 500 ops per request. |
+| POST | `/api/docs/{id}/ops` | `{floor, ops:[…], base_rev?}` | Applies a batch as journal entries; `{"ok":true,"rev":N}`. ≤ 500 ops per request. `base_rev` is an optimistic-concurrency guard: if the document has moved past it (another window), the edit is refused with **409** `{"error","rev"}` rather than interleaved. |
 | POST | `/api/docs/{id}/undo` | `{floor}` | Applies the last entry's inverse as a new entry; `{"ok":true,"rev":N}`. |
-| POST | `/api/docs/{id}/floors` | `{action:"add",name,copy_from?}` / `{action:"rename",floor,name}` / `{action:"remove",floor}` / `{action:"move",floor,to}` | Floor structure. Max 64 floors, last floor cannot be removed. `{"ok":true,"rev":N,"floor":id?}`. |
-| POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). |
+| POST | `/api/docs/{id}/floors` | `{action:"add",name,copy_from?}` / `{action:"rename",id,name}` / `{action:"remove",id}` / `{action:"move",id,index}` | Floor structure. Max 64 floors, last floor cannot be removed. Returns `{"floors":[{id,name}], "floor":id?}` (`floor` is the new id on add). |
+| POST | `/api/docs/{id}/undo-structure` | – | Undoes the last floor add/rename/move/remove (a removed floor returns with its content). Returns `{"floors":[{id,name}]}`. |
 
 | POST | `/api/docs/{id}/generate-map` | `{floor?, kind: dungeon\|cave\|building\|deck\|district, seed, width, height}` | 16–120 squares a side. Adds to the floor as one undoable step; same seed, same map. |
 | GET | `/api/docs/{id}/export/pdf?floor&paper=letter\|a4&inch=1&dpi=150&audience` | – | The floor at true scale, one inch a square by default, cut into pages (≤80). White ground, corner ticks, a "page r of n" label. |
@@ -79,6 +82,38 @@ Floors carry an optional `map_grid {kind: square|hex, size (cells, 0.5-200), col
 
 Tiles accept `?onion=<floor id>`: that floor is drawn at 30% opacity under the current floor (404 if the id is unknown).
 
+## Inspection, history and live sync
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/api/docs/{id}/lint?floor=ID` | – | The Problems panel: deterministic checks, each with an undoable `fix` op you can POST to `/ops`. |
+| GET | `/api/docs/{id}/stats?floor=ID` | – | The pacing dashboard: rooms/squares/kinds, doors and secrets, light coverage, props by provenance, GM labels, encounters, lore coverage. |
+| GET | `/api/docs/{id}/floor-spec?floor=ID` | – | Read a painted floor back as a MapSpec (the spec round-trip) to lay out again with a new seed. Changes nothing. |
+| GET | `/api/docs/{id}/history?floor=ID` | – | The journal summarized one line per entry (oldest first) with its `index`, for the history browser. |
+| POST | `/api/docs/{id}/revert` | `{floor, index}` | Jump to the state at `index`: the difference is applied as ONE undoable batch (nothing is lost; undo returns to now). Busts the tile cache. |
+| GET | `/api/docs/{id}/events` | – | Server-sent events of the document's revision: `rev` events on change, `gone` if the project is deleted. The watch-mode / table-screen sync feed. |
+
+## More exports
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/docs/{id}/export.svg?floor=ID&audience=gm\|player` | The floor's geometry as editable SVG (rooms as rects, walls/doors as lines, labels as text; 1 cell = 1 user unit). |
+| GET | `/api/docs/{id}/export/roll20?floor=ID` | A Roll20 wall-data sidecar (polylines at 70 px/square). **Unverified live** — Roll20 wall import scripts vary. |
+
+## AI settings and world tables
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET / POST | `/api/ai-settings` | POST `{direct_url?, direct_model?, key?}` | The saved standalone-model config (Unsloth / Ollama / any OpenAI-compatible endpoint). GET is redacted (the key is only "set"/"not set"). |
+| GET | `/api/ai-models` | – | The endpoint's own model list, for the settings dropdown. |
+| POST | `/api/ai-test` | – | One tiny request to the configured model to prove the connection. |
+| POST | `/api/docs/{id}/theme-pack` | `{prompt}` | Draft a theme pack's material/prop prompts as JSON (the picture generation is a separate step). |
+| GET | `/api/world/tables` | – | The world's random tables (nd-world), for stocking rooms. |
+| POST | `/api/docs/{id}/stock-room` | `{floor?, room, table_name}` | Roll one weighted pick from a named world table into the room's encounter (GM-only; one undo step). Needs nd-world. |
+| GET | `/api/world/entities/{id}/preview` | – | The linked entity's lore as nd-world shows the GM (the lore-sync read half), plus the server URL to deep-link. |
+| POST | `/api/docs/{id}/reroll` | `{floor?, room, seed?}` | Replace exactly one room's generated props; pinned and hand-placed props stay. One undo step. |
+| POST | `/api/assets/{id}/meta` | v2 metadata | Set an asset's footprint, clearance, placement, style tags and licence. The picture is untouched. |
+
 ### Ops (internally tagged, `"t"`)
 
 - `{"t":"paint_cells","cells":[{"x","y"}…],"space":"id"|null}` — paint or clear
@@ -100,7 +135,8 @@ Tiles accept `?onion=<floor id>`: that floor is drawn at 30% opacity under the c
 
 Validation is at the boundary (the D1 lesson): every number finite and bounded,
 referenced ids must exist, caps enforced. Refused ops are never journaled.
-Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
+Status codes: 400 invalid/out-of-bounds, 404 not found, 409 stale `base_rev`,
+422 cap exceeded.
 
 ## Materials
 
@@ -133,7 +169,7 @@ Status codes: 400 invalid/out-of-bounds, 404 not found, 422 cap exceeded.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/tiles/{doc}/{floor}/{z}/{x}_{y}?rev=N` | 256px PNG. Zoom pyramid: z0 = 16 px/cell, doubles per level, z ≤ 4. `rev` busts caches after edits. |
+| GET | `/tiles/{doc}/{floor}/{z}/{x}_{y}?rev=N` | 256px PNG. Zoom pyramid: z0 = 16 px/cell, doubles per level, z ≤ 4. `rev` busts caches after edits. Coordinates are bounded (±2²⁰ tiles) so a wild value cannot overflow the baker → 400. |
 
 ## Export
 
@@ -156,7 +192,17 @@ one secrets filter — secret doors become plain walls, GM-only labels are dropp
 Listening off loopback requires a token: `Authorization: Bearer T`, cookie
 `ndcart_token=T`, or `?token=T` (sets the cookie). `/health` is public. Token from
 `ND_CARTO_TOKEN`, `ND_CARTO_TOKEN_FILE`, or `<data-dir>/token` (generated 0600 on
-first run, printed once). 401 without it.
+first run, printed once). 401 without it. The token is drawn from the OS CSPRNG
+on every platform (Unix and Windows).
+
+On loopback there is no token, but a `Host` header that is not a loopback name
+(`localhost`, `127.0.0.1`, `[::1]`, any port) is refused with 403 — the
+DNS-rebinding guard, so a malicious web page cannot point its own domain at
+127.0.0.1 and read/write the studio same-origin. `/health` stays open.
+
+The shell files (`/`, `/app.js`, `/app.css`) are served with `Cache-Control:
+no-cache` and an ETag (a matching `If-None-Match` gets a 304), so a browser always
+revalidates after a server upgrade instead of running stale JS against a new API.
 
 ## CLI
 
@@ -169,6 +215,8 @@ ndcart publish DOC --server URL --email E [--world W] [--floor ID | --all-floors
 ```
 
 With `--data-dir`, each document persists as `<dir>/<doc-id>/{manifest.json,
-floors.json, journal.ndjson}` and is reloaded at startup (journal replay
-rebuilds the state; M0 rewrites the files whole on save — append-only segments
-arrive with the `.ndmap` work).
+snapshot.json, journal.ndjson, structure.ndjson}` and is reloaded at startup.
+Edits append to the journal (fsync throttled); the snapshot is rewritten every
+few hundred edits or minute, and a reload replays the journal's tail over it — so
+a crash loses nothing that was acknowledged. The journal compacts at a cap
+(checkpoints are the long-term history).

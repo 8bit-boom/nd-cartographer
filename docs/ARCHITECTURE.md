@@ -289,19 +289,20 @@ rewritten every 200 edits or a minute, and a reload replays the journal's tail
 over it (so a crash loses nothing that was acknowledged: checked by killing a running
 studio with SIGKILL after 120 acknowledged edits and reopening it).
 
-## Still open in M0
+## Current state
 
-WebGL viewport, WebSocket change feed, `bench` budget assertions in CI, the
-100k-object / kill -9 acceptance tests.
+The milestone tracker lives in [ND_CARTOGRAPHER_PLAN.md](ND_CARTOGRAPHER_PLAN.md)
+§20; this file describes the shape, not the schedule. Since M0 the viewport
+renders tiles through WebGL2 (the 2D canvas remains as the overlay and fallback),
+the change feed is SSE at `/api/docs/{id}/events` (watch mode), and the `bench`
+budget assertion runs in CI in release at 32 px/cell. Every crate in the original
+"not yet" list — paint, terrain, formats, bridge, desktop — is built.
 
-## Not yet (per plan)
-
-`ndcart-paint` (brush engine), `ndcart-terrain` (heightmaps),
-`ndcart-formats` (UVTT/Foundry/packs), `ndcart-render` (the real baker + LOD
-golden tests), `ndcart-ai` (MapSpec + proposals), `ndcart-bridge` (the
-optional nd-world client), `ndcart-desktop` (Tauri shell). The WebGL viewport
-replaces the M0 Canvas2D renderer when tiles get LOD-heavy; the tile contract
-(`/tiles/...`) is designed so the swap is client-side only.
+Still genuinely open (tracked honestly in the plan): the §6 performance budgets
+re-measured at city scale (the tile baker now range-queries the grid and caches
+prepared strokes, but a 100k-object / 60 fps acceptance run has not been done);
+live verification of Foundry import/export, real Dungeondraft packs and a real
+model's output; and signed desktop installers.
 
 ## Invariants worth keeping
 

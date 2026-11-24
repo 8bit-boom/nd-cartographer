@@ -6,6 +6,15 @@ battle maps, generate dungeons and whole worlds, print them at true scale, and
 with doors, lights and walls ready to play. It works fully on its own; nothing
 requires nd-world or an AI.
 
+## Screenshots
+
+| Battle map | World map | Player view |
+|---|---|---|
+| ![A generated dungeon](docs/screenshots/battle-map.png) | ![A generated overland world](docs/screenshots/world-map.png) | ![What the table sees, under fog](docs/screenshots/player-view.png) |
+
+*A generated dungeon, a seeded overland world, and the players' fog-of-war view —
+all rendered by the studio itself.*
+
 ## Quick start
 
 ```bash
@@ -68,8 +77,9 @@ Honest list, so nothing surprises you: a desktop shell exists (`ndcart-desktop`,
 Tauri v2 window over the same server — [docs/DESKTOP.md](docs/DESKTOP.md)) but no
 signed installers yet and it has never run outside CI; no diagram/schematic mode; Foundry scenes are exported and imported
 but not tried in a running Foundry; the Dungeondraft pack reader follows the Godot 3
-archive format but has not been tried on many real packs; Windows and macOS builds
-are set up (a release workflow) but have never been run; and the AI features have
+archive format but has not been tried on many real packs; Windows and macOS binaries
+are built by the release workflow (v0.1.0 shipped them) but have not been exercised
+on real desktops; and the AI features have
 been exercised against stand-ins for nd-world and a model, not a real model's
 output. The plan and what is done are tracked in
 [docs/ND_CARTOGRAPHER_PLAN.md](docs/ND_CARTOGRAPHER_PLAN.md) §20.
