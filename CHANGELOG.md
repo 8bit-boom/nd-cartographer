@@ -61,6 +61,12 @@ Notable changes to nd-cartographer. Format follows
   pauses water frames when hidden, and offers fullscreen + wake-lock.
 - A `ResizeObserver` keeps the canvas bitmap matched to its box on layout changes.
 
+### Security
+- Upgraded dependencies to clear the RustSec advisories the new supply-chain gate
+  found: `zip` 2.6 → 9.8 (six extraction advisories; the studio only *writes*
+  `.ndmapz` bundles, but the patched crate removes the risk entirely), `url`
+  2.5.8 → 2.5.9, `cookie` 0.18.2 → 0.18.3.
+
 ### Notes
 - The background journal writer suggested by the audit was **deliberately not
   done**: the fast path already throttles fsync, and moving persistence off the
