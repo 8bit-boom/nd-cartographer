@@ -1969,6 +1969,7 @@ mod tests {
             space: "a".into(),
             creatures: names.iter().map(|s| s.to_string()).collect(),
             note: "they sound the alarm".into(),
+            loot: vec![],
         };
         let mut j = Journal::default();
         j.push(
@@ -2002,6 +2003,7 @@ mod tests {
                         space: "ghost".into(),
                         creatures: vec!["rat".into()],
                         note: String::new(),
+                        loot: vec![],
                     }
                 }
             )

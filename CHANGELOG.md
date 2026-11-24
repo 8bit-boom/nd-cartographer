@@ -33,6 +33,13 @@ Notable changes to nd-cartographer. Format follows
   401. The link now carries it.
 
 ### Added
+- **Play a map in nd-world**: encounters gain a `loot` list (item name + quantity,
+  a treasure-only room is allowed), and publishing a map now also sends a *play
+  manifest* (per-room NPCs + treasure) to nd-world. nd-world's one-click **▶ Play**
+  turns the published map into a live tactical scene — the party's PCs, the rooms'
+  NPCs (resolved to world entities) and item tokens, linked to a new combat. The
+  studio can be installed/uninstalled from inside nd-world, which manages its
+  process. See [docs/WORLD_PLAY.md](docs/WORLD_PLAY.md).
 - **Windows install from a git clone**: `install.bat`, `run.bat`, `update.bat` in
   the repo root. Install builds from source when Rust is present, otherwise
   downloads the latest prebuilt Windows binary; run starts the studio and opens

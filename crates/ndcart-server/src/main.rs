@@ -1338,15 +1338,16 @@ async fn stock_room(
         creatures.push(pick.clone());
     }
     creatures.truncate(ndcart_core::doc::MAX_CREATURE_LINES);
-    let (enc_id, note) = existing
+    let (enc_id, note, loot) = existing
         .as_ref()
-        .map(|x| (x.id.clone(), x.note.clone()))
-        .unwrap_or_else(|| (ndcart_core::ids::new_id("enc"), String::new()));
+        .map(|x| (x.id.clone(), x.note.clone(), x.loot.clone()))
+        .unwrap_or_else(|| (ndcart_core::ids::new_id("enc"), String::new(), Vec::new()));
     let e = ndcart_core::doc::Encounter {
         id: enc_id,
         space: room.clone(),
         creatures,
         note,
+        loot,
     };
     doc.apply_ops(&floor, &[ndcart_core::Op::PutEncounter { encounter: e }])?;
     let rev = doc.rev;

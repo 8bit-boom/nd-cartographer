@@ -511,9 +511,10 @@ struct Job {
     existing: Option<String>,
     /// The era this job publishes, by id (None = the everyday map).
     era: Option<String>,
-    /// (space id, room name, creatures) - rooms with encounters, so the run
-    /// can create one nd-world combat template per room (plan 21.3).
-    encounters: Vec<(String, String, Vec<String>)>,
+    /// (space id, room name, creatures, loot) - rooms with encounters, so the run
+    /// can create one nd-world combat template per room (plan 21.3) and send a
+    /// play manifest (NPCs + treasure) for one-click "play this map".
+    encounters: Vec<(String, String, Vec<String>, Vec<ndcart_core::doc::LootItem>)>,
     payload: Payload,
 }
 
@@ -668,7 +669,7 @@ fn prepare(st: &store::Store, id: &str, a: &Args) -> Result<Vec<Job>, String> {
                             .get(&e.space)
                             .map(|s| s.name.clone())
                             .unwrap_or_else(|| e.space.clone());
-                        (e.space.clone(), name, e.creatures.clone())
+                        (e.space.clone(), name, e.creatures.clone(), e.loot.clone())
                     })
                     .collect()
             })
@@ -796,7 +797,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
             // per room with an encounter. Non-fatal: a failure prints and the
             // map itself is still published.
             if !job.encounters.is_empty() && !a.era.is_some() {
-                for (_space, room_name, creatures) in &job.encounters {
+                for (_space, room_name, creatures, _loot) in &job.encounters {
                     match bridge
                         .combat_template(
                             &format!("{} – {}", doc_name_for_tpl.clone(), room_name),
@@ -815,6 +816,27 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
                             room_name
                         ),
                     }
+                }
+                // The play manifest: per-room NPCs + treasure, so nd-world can turn
+                // the published map into a live tactical scene in one click. Non-fatal
+                // (older nd-world without the route just skips it).
+                let rooms: Vec<serde_json::Value> = job
+                    .encounters
+                    .iter()
+                    .map(|(space, name, creatures, loot)| {
+                        serde_json::json!({
+                            "space": space,
+                            "name": name,
+                            "creatures": creatures,
+                            "loot": loot.iter().map(|l| serde_json::json!({
+                                "name": l.name, "item_id": l.item_id, "qty": l.qty,
+                            })).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                match bridge.play_manifest(&slug, &rooms).await {
+                    Ok(_) => println!("play manifest sent ({} room(s))", rooms.len()),
+                    Err(e) => println!("note: the play manifest did not go out: {e}"),
                 }
             }
             // Save after every map: a later failure must not lose earlier slugs.
