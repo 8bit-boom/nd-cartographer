@@ -23,6 +23,8 @@ a token (see [Access control](#access-control)).
 | GET | `/api/docs/{id}` | – | `{"manifest", "rev", "floors":[FloorView]}` |
 | PATCH | `/api/docs/{id}` | `{name}` | Rename the project (1–120 chars). `{"ok":true,"id","name"}`. |
 | DELETE | `/api/docs/{id}` | – | Delete the project and its files. `{"ok":true,"deleted":id}`. 404 if unknown. The UI confirms first. |
+| GET | `/api/docs/{id}/save-status` | – | Auto-save state: `{rev, saved_rev, saved_at, dirty, persisted}`. `dirty` = edits not yet durably on disk; `persisted` = false when running without a data folder. |
+| POST | `/api/docs/{id}/save` | – | Force a durable save now (flushes past the fsync throttle). Returns the same shape as `save-status`. A 30 s server timer auto-saves dirty documents; the UI also saves ~1.5 s after editing pauses and on Ctrl+S. |
 
 `FloorView` = `{id, name, digest, grid, walls, wall_tally, lights, labels}` —
 `grid` is the room grid (`spaces`, `marks`, `cells` as `{x,y,space}` triples);

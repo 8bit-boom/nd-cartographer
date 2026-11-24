@@ -27,6 +27,27 @@ picture formats, the font, the port, and the AI/nd-world settings, and tells
 you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
 8300 with `/data` as the volume; [docs/DOCKER.md](docs/DOCKER.md) has the TrueNAS SCALE steps and a compose file.
 
+### Windows (git clone)
+
+```bat
+git clone https://github.com/8bit-boom/nd-cartographer.git
+cd nd-cartographer
+install.bat
+run.bat
+```
+
+Three double-clickable scripts in the repo root:
+
+| Script | What it does |
+|---|---|
+| `install.bat` | Builds the studio from source if [Rust](https://rustup.rs) is installed; otherwise downloads the latest prebuilt Windows binary (no toolchain needed). Creates a `data` folder for your maps. |
+| `run.bat` | Starts the studio on http://127.0.0.1:8300 and opens it in your browser. Close the window to stop. Set `ND_CARTO_PORT` to use another port. |
+| `update.bat` | `git pull`, then rebuilds (or re-downloads the prebuilt binary). Your maps in `data` are untouched. |
+
+Everything stays inside the cloned folder, so it is portable. The desktop shell
+(`ndcart-desktop`) and signed installers are a separate path — see
+[docs/DESKTOP.md](docs/DESKTOP.md).
+
 ## What you can do
 
 - **Paint battle maps**: rooms, corridors, doors, windows, secret doors; material
@@ -38,6 +59,9 @@ you what to fix). A Docker image (`Dockerfile`) serves the same studio on port
 - **Work at scale**: zones, multi-select and bulk edits, symmetric painting,
   prefabs you can reuse across projects, named checkpoints, a minimap, saved
   views, search across all your maps, a problems panel with one-click fixes.
+- **Auto-save**: every edit is journaled to disk as you make it; a background
+  flush and a "✓ saved" indicator mean you never lose work to a crash. Ctrl+S
+  saves immediately.
 - **Player view**: see exactly what the table sees from a spot (line of sight,
   closed doors, lamps), and show it on a TV or tablet at `/table/<project>`.
 - **Print**: a PDF at one inch per square, cut into pages with corner ticks.

@@ -69,6 +69,10 @@ pub struct Persisted {
     pub snapshot_at: std::sync::atomic::AtomicU64,
     /// When the journal was last flushed to the disk (milliseconds since the epoch).
     pub synced_at: std::sync::atomic::AtomicU64,
+    /// The document `rev` whose journal entries are durably on disk (fsynced).
+    /// `rev > synced_rev` means there are edits the OS has but the disk may not —
+    /// the auto-save flush and the UI's "saved" indicator read this.
+    pub synced_rev: std::sync::atomic::AtomicU64,
 }
 
 /// Write a fresh snapshot after this many journal entries, or this many seconds.
@@ -574,6 +578,9 @@ impl Store {
                             .store(snapshot_len, std::sync::atomic::Ordering::Relaxed);
                         p.snapshot_at
                             .store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+                        // Everything just read from disk is durable at this rev.
+                        p.synced_rev
+                            .store(rev, std::sync::atomic::Ordering::Relaxed);
                         p
                     },
                 },
@@ -651,6 +658,9 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
         doc.persisted.appended.store(journal_len, Relaxed);
         doc.persisted.snapshot_len.store(journal_len, Relaxed);
         doc.persisted.snapshot_at.store(now_secs(), Relaxed);
+        // write_atomic fsyncs every file, so the whole current rev is durable.
+        doc.persisted.synced_at.store(now_millis(), Relaxed);
+        doc.persisted.synced_rev.store(doc.rev, Relaxed);
     }
 }
 
@@ -658,7 +668,11 @@ pub fn save_doc(data_dir: Option<&Path>, doc: &StoredDoc) {
 /// entries are appended (and synced), and the big snapshot is rewritten only
 /// every few hundred edits or minute. Anything that is not a plain edit (floors
 /// added, a checkpoint restored…) uses [`save_doc`], which rewrites everything.
-pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
+///
+/// `force` flushes to the physical disk regardless of the [`SYNC_EVERY_MS`]
+/// throttle and marks the current rev durable — the auto-save timer and the
+/// manual "save" action pass `true`; ordinary edits pass `false`.
+pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc, force: bool) {
     use std::io::Write;
     use std::sync::atomic::Ordering::Relaxed;
     let Some(root) = data_dir else { return };
@@ -675,7 +689,10 @@ pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
     {
         return save_doc(data_dir, doc);
     }
-    if len > appended {
+    let synced_rev = doc.persisted.synced_rev.load(Relaxed);
+    // Append new entries, or (when forcing) flush entries the OS already has but
+    // the disk may not yet.
+    if len > appended || (force && doc.rev > synced_rev) {
         let mut text = String::new();
         for e in &doc.journal.entries()[appended..] {
             match serde_json::to_string(e) {
@@ -689,20 +706,29 @@ pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
                 }
             }
         }
+        let now = now_millis();
+        let do_sync =
+            force || now.saturating_sub(doc.persisted.synced_at.load(Relaxed)) >= SYNC_EVERY_MS;
         let wrote = std::fs::OpenOptions::new()
             .append(true)
             .open(dir.join("journal.ndjson"))
             .and_then(|mut f| {
-                f.write_all(text.as_bytes())?;
-                let now = now_millis();
-                if now.saturating_sub(doc.persisted.synced_at.load(Relaxed)) >= SYNC_EVERY_MS {
+                if !text.is_empty() {
+                    f.write_all(text.as_bytes())?;
+                }
+                if do_sync {
                     f.sync_data()?;
-                    doc.persisted.synced_at.store(now, Relaxed);
                 }
                 Ok(())
             });
         match wrote {
-            Ok(()) => doc.persisted.appended.store(len, Relaxed),
+            Ok(()) => {
+                doc.persisted.appended.store(len, Relaxed);
+                if do_sync {
+                    doc.persisted.synced_at.store(now, Relaxed);
+                    doc.persisted.synced_rev.store(doc.rev, Relaxed);
+                }
+            }
             Err(e) => {
                 eprintln!("ndcart: cannot append to the journal: {e}");
                 return save_doc(data_dir, doc);
@@ -714,6 +740,15 @@ pub fn save_doc_fast(data_dir: Option<&Path>, doc: &StoredDoc) {
     {
         save_doc(data_dir, doc);
     }
+}
+
+/// Whether the document has edits that are not yet durably on disk.
+pub fn doc_dirty(doc: &StoredDoc) -> bool {
+    doc.rev
+        > doc
+            .persisted
+            .synced_rev
+            .load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Prefabs live in `<data dir>/prefabs/<id>.json`, one file each.
@@ -812,11 +847,11 @@ mod persistence_tests {
             .len();
         for x in 0..5 {
             d.apply_ops(&fid, &paint(x)).unwrap();
-            save_doc_fast(Some(&dir), &d);
+            save_doc_fast(Some(&dir), &d, false);
         }
         // Undo is an entry too; it must survive the same way.
         d.undo_last(&fid).unwrap();
-        save_doc_fast(Some(&dir), &d);
+        save_doc_fast(Some(&dir), &d, false);
         // The snapshot was not rewritten (no 200 edits, no minute passed), only the journal grew.
         assert_eq!(
             std::fs::metadata(dir.join(&id).join("snapshot.json"))
@@ -856,14 +891,14 @@ mod persistence_tests {
         let edits = JOURNAL_COMPACT_AT + 100;
         for x in 0..edits {
             d.apply_ops(&fid, &paint(x as i32)).unwrap();
-            save_doc_fast(Some(&dir), &d);
+            save_doc_fast(Some(&dir), &d, false);
         }
         // The window is capped (the oldest entries are gone, memory and disk).
         assert_eq!(d.journal.len(), JOURNAL_KEEP + 100);
         // Undo still reaches back into the retained window.
         d.undo_last(&fid).unwrap();
         // The next save rewrites the files whole; a reload reproduces the state.
-        save_doc_fast(Some(&dir), &d);
+        save_doc_fast(Some(&dir), &d, false);
         let back = reload(&dir);
         let b = &back.docs[&id];
         assert_eq!(b.floors, d.floors, "state survives compaction + reload");
@@ -894,7 +929,7 @@ mod persistence_tests {
         };
         for x in 0..SNAPSHOT_EVERY_OPS as i32 {
             d.apply_ops(&fid, &paint(x)).unwrap();
-            save_doc_fast(Some(&dir), &d);
+            save_doc_fast(Some(&dir), &d, false);
         }
         assert_eq!(
             snap_len(&d),
@@ -908,9 +943,9 @@ mod persistence_tests {
         // A restore resets the journal (shorter than what was appended): the fast path writes it all.
         let cp = d.create_checkpoint("here").unwrap();
         d.apply_ops(&fid, &paint(500)).unwrap();
-        save_doc_fast(Some(&dir), &d);
+        save_doc_fast(Some(&dir), &d, false);
         d.restore_checkpoint(&cp).unwrap();
-        save_doc_fast(Some(&dir), &d);
+        save_doc_fast(Some(&dir), &d, false);
         let back = reload(&dir);
         assert_eq!(back.docs[&id].floors, d.floors);
         assert_eq!(back.docs[&id].journal.len(), 0);

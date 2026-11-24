@@ -33,6 +33,14 @@ Notable changes to nd-cartographer. Format follows
   401. The link now carries it.
 
 ### Added
+- **Windows install from a git clone**: `install.bat`, `run.bat`, `update.bat` in
+  the repo root. Install builds from source when Rust is present, otherwise
+  downloads the latest prebuilt Windows binary; run starts the studio and opens
+  the browser; update pulls and rebuilds. Maps stay in a portable `data` folder.
+- **Auto-save**: a durable-save watermark (`synced_rev`), a `POST /api/docs/{id}/save`
+  force-flush and `GET …/save-status`, a 30 s background flush of dirty documents,
+  and a UI "✓ saved / ● unsaved" indicator that saves ~1.5 s after editing pauses
+  and on Ctrl+S. Bounds the power-loss window without fsyncing every stroke.
 - **Optimistic concurrency**: `POST /ops` accepts `base_rev` and answers 409 when
   the map moved on, instead of interleaving two windows' edits.
 - **Rename and delete projects**: `PATCH`/`DELETE /api/docs/{id}`, wired into the
