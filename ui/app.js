@@ -203,6 +203,42 @@ async function sendOps(ops) {
   return res.json();
 }
 
+// ---------- auto-save ----------
+// Edits append to the journal at once; the physical disk flush is throttled (so
+// every stroke does not cost a whole fsync). After editing pauses we force a
+// durable save, so the indicator reaches "saved" quickly; a server-side timer is
+// the backstop, and Ctrl+S saves immediately.
+let saveTimer = null;
+async function refreshSaveState() {
+  const el = document.getElementById('save-state');
+  if (!el || !state.docId) return;
+  try {
+    const s = await api('GET', `/api/docs/${state.docId}/save-status`);
+    if (!s.persisted) {
+      el.textContent = 'auto-save off'; el.className = 'dim';
+      el.title = 'No data folder: maps live in memory only. Run with --data-dir to persist.';
+    } else if (s.dirty) {
+      el.textContent = '● unsaved'; el.className = 'save-dirty';
+      el.title = 'Changes are not yet flushed to disk';
+    } else {
+      el.textContent = '✓ saved'; el.className = 'save-ok';
+      el.title = s.saved_at ? 'Last saved ' + new Date(s.saved_at).toLocaleTimeString() : 'All changes saved';
+    }
+  } catch { /* server briefly away */ }
+}
+async function forceSave() {
+  if (!state.docId) return;
+  try { await api('POST', `/api/docs/${state.docId}/save`, {}); } catch { /* offline */ }
+  await refreshSaveState();
+}
+function scheduleAutoSave() {
+  const el = document.getElementById('save-state');
+  if (el) { el.textContent = '… saving'; el.className = 'save-dirty'; }
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(forceSave, 1500);
+}
+setInterval(refreshSaveState, 5000);
+
 async function ensureDoc() {
   const { docs } = await api('GET', '/api/docs');
   if (docs.length > 0) return docs[0].id;
@@ -865,6 +901,7 @@ async function refresh() {
   buildViews();
   syncMapGrid();
   loadPreview();
+  refreshSaveState();
 }
 
 // ---------- screen <-> world ----------
@@ -1144,6 +1181,7 @@ async function postOps(ops) {
     state.rev = res.rev;
     tileCache.clear();
     await refresh();
+    scheduleAutoSave();
   } catch (e) {
     toast(e.message);
   }
@@ -1971,6 +2009,7 @@ const KEYS = [
   { key: 'p', label: 'Problems panel', run: () => toggleProblems() },
   { key: 'o', label: 'Outline (focus the tree)', run: () => toggleOutline() },
   { key: 'z', ctrl: true, label: 'Undo', run: () => undo() },
+  { key: 's', ctrl: true, label: 'Save now (auto-save is on)', run: () => forceSave() },
   { key: 'F1', label: 'This help', run: () => toggleHelp() },
   { key: 'Escape', label: 'Pan tool / close panels / clear measure', run: () => { riverDraft = null; overlayDraft = null; measureClear(); toggleHelp(false); setTool('pan'); } },
 ];
@@ -3430,6 +3469,7 @@ async function undo() {
     state.rev = res.rev;
     tileCache.clear();
     await refresh();
+    scheduleAutoSave();
   } catch (err) {
     toast(err.message);
   }

@@ -84,6 +84,11 @@ canvas#canvas.panning { cursor: grabbing; }
 #toasts .toast.info { background: #1e2a3a; border-color: var(--accent); color: #d9e8ff; }
 #toasts .toast button { margin-left: 8px; cursor: pointer; }
 
+/* Auto-save indicator in the header. */
+#save-state { margin-left: 10px; font-size: 12px; white-space: nowrap; }
+#save-state.save-ok { color: #7fc98a; }
+#save-state.save-dirty { color: #e8a830; }
+
 #exports a { color: var(--accent); cursor: pointer; margin-left: 6px; text-decoration: none; }
 #exports a:hover { text-decoration: underline; }
 #btn-problems.has-problems { border-color: #e8a830; color: #e8a830; }

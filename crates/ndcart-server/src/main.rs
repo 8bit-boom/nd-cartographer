@@ -356,6 +356,50 @@ async fn delete_doc(
     Ok(Json(serde_json::json!({"ok": true, "deleted": id})))
 }
 
+/// The auto-save state of a document: `dirty` means edits exist that are not yet
+/// durably on disk. `persisted` is false when running without a data folder
+/// (in-memory only), where there is nothing to flush.
+fn save_status_json(persisted: bool, doc: &store::StoredDoc) -> serde_json::Value {
+    use std::sync::atomic::Ordering::Relaxed;
+    serde_json::json!({
+        "rev": doc.rev,
+        "saved_rev": doc.persisted.synced_rev.load(Relaxed),
+        "saved_at": doc.persisted.synced_at.load(Relaxed),
+        "dirty": persisted && store::doc_dirty(doc),
+        "persisted": persisted,
+    })
+}
+
+/// `GET /api/docs/{id}/save-status` — what the auto-save indicator polls.
+async fn save_status(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let persisted = app.data_dir.is_some();
+    let store = app.store.read().await;
+    let doc = store
+        .docs
+        .get(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    Ok(Json(save_status_json(persisted, doc)))
+}
+
+/// `POST /api/docs/{id}/save` — force a durable save now (the UI's Ctrl+S and
+/// the auto-save timer). Flushes the journal past the usual fsync throttle.
+async fn save_doc_now(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let persisted = app.data_dir.is_some();
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    store::save_doc_fast(app.data_dir.as_deref(), doc, true);
+    Ok(Json(save_status_json(persisted, doc)))
+}
+
 #[derive(Deserialize)]
 struct ExportQuery {
     floor: Option<String>,
@@ -4064,7 +4108,7 @@ async fn post_ops(
     }
     doc.apply_ops(&b.floor, &b.ops)?;
     let rev = doc.rev;
-    store::save_doc_fast(app.data_dir.as_deref(), doc);
+    store::save_doc_fast(app.data_dir.as_deref(), doc, false);
     drop(store);
     // Invalidate stale tiles/walls for this document.
     bust_doc_tiles(&app, &id);
@@ -4089,7 +4133,7 @@ async fn post_undo(
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
     doc.undo_last(&b.floor)?;
     let rev = doc.rev;
-    store::save_doc_fast(app.data_dir.as_deref(), doc);
+    store::save_doc_fast(app.data_dir.as_deref(), doc, false);
     drop(store);
     bust_doc_tiles(&app, &id);
     Ok(Json(serde_json::json!({"ok": true, "rev": rev})))
@@ -4222,6 +4266,8 @@ fn build_router(app: App) -> Router {
             "/api/docs/{id}",
             get(get_doc).patch(rename_doc).delete(delete_doc),
         )
+        .route("/api/docs/{id}/save-status", get(save_status))
+        .route("/api/docs/{id}/save", post(save_doc_now))
         .route("/api/docs/{id}/export/uvtt", get(export_uvtt))
         .route("/api/docs/{id}/export/png", get(export_png))
         .route("/api/docs/{id}/lint", get(lint_doc))
@@ -4675,6 +4721,26 @@ async fn main() {
                 wall_cache: Mutex::new(HashMap::new()),
                 tile_cache: Mutex::new(HashMap::new()),
                 preview_cache: Mutex::new(HashMap::new()),
+            });
+            // Auto-save: flush unsaved edits to disk on a timer, so work is
+            // durable even when no new edit triggers the throttled fsync — this
+            // bounds the power-loss window to the interval, not "until next edit".
+            let autosave_app = app.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    if autosave_app.data_dir.is_none() {
+                        continue; // in-memory only: nothing to flush
+                    }
+                    let mut store = autosave_app.store.write().await;
+                    for doc in store.docs.values_mut() {
+                        if store::doc_dirty(doc) {
+                            store::save_doc_fast(autosave_app.data_dir.as_deref(), doc, true);
+                        }
+                    }
+                }
             });
             let mut router = build_router(app);
             if !auth::is_loopback(&listen) {
@@ -5250,6 +5316,75 @@ mod tests {
         assert!(v["manifest"]["id"].as_str().is_some());
         assert_eq!(v["stats"]["walls"], 1);
         assert_eq!(v["stats"]["lights"], 1);
+    }
+
+    #[tokio::test]
+    async fn auto_save_flushes_to_disk_and_reports_status() {
+        // A real data dir so saving actually writes files.
+        let dir = std::env::temp_dir().join(format!("ndcart-autosave-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let app = Arc::new(AppState {
+            store: tokio::sync::RwLock::new(store::Store::default()),
+            data_dir: Some(dir.clone()),
+            ai: Mutex::new(ai_settings::load(None)),
+            wall_cache: Mutex::new(HashMap::new()),
+            tile_cache: Mutex::new(HashMap::new()),
+            preview_cache: Mutex::new(HashMap::new()),
+        });
+        let router = build_router(app);
+        let (id, floor) = fresh_doc(&router).await;
+
+        // Edit, then force a save: the saved rev catches up and nothing is dirty.
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::to_vec(&paint_ops(&floor, 0)).unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, body) = call(&router, "POST", &format!("/api/docs/{id}/save"), vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["persisted"], true);
+        assert_eq!(v["dirty"], false);
+        assert_eq!(v["saved_rev"], v["rev"]);
+        let saved1 = v["saved_rev"].as_u64().unwrap();
+        assert!(
+            dir.join(&id).join("journal.ndjson").is_file(),
+            "journal on disk"
+        );
+
+        // The status endpoint agrees.
+        let (st, body) = call(
+            &router,
+            "GET",
+            &format!("/api/docs/{id}/save-status"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["dirty"], false);
+        assert_eq!(v["saved_rev"].as_u64().unwrap(), saved1);
+
+        // Another edit advances rev; a second forced save catches up again.
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::to_vec(&paint_ops(&floor, 1)).unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, body) = call(&router, "POST", &format!("/api/docs/{id}/save"), vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["dirty"], false);
+        assert_eq!(v["saved_rev"], v["rev"]);
+        assert!(v["saved_rev"].as_u64().unwrap() > saved1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

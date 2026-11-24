@@ -19,5 +19,9 @@ test('the studio boots, renders and paints without uncaught errors', async ({ pa
 
   // The edit round-trips (rev advances past 0) and nothing threw.
   await expect(page.locator('#doc-meta')).toContainText('rev', { timeout: 10_000 });
+
+  // Auto-save: after editing pauses, the indicator reaches the saved state.
+  await expect(page.locator('#save-state')).toContainText('✓ saved', { timeout: 10_000 });
+
   expect(pageErrors).toEqual([]);
 });
