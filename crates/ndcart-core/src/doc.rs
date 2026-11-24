@@ -287,6 +287,24 @@ pub struct EntityLink {
     pub kind: String,
 }
 
+/// A piece of treasure placed in a room: an item token when the map is played.
+/// `item_id` optionally names a catalog item in the target world; `name` is the
+/// label either way. GM information, like the rest of the encounter.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct LootItem {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(default = "one_qty")]
+    pub qty: i64,
+}
+
+fn one_qty() -> i64 {
+    1
+}
+
+pub const MAX_LOOT_ITEMS: usize = 20;
+
 /// Who waits in a room: the studio's own encounter note (plan §21.3's first
 /// half). Stays studio-side — it is GM information, so it never rides the
 /// player-visible publish; the nd-world encounter-template publish is the
@@ -302,6 +320,10 @@ pub struct Encounter {
     /// Tactics, treasure, the reason they are here.
     #[serde(default)]
     pub note: String,
+    /// Treasure placed in the room: item tokens when the map is played in
+    /// nd-world. Empty for old documents (and creature-only encounters).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loot: Vec<LootItem>,
 }
 
 pub const MAX_CREATURE_LINES: usize = 20;
@@ -318,9 +340,9 @@ impl Encounter {
                 "encounter space must be a room id".into(),
             ));
         }
-        if self.creatures.is_empty() {
+        if self.creatures.is_empty() && self.loot.is_empty() {
             return Err(CoreError::Invalid(
-                "an encounter needs at least one creature line".into(),
+                "an encounter needs a creature line or some loot".into(),
             ));
         }
         if self.creatures.len() > MAX_CREATURE_LINES {
@@ -341,6 +363,26 @@ impl Encounter {
             return Err(CoreError::Invalid(
                 "encounter note is capped at 500 chars".into(),
             ));
+        }
+        if self.loot.len() > MAX_LOOT_ITEMS {
+            return Err(CoreError::CapExceeded(format!(
+                "at most {MAX_LOOT_ITEMS} loot items"
+            )));
+        }
+        for l in &self.loot {
+            if l.name.trim().is_empty() || l.name.chars().count() > 80 {
+                return Err(CoreError::Invalid("each loot item is 1..=80 chars".into()));
+            }
+            if !(1..=999).contains(&l.qty) {
+                return Err(CoreError::Invalid("loot quantity is 1..=999".into()));
+            }
+            if let Some(id) = &l.item_id {
+                if id.len() > 80 {
+                    return Err(CoreError::Invalid(
+                        "loot item id is capped at 80 chars".into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1498,6 +1540,68 @@ mod layer_tests {
             h: 20.0,
             opacity: 0.8,
         }
+    }
+
+    #[test]
+    fn encounter_loot_is_validated_and_a_treasure_only_room_is_allowed() {
+        let enc = |creatures: Vec<String>, loot: Vec<LootItem>| Encounter {
+            id: "e".into(),
+            space: "a".into(),
+            creatures,
+            note: String::new(),
+            loot,
+        };
+        // A treasure-only room (no creatures) is a valid encounter.
+        assert!(enc(
+            vec![],
+            vec![LootItem {
+                name: "gold".into(),
+                item_id: None,
+                qty: 50
+            }]
+        )
+        .validate()
+        .is_ok());
+        // Creatures without loot still work (old documents).
+        assert!(enc(vec!["guard x2".into()], vec![]).validate().is_ok());
+        // Neither creatures nor loot is refused.
+        assert!(enc(vec![], vec![]).validate().is_err());
+        // Quantity bounds.
+        assert!(enc(
+            vec![],
+            vec![LootItem {
+                name: "g".into(),
+                item_id: None,
+                qty: 0
+            }]
+        )
+        .validate()
+        .is_err());
+        assert!(enc(
+            vec![],
+            vec![LootItem {
+                name: "g".into(),
+                item_id: None,
+                qty: 1000
+            }]
+        )
+        .validate()
+        .is_err());
+        // Empty loot name is refused.
+        assert!(enc(
+            vec![],
+            vec![LootItem {
+                name: " ".into(),
+                item_id: None,
+                qty: 1
+            }]
+        )
+        .validate()
+        .is_err());
+        // Loot round-trips through serde with defaults (an old encounter has no loot key).
+        let old: Encounter =
+            serde_json::from_str(r#"{"id":"e","space":"a","creatures":["rat"]}"#).unwrap();
+        assert!(old.loot.is_empty());
     }
 
     #[test]

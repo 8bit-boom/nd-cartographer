@@ -568,6 +568,29 @@ async fn location_names_keeps_only_locations() {
 }
 
 #[tokio::test]
+async fn play_manifest_posts_rooms_to_the_schematic() {
+    let s = MockServer::start().await;
+    let rooms = json!([
+        {"space": "a", "name": "Guard post", "creatures": ["guard x2"], "loot": [{"name": "gold", "item_id": null, "qty": 50}]},
+        {"space": "b", "name": "Vault", "creatures": [], "loot": [{"name": "potion", "item_id": "consumable-potion", "qty": 2}]},
+    ]);
+    Mock::given(method("POST"))
+        .and(path("/api/maps/schematic/crypt/play-manifest"))
+        .and(query_param("w", "neon"))
+        .and(body_json(json!({"rooms": rooms})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "rooms": 2})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let b = Bridge::new(&s.uri(), Some("neon")).unwrap();
+    let out = b
+        .play_manifest("crypt", rooms.as_array().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(out["rooms"], 2);
+}
+
+#[tokio::test]
 async fn direct_chat_speaks_the_openai_shape_and_never_overlaps_two_requests() {
     let s = MockServer::start().await;
     Mock::given(method("POST"))

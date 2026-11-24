@@ -434,6 +434,36 @@ impl Bridge {
             .map_err(|e| BridgeError::Protocol(format!("template answer: {e}")))
     }
 
+    /// Send the play manifest for a published schematic: per-room NPCs
+    /// ("name"/"name xN" lines) and treasure, so nd-world can assemble a live
+    /// tactical scene from the map in one click. GM-only nd-world side; a world
+    /// without the route answers 404 and the caller treats it as non-fatal.
+    pub async fn play_manifest(
+        &self,
+        slug: &str,
+        rooms: &[serde_json::Value],
+    ) -> Result<serde_json::Value, BridgeError> {
+        let body = json!({ "rooms": rooms });
+        let resp = self
+            .send(
+                self.req(
+                    Method::POST,
+                    &format!("/api/maps/schematic/{slug}/play-manifest"),
+                )
+                .json(&body),
+            )
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("play manifest answer: {e}")))
+    }
+
     /// One entity's lore preview (`GET /api/entity/{id}/preview`): name,
     /// kind, summary, body (markdown), tags, image - the two-way lore sync's
     /// read half (plan 21.2). The viewer's own access rules apply nd-world

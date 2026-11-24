@@ -3332,18 +3332,24 @@ document.getElementById('bk-encounter').onclick = async () => {
   const room = curFloor().grid.spaces[space];
   const existing = (curFloor().encounters || []).find(e => e.space === space);
   if (existing) {
-    const drop = window.confirm(`Encounter in "${room?.name || space}": ${existing.creatures.join(', ')}.
+    const lootTxt = (existing.loot || []).map(l => `${l.name}${l.qty > 1 ? ' x' + l.qty : ''}`).join(', ');
+    const drop = window.confirm(`Encounter in "${room?.name || space}": ${existing.creatures.join(', ')}${lootTxt ? ' · loot: ' + lootTxt : ''}.
 OK removes it.`);
     if (drop) await postOps([{ t: 'remove_encounter', space }]);
     return;
   }
-  const creatures = window.prompt('Who waits here? (one line each is fine: "gob x4, wolf")', 'guard x2');
+  const creatures = window.prompt('Who waits here? (comma-separated, "gob x4, wolf"; leave empty for a treasure-only room)', 'guard x2');
   if (creatures === null) return;
   const list = creatures.split(',').map(s => s.trim()).filter(Boolean).slice(0, 20);
-  if (!list.length) { statusEl.textContent = 'An encounter needs at least one creature.'; return; }
-  const note = window.prompt('Notes (tactics, treasure — optional)', '') ?? '';
+  const lootRaw = window.prompt('Treasure in the room (comma-separated, "gold x50, potion x2"; optional)', '') ?? '';
+  const loot = lootRaw.split(',').map(s => s.trim()).filter(Boolean).slice(0, 20).map(s => {
+    const m = s.match(/^(.*?)\s*x(\d+)$/i);
+    return m ? { name: m[1].trim(), qty: Math.min(999, Math.max(1, parseInt(m[2], 10))) } : { name: s, qty: 1 };
+  }).filter(l => l.name);
+  if (!list.length && !loot.length) { statusEl.textContent = 'An encounter needs a creature or some loot.'; return; }
+  const note = window.prompt('Notes (tactics — optional)', '') ?? '';
   await postOps([{ t: 'put_encounter', encounter: {
-    id: newId('enc'), space, creatures: list, note: String(note).slice(0, 500),
+    id: newId('enc'), space, creatures: list, note: String(note).slice(0, 500), loot,
   } }]);
 };
 document.getElementById('bk-tint').onclick = async () => {
