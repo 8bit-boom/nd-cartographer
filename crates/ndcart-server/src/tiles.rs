@@ -11,6 +11,29 @@ use ndcart_core::walls::{floor_walls, Wall};
 use ndcart_core::CellKey;
 use ndcart_core::FloorDoc;
 use ndcart_paint::{edge_mix, Side, BLEND_WIDTH};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// Prepared strokes cached by content hash across tiles and documents. Building
+/// a `Prepared` thins the samples and lays the scatter dots + spatial index; a
+/// stroke crossed by many tiles used to pay that cost per tile. The cache is
+/// bounded (cleared wholesale past the cap, like the tile cache).
+static PREPARED: OnceLock<Mutex<std::collections::HashMap<u64, Arc<ndcart_paint::Prepared>>>> =
+    OnceLock::new();
+
+fn prepared_cached(stroke: &ndcart_core::Stroke) -> Arc<ndcart_paint::Prepared> {
+    let cache = PREPARED.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let key = stroke.content_hash();
+    let mut cache = cache.lock().expect("prepared cache");
+    if let Some(p) = cache.get(&key) {
+        return p.clone();
+    }
+    let p = Arc::new(ndcart_paint::Prepared::new(stroke));
+    if cache.len() > 4_096 {
+        cache.clear();
+    }
+    cache.insert(key, p.clone());
+    p
+}
 
 /// Pixels per cell at zoom 0. Zoom z doubles it (z capped at 4).
 pub const PPC0: i64 = 16;
@@ -1466,14 +1489,24 @@ fn draw_rivers(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i
 /// at the underlay's opacity, over the void and under the rooms.
 fn draw_underlay(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0: i64, y0: i64) {
     let Some(u) = &floor.underlay else { return };
-    let Some(img) = crate::assets::global().get_pixmap(&u.asset) else {
+    let assets = crate::assets::global();
+    let Some(full) = assets.get_pixmap(&u.asset) else {
         return;
     };
     let scale = ppc as f32;
-    let (sx, sy) = (
-        u.w * scale / img.width() as f32,
-        u.h * scale / img.height() as f32,
-    );
+    // The underlay's on-screen size in pixels. Pick the mipmap level nearest
+    // (but not below) it, so a large picture minified at low zoom is not
+    // bilinear-sampled at full resolution — that aliases and reads a wide pixel
+    // footprint per tile.
+    let (dw, dh) = (u.w * scale, u.h * scale);
+    let ratio = (full.width() as f32 / dw.max(1.0)).max(full.height() as f32 / dh.max(1.0));
+    let level = if ratio > 1.0 {
+        ratio.log2().floor() as u32
+    } else {
+        0
+    };
+    let img = assets.get_pixmap_mip(&u.asset, level).unwrap_or(full);
+    let (sx, sy) = (dw / img.width() as f32, dh / img.height() as f32);
     let paint = tiny_skia::PixmapPaint {
         opacity: u.opacity,
         quality: tiny_skia::FilterQuality::Bilinear,
@@ -1509,7 +1542,7 @@ fn apply_strokes(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0:
         (y0 + h) as f32 / scale,
     ];
     // Cheap reject on the raw points first (a stroke's reach is under one `size`).
-    let prepared: Vec<(&ndcart_core::Stroke, ndcart_paint::Prepared)> = floor
+    let prepared: Vec<(&ndcart_core::Stroke, Arc<ndcart_paint::Prepared>)> = floor
         .strokes
         .iter()
         .filter(|s| {
@@ -1520,7 +1553,7 @@ fn apply_strokes(pixmap: &mut tiny_skia::Pixmap, floor: &FloorDoc, ppc: i64, x0:
                 && b[1] - pad <= region[3]
                 && b[3] + pad >= region[1]
         })
-        .map(|s| (s, ndcart_paint::Prepared::new(s)))
+        .map(|s| (s, prepared_cached(s)))
         .filter(|(_, p)| p.touches(region))
         .collect();
     if prepared.is_empty() {
@@ -1965,12 +1998,18 @@ fn render_pixmap_hidden(
     // zoom levels and the full-map export all agree.
     let surfaces = surfaces_of(floor);
     let stride = w as usize * 4;
-    for (cell, space_id) in floor.grid.cells() {
+    // Range-query the grid's (x, y) BTreeMap by the tile's cell rect instead of
+    // scanning every cell on the map for each tile.
+    let clamp32 = |v: i64| v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+    let (rx0, rx1, ry0, ry1) = (
+        clamp32(cx_from),
+        clamp32(cx_to),
+        clamp32(cy_from),
+        clamp32(cy_to),
+    );
+    for (cell, space_id) in floor.grid.cells_in_rect(rx0, rx1, ry0, ry1) {
         let cx = i64::from(cell.x);
         let cy = i64::from(cell.y);
-        if cx < cx_from || cx > cx_to || cy < cy_from || cy > cy_to {
-            continue;
-        }
         let own = surfaces.get(space_id).cloned().unwrap_or(FALLBACK);
         // The four neighbours' surfaces, only when painted and different.
         let nb = |c: CellKey| {

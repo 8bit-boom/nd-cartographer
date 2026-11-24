@@ -130,6 +130,10 @@ pub fn from_scene(text: &str) -> Result<SceneIn, String> {
     );
     let cols = (width / grid_px).round().max(1.0) as u32;
     let rows = (height / grid_px).round().max(1.0) as u32;
+    // Coordinates are cast to f32 downstream; a finite-but-astronomical number
+    // (1e300) would become inf. Walls live on the canvas, so anything beyond a
+    // generous margin around it is hostile, not geometry.
+    let coord_bound = width.max(height) * 2.0;
     let mut walls = Vec::new();
     for (i, w) in v
         .get("walls")
@@ -138,6 +142,9 @@ pub fn from_scene(text: &str) -> Result<SceneIn, String> {
         .flatten()
         .enumerate()
     {
+        if walls.len() >= ndcart_core::ND_WORLD_WALL_CAP * 20 {
+            return Err("too many wall segments".into());
+        }
         let Some(c) = w
             .get("c")
             .and_then(Value::as_array)
@@ -146,7 +153,7 @@ pub fn from_scene(text: &str) -> Result<SceneIn, String> {
             continue;
         };
         let n: Vec<f64> = c.iter().filter_map(Value::as_f64).collect();
-        if n.len() != 4 {
+        if n.len() != 4 || n.iter().any(|p| !p.is_finite() || p.abs() > coord_bound) {
             continue;
         }
         let flag = |k: &str| {
@@ -198,9 +205,15 @@ pub fn from_scene(text: &str) -> Result<SceneIn, String> {
         .flatten()
         .enumerate()
     {
+        if lights.len() >= ndcart_core::MAX_LIGHTS {
+            break; // nd-world's publish cap; the rest are dropped, not guessed
+        }
         let (Some(x), Some(y)) = (num(l, &["x"]), num(l, &["y"])) else {
             continue;
         };
+        if x.abs() > coord_bound || y.abs() > coord_bound {
+            continue;
+        }
         let dim = num(l, &["config", "dim"])
             .or_else(|| num(l, &["dim"]))
             .unwrap_or(0.0);
@@ -408,5 +421,38 @@ mod tests {
         ] {
             assert!(from_scene(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn hostile_coordinates_and_overflowing_lists_are_refused() {
+        // A finite-but-astronomical coordinate would become inf when cast to
+        // f32 downstream; it must be dropped, not imported.
+        let scene = r#"{"name":"H","width":400,"height":300,"grid":{"size":100},
+          "walls":[{"c":[1e300,0,100,0],"move":20,"sense":20},{"c":[0,0,100,0],"move":20,"sense":20}],
+          "lights":[{"x":-1e300,"y":0,"config":{"dim":10}},{"x":50,"y":50,"config":{"dim":10}}]}"#;
+        let s = from_scene(scene).unwrap();
+        assert_eq!(s.walls.len(), 1, "the 1e300 wall is dropped");
+        assert_eq!(s.lights.len(), 1, "the -1e300 light is dropped");
+
+        // Lights beyond nd-world's cap are dropped, not guessed.
+        let many_lights: Vec<String> = (0..200)
+            .map(|i| format!(r#"{{"x":{i},"y":0,"config":{{"dim":10}}}}"#))
+            .collect();
+        let scene = format!(
+            r#"{{"name":"L","width":400,"height":300,"grid":{{"size":100}},"lights":[{}]}}"#,
+            many_lights.join(",")
+        );
+        let s = from_scene(&scene).unwrap();
+        assert_eq!(s.lights.len(), ndcart_core::MAX_LIGHTS);
+
+        // More wall segments than the import cap is an error, not a hang.
+        let many_walls: Vec<String> = (0..ndcart_core::ND_WORLD_WALL_CAP * 20 + 1)
+            .map(|i| format!(r#"{{"c":[{i},0,{i},10],"move":20,"sense":20}}"#))
+            .collect();
+        let scene = format!(
+            r#"{{"name":"W","width":100000,"height":100000,"grid":{{"size":100}},"walls":[{}]}}"#,
+            many_walls.join(",")
+        );
+        assert!(from_scene(&scene).is_err(), "too many walls is refused");
     }
 }

@@ -147,6 +147,36 @@ impl Stroke {
         }
         b
     }
+
+    /// A cheap fingerprint of everything `Prepared::new` reads, so the baker can
+    /// cache prepared strokes across tiles instead of rebuilding the spatial
+    /// index and scatter dots per tile. Hashing the samples is far cheaper than
+    /// preparing them. Process-local (the cache it keys is too).
+    pub fn content_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::mem::discriminant(&self.kind).hash(&mut h);
+        std::mem::discriminant(&self.brush).hash(&mut h);
+        self.material.hash(&mut h);
+        self.color.hash(&mut h);
+        for v in [
+            self.size,
+            self.opacity,
+            self.hardness,
+            self.roughness,
+            self.density,
+        ] {
+            v.to_bits().hash(&mut h);
+        }
+        self.seed.hash(&mut h);
+        (self.points.len() as u64).hash(&mut h);
+        for p in &self.points {
+            for v in [p.x, p.y, p.pressure, p.tilt] {
+                v.to_bits().hash(&mut h);
+            }
+        }
+        h.finish()
+    }
 }
 
 #[cfg(test)]

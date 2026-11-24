@@ -24,10 +24,51 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: tests
         run: cargo test --locked
-      - name: bench smoke
-        run: cargo run -q -p ndcart-server --bin ndcart bench
+      - name: bench gate (release, the plan's 32 px/cell budget)
+        run: cargo run --release -q -p ndcart-server --bin ndcart bench --ppc 32
       - name: standalone parity (bridge feature off)
         run: cargo test --locked -p ndcart-server --no-default-features
+
+  ui:
+    # The browser UI is vanilla JS embedded in the binary; these gates catch the
+    # syntax/runtime errors that a Rust-only CI cannot see (v0.1.0 shipped with
+    # string syntax errors that broke the whole UI script).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: JS syntax gate
+        run: node --check ui/app.js
+      - name: Install UI dev deps
+        run: npm ci --no-audit --no-fund
+      - name: ESLint
+        run: npm run lint
+      - name: Build the server for the smoke test
+        run: cargo build --locked -p ndcart-server --bin ndcart
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end smoke
+        run: npm run test:e2e
+
+  supply-chain:
+    # Plan §17.7: license + advisory scanning over the dependency tree.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo-deny (licenses, advisories, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+      - name: cargo-audit (RustSec advisories)
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
 
   desktop:
     # The Tauri shell is not a default workspace member (Linux needs the

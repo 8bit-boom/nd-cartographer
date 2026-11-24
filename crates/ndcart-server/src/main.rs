@@ -56,6 +56,10 @@ struct AppState {
     wall_cache: Mutex<WallCache>,
     /// "doc/floor/z/x_y/rev" -> PNG bytes; cleared wholesale when big.
     tile_cache: Mutex<HashMap<String, Vec<u8>>>,
+    /// Player-view preview PNGs keyed by doc/floor/rev/viewer/phase. The table
+    /// screen cycles a few water frames each poll; without this it re-bakes the
+    /// whole floor per frame. rev in the key makes edits bypass stale entries.
+    preview_cache: Mutex<HashMap<String, Vec<u8>>>,
 }
 type App = Arc<AppState>;
 
@@ -135,13 +139,7 @@ struct DocView {
 }
 
 fn floor_view(doc_id: &str, app: &App, floor: &FloorDoc, cell_size: f64, rev: u64) -> FloorView {
-    let walls = {
-        let mut cache = app.wall_cache.lock().expect("wall cache");
-        cache
-            .entry((doc_id.to_string(), floor.id.clone(), rev))
-            .or_insert_with(|| Arc::new(tiles::derive_walls(floor, cell_size)))
-            .clone()
-    };
+    let walls = cached_walls(app, doc_id, floor, cell_size, rev);
     FloorView {
         id: floor.id.clone(),
         name: floor.name.clone(),
@@ -194,20 +192,47 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
-async fn index() -> Response {
+/// The shell files (HTML/JS/CSS) are embedded at compile time. Serve them with
+/// `no-cache` + an ETag so a browser always revalidates after a server upgrade
+/// (otherwise it may heuristically cache old JS against a new API), while a
+/// matching If-None-Match still gets a cheap 304.
+fn shell_response(
+    content_type: &'static str,
+    body: &'static str,
+    req_headers: &header::HeaderMap,
+) -> Response {
+    let etag = format!(
+        "\"{}\"",
+        &ndcart_core::hash::sha256_hex(body.as_bytes())[..16]
+    );
+    if req_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        == Some(etag.as_str())
+    {
+        return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+    }
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        INDEX_HTML,
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (header::CACHE_CONTROL, "no-cache".to_string()),
+            (header::ETAG, etag),
+        ],
+        body,
     )
         .into_response()
 }
 
-async fn app_js() -> Response {
-    ([(header::CONTENT_TYPE, "application/javascript")], APP_JS).into_response()
+async fn index(headers: header::HeaderMap) -> Response {
+    shell_response("text/html; charset=utf-8", INDEX_HTML, &headers)
 }
 
-async fn app_css() -> Response {
-    ([(header::CONTENT_TYPE, "text/css")], APP_CSS).into_response()
+async fn app_js(headers: header::HeaderMap) -> Response {
+    shell_response("application/javascript", APP_JS, &headers)
+}
+
+async fn app_css(headers: header::HeaderMap) -> Response {
+    shell_response("text/css", APP_CSS, &headers)
 }
 
 #[derive(Serialize)]
@@ -276,6 +301,59 @@ async fn get_doc(
         .get(&id)
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
     Ok(Json(doc_view(&app, doc)))
+}
+
+#[derive(Deserialize)]
+struct RenameBody {
+    name: String,
+}
+
+/// `PATCH /api/docs/{id}` `{name}` — rename a project (the gallery's ✎).
+async fn rename_doc(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    body: Result<Json<RenameBody>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Json(b) = body.map_err(|_| ApiError(CoreError::Invalid("body must be {name}".into())))?;
+    let name = b.name.trim();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(CoreError::Invalid("name must be 1-120 characters".into()).into());
+    }
+    let mut store = app.store.write().await;
+    let doc = store
+        .docs
+        .get_mut(&id)
+        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    doc.manifest.name = name.to_string();
+    doc.manifest.updated_at = ndcart_core::doc::now_iso();
+    store::save_doc(app.data_dir.as_deref(), doc);
+    Ok(Json(
+        serde_json::json!({"ok": true, "id": id, "name": name}),
+    ))
+}
+
+/// `DELETE /api/docs/{id}` — remove a project and its files. The UI confirms
+/// first; the id must name a loaded project, so the path is never user-controlled.
+async fn delete_doc(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut store = app.store.write().await;
+    if store.docs.remove(&id).is_none() {
+        return Err(CoreError::NotFound(format!("document {id}")).into());
+    }
+    drop(store);
+    if let Some(root) = &app.data_dir {
+        let dir = root.join(&id);
+        if dir.is_dir() {
+            if let Err(e) = std::fs::remove_dir_all(&dir) {
+                eprintln!("ndcart: cannot remove {}: {e}", dir.display());
+            }
+        }
+    }
+    app.wall_cache.lock().expect("wall cache").clear();
+    bust_doc_tiles(&app, &id);
+    Ok(Json(serde_json::json!({"ok": true, "deleted": id})))
 }
 
 #[derive(Deserialize)]
@@ -2615,7 +2693,8 @@ async fn revert_to(
     let rev = doc.rev;
     store::save_doc(app.data_dir.as_deref(), doc);
     drop(store);
-    app.wall_cache.lock().expect("tile cache").clear();
+    app.wall_cache.lock().expect("wall cache").clear();
+    bust_doc_tiles(&app, &id);
     Ok(Json(
         serde_json::json!({ "ok": true, "rev": rev, "restored_to": index }),
     ))
@@ -3629,18 +3708,23 @@ async fn preview(
     Path(id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<PreviewQuery>,
 ) -> Result<Response, ApiError> {
-    let store = app.store.read().await;
-    let doc = store
-        .docs
-        .get(&id)
-        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
-    let idx = match &q.floor {
-        Some(f) => floors_by_id(&doc.floors, f)?,
-        None => 0,
+    let (floor, cell_size, floor_id, rev) = {
+        let store = app.store.read().await;
+        let doc = store
+            .docs
+            .get(&id)
+            .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+        let idx = match &q.floor {
+            Some(f) => floors_by_id(&doc.floors, f)?,
+            None => 0,
+        };
+        (
+            ndcart_core::for_audience(&doc.floors[idx], ndcart_core::Audience::Player),
+            doc.manifest.cell_size,
+            doc.floors[idx].id.clone(),
+            doc.rev,
+        )
     };
-    let floor = ndcart_core::for_audience(&doc.floors[idx], ndcart_core::Audience::Player);
-    let cell_size = doc.manifest.cell_size;
-    drop(store);
     let (x, y) = (q.x.unwrap_or(0.5), q.y.unwrap_or(0.5));
     let radius = q.radius.unwrap_or(12.0);
     if !(x.is_finite() && y.is_finite() && radius.is_finite()) || !(0.5..=200.0).contains(&radius) {
@@ -3650,12 +3734,31 @@ async fn preview(
     }
     let (ppc, dark) = (q.ppc.unwrap_or(16), q.darkness.unwrap_or(true));
     let phase = q.frame.unwrap_or(0.0).clamp(0.0, 6.0);
+    // The table screen cycles a few water frames each poll; cache the baked
+    // PNG per (rev, viewer, phase) so a steady view is not re-baked every time.
+    let key = format!("{id}/{floor_id}/{rev}/{x}/{y}/{radius}/{ppc}/{dark}/{phase}");
+    if let Some(png) = app.preview_cache.lock().expect("preview cache").get(&key) {
+        return Ok((
+            [
+                (header::CONTENT_TYPE, "image/png"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            png.clone(),
+        )
+            .into_response());
+    }
     let (png, ..) = tokio::task::spawn_blocking(move || {
         tiles::bake_preview_frame(&floor, cell_size, ppc, [x, y], radius, dark, phase)
     })
     .await
     .map_err(|e| ApiError(CoreError::Invalid(format!("preview failed: {e}"))))?
     .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    let mut cache = app.preview_cache.lock().expect("preview cache");
+    if cache.len() > 256 {
+        cache.clear();
+    }
+    cache.insert(key, png.clone());
+    drop(cache);
     Ok((
         [
             (header::CONTENT_TYPE, "image/png"),
@@ -3824,24 +3927,6 @@ async fn export_uvtt(
     Path(id): Path<String>,
     axum::extract::Query(q): axum::extract::Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
-    let store = app.store.read().await;
-    let doc = store
-        .docs
-        .get(&id)
-        .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
-    let idx = match &q.floor {
-        Some(fid) => floors_by_id(&doc.floors, fid)?,
-        None => 0,
-    };
-    let floor = doc
-        .floors
-        .get(idx)
-        .ok_or_else(|| CoreError::NotFound("floor".into()))?;
-    let filtered = ndcart_core::for_audience(floor, pick_audience(&q)?);
-    let floor = &filtered;
-    let cell_size = doc.manifest.cell_size;
-    let walls = tiles::derive_walls(floor, cell_size);
-    let (cols, rows) = tiles::grid_extent(floor);
     let ppc = q.ppc.unwrap_or(32);
     let fmt = pick_format(&q)?;
     if fmt == tiles::ImageFormat::Avif {
@@ -3849,21 +3934,47 @@ async fn export_uvtt(
             "UVTT pictures are png or webp (avif is not read by VTTs or nd-world)".into(),
         )));
     }
-    let (png, ..) = tiles::bake_full_as(floor, &walls, cell_size, ppc, fmt, 90)
-        .map_err(|m| ApiError(CoreError::Invalid(m)))?;
-    // The picture is `ppc` px per cell, so the UVTT lattice and walls use it too.
-    let map = ndcart_formats::uvtt::UvttMap {
-        cols,
-        rows,
-        cell_size: ppc as f64,
-        walls: tiles::derive_walls(floor, ppc as f64),
-        lights: floor.lights.clone(),
-        image_b64: Some(ndcart_formats::base64::encode(&png)),
+    let audience = pick_audience(&q)?;
+    let (filtered, cell_size, name) = {
+        let store = app.store.read().await;
+        let doc = store
+            .docs
+            .get(&id)
+            .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+        let idx = match &q.floor {
+            Some(fid) => floors_by_id(&doc.floors, fid)?,
+            None => 0,
+        };
+        let floor = doc
+            .floors
+            .get(idx)
+            .ok_or_else(|| CoreError::NotFound("floor".into()))?;
+        (
+            ndcart_core::for_audience(floor, audience),
+            doc.manifest.cell_size,
+            doc.manifest.name.replace(['"', '/', '\\'], "_"),
+        )
     };
-    let name = format!(
-        "{}.dd2vtt",
-        doc.manifest.name.replace(['"', '/', '\\'], "_")
-    );
+    // A full-map bake takes seconds: run it off the async threads without
+    // holding the project lock, exactly like export_png.
+    let map = tokio::task::spawn_blocking(move || {
+        let walls = tiles::derive_walls(&filtered, cell_size);
+        let (cols, rows) = tiles::grid_extent(&filtered);
+        let (png, ..) = tiles::bake_full_as(&filtered, &walls, cell_size, ppc, fmt, 90)?;
+        // The picture is `ppc` px per cell, so the UVTT lattice and walls use it too.
+        Ok::<_, String>(ndcart_formats::uvtt::UvttMap {
+            cols,
+            rows,
+            cell_size: ppc as f64,
+            walls: tiles::derive_walls(&filtered, ppc as f64),
+            lights: filtered.lights.clone(),
+            image_b64: Some(ndcart_formats::base64::encode(&png)),
+        })
+    })
+    .await
+    .map_err(|e| ApiError(CoreError::Invalid(format!("export failed: {e}"))))?
+    .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+    let name = format!("{name}.dd2vtt");
     Ok((
         [
             (header::CONTENT_TYPE, "application/json".to_string()),
@@ -3917,13 +4028,18 @@ async fn convert_image(
 struct OpsBody {
     floor: String,
     ops: Vec<Op>,
+    /// Optional optimistic-concurrency guard: the rev the client believes the
+    /// document is at. If it has moved on (another tab, watch mode), the edit
+    /// is refused with 409 rather than silently interleaved.
+    #[serde(default)]
+    base_rev: Option<u64>,
 }
 
 async fn post_ops(
     State(app): State<App>,
     Path(id): Path<String>,
     body: Result<Json<OpsBody>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let Json(b) =
         body.map_err(|_| ApiError(CoreError::Invalid("body must be {floor, ops}".into())))?;
     if b.ops.len() > 500 {
@@ -3934,17 +4050,25 @@ async fn post_ops(
         .docs
         .get_mut(&id)
         .ok_or_else(|| CoreError::NotFound(format!("document {id}")))?;
+    if let Some(base) = b.base_rev {
+        if base != doc.rev {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "the map changed since you loaded it — refresh and retry",
+                    "rev": doc.rev,
+                })),
+            )
+                .into_response());
+        }
+    }
     doc.apply_ops(&b.floor, &b.ops)?;
     let rev = doc.rev;
     store::save_doc_fast(app.data_dir.as_deref(), doc);
     drop(store);
     // Invalidate stale tiles/walls for this document.
-    let prefix = format!("{id}/");
-    app.tile_cache
-        .lock()
-        .expect("tile cache")
-        .retain(|k, _| !k.starts_with(&prefix));
-    Ok(Json(serde_json::json!({"ok": true, "rev": rev})))
+    bust_doc_tiles(&app, &id);
+    Ok(Json(serde_json::json!({"ok": true, "rev": rev})).into_response())
 }
 
 #[derive(Deserialize)]
@@ -3967,11 +4091,7 @@ async fn post_undo(
     let rev = doc.rev;
     store::save_doc_fast(app.data_dir.as_deref(), doc);
     drop(store);
-    let prefix = format!("{id}/");
-    app.tile_cache
-        .lock()
-        .expect("tile cache")
-        .retain(|k, _| !k.starts_with(&prefix));
+    bust_doc_tiles(&app, &id);
     Ok(Json(serde_json::json!({"ok": true, "rev": rev})))
 }
 
@@ -3991,6 +4111,13 @@ async fn get_tile(
         let (a, b) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
         let x: i64 = a.parse().map_err(|_| CoreError::Invalid("tile x".into()))?;
         let y: i64 = b.parse().map_err(|_| CoreError::Invalid("tile y".into()))?;
+        // The baker multiplies by 256; an unbounded i64 would overflow (debug
+        // panic / release wrap). A million tiles is ~256 Mpx, far past any map,
+        // while still allowing panning into the void around the painted area.
+        const MAX_TILE_COORD: i64 = 1 << 20;
+        if x.abs() > MAX_TILE_COORD || y.abs() > MAX_TILE_COORD {
+            return Err(CoreError::OutOfBounds("tile coordinate".into()).into());
+        }
         (x, y)
     };
     let onion_id = q.onion.filter(|o| *o != floor_id);
@@ -4015,25 +4142,13 @@ async fn get_tile(
     if let Some(bytes) = app.tile_cache.lock().expect("tile cache").get(&key) {
         return Ok(png_response(bytes));
     }
-    let walls = {
-        let mut cache = app.wall_cache.lock().expect("wall cache");
-        cache
-            .entry((doc_id.clone(), floor_id.clone(), rev))
-            .or_insert_with(|| Arc::new(tiles::derive_walls(&floor, cell_size)))
-            .clone()
-    };
+    let walls = cached_walls(&app, &doc_id, &floor, cell_size, rev);
     // The optional floor shown faintly underneath (must be a floor of this document).
     let ghost = match &onion_id {
         Some(oid) => {
             let oi = floors_by_id(&doc.floors, oid)?;
             let of = doc.floors[oi].clone();
-            let ow = {
-                let mut cache = app.wall_cache.lock().expect("wall cache");
-                cache
-                    .entry((doc_id.clone(), oid.clone(), rev))
-                    .or_insert_with(|| Arc::new(tiles::derive_walls(&of, cell_size)))
-                    .clone()
-            };
+            let ow = cached_walls(&app, &doc_id, &of, cell_size, rev);
             Some((of, ow))
         }
         None => None,
@@ -4066,6 +4181,36 @@ fn png_response(bytes: &[u8]) -> Response {
         .into_response()
 }
 
+/// Drop every cached tile of one document. The tile cache key carries no rev,
+/// so *every* path that mutates a document must call this (or clear the whole
+/// cache) — a missing call serves stale pictures until restart.
+fn bust_doc_tiles(app: &App, id: &str) {
+    let prefix = format!("{id}/");
+    app.tile_cache
+        .lock()
+        .expect("tile cache")
+        .retain(|k, _| !k.starts_with(&prefix));
+}
+
+/// Derived walls for one floor at a revision, cached. Only the latest rev per
+/// (document, floor) is kept: a painting session bumps rev on every edit, and
+/// retaining every revision would accumulate one full wall vector per edit.
+fn cached_walls(
+    app: &App,
+    doc_id: &str,
+    floor: &FloorDoc,
+    cell_size: f64,
+    rev: u64,
+) -> Arc<Vec<Wall>> {
+    let mut cache = app.wall_cache.lock().expect("wall cache");
+    let walls = cache
+        .entry((doc_id.to_string(), floor.id.clone(), rev))
+        .or_insert_with(|| Arc::new(tiles::derive_walls(floor, cell_size)))
+        .clone();
+    cache.retain(|(d, f, r), _| !(d == doc_id && f == &floor.id && *r != rev));
+    walls
+}
+
 fn build_router(app: App) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -4073,7 +4218,10 @@ fn build_router(app: App) -> Router {
         .route("/app.js", get(app_js))
         .route("/app.css", get(app_css))
         .route("/api/docs", get(list_docs).post(create_doc))
-        .route("/api/docs/{id}", get(get_doc))
+        .route(
+            "/api/docs/{id}",
+            get(get_doc).patch(rename_doc).delete(delete_doc),
+        )
         .route("/api/docs/{id}/export/uvtt", get(export_uvtt))
         .route("/api/docs/{id}/export/png", get(export_png))
         .route("/api/docs/{id}/lint", get(lint_doc))
@@ -4103,9 +4251,6 @@ fn build_router(app: App) -> Router {
         .route("/api/stamps", get(list_stamps))
         .route("/api/stamps/{id}/icon.png", get(stamp_icon_png))
         .route("/api/convert", post(convert_image))
-        .layer(axum::extract::DefaultBodyLimit::max(
-            convert::MAX_INPUT_BYTES,
-        ))
         .route("/api/docs/{id}/generate", post(generate_world))
         .route("/api/docs/{id}/floors", post(floors_route))
         .route("/api/docs/{id}/undo-structure", post(undo_structure))
@@ -4193,6 +4338,13 @@ fn build_router(app: App) -> Router {
         .route("/api/docs/{id}/ops", post(post_ops))
         .route("/api/docs/{id}/undo", post(post_undo))
         .route("/tiles/{doc}/{floor}/{z}/{xy}", get(get_tile))
+        // Body-size cap for EVERY route. axum's `Router::layer` only wraps the
+        // routes registered before it, so this must come last — a mid-router
+        // layer silently left later routes (foundry import, ops, ai/image) at
+        // the 2 MB default. The per-route pack limit above is inner and wins.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            convert::MAX_INPUT_BYTES,
+        ))
         .with_state(app)
 }
 
@@ -4522,6 +4674,7 @@ async fn main() {
                 ai: Mutex::new(ai),
                 wall_cache: Mutex::new(HashMap::new()),
                 tile_cache: Mutex::new(HashMap::new()),
+                preview_cache: Mutex::new(HashMap::new()),
             });
             let mut router = build_router(app);
             if !auth::is_loopback(&listen) {
@@ -4533,6 +4686,9 @@ async fn main() {
                 router = router.layer(axum::middleware::from_fn(move |req, next| {
                     auth::gate(token.clone(), req, next)
                 }));
+            } else {
+                // No token on loopback, so reject DNS-rebinding requests by Host.
+                router = router.layer(axum::middleware::from_fn(auth::host_guard));
             }
             let listener = tokio::net::TcpListener::bind(&listen)
                 .await
@@ -4576,6 +4732,7 @@ mod tests {
             ai: Mutex::new(ai_settings::load(None)),
             wall_cache: Mutex::new(HashMap::new()),
             tile_cache: Mutex::new(HashMap::new()),
+            preview_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -4927,6 +5084,172 @@ mod tests {
             status,
             r.into_body().collect().await.unwrap().to_bytes().to_vec(),
         )
+    }
+
+    /// Create a battle project and return (id, first floor id).
+    async fn fresh_doc(router: &Router) -> (String, String) {
+        let (st, body) = call(
+            router,
+            "POST",
+            "/api/docs",
+            br#"{"name":"T","kind":"battle"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let m: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = m["id"].as_str().unwrap().to_string();
+        let (_, body) = call(router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let floor = d["floors"][0]["id"].as_str().unwrap().to_string();
+        (id, floor)
+    }
+
+    fn paint_ops(floor: &str, x: i32) -> serde_json::Value {
+        serde_json::json!({"floor": floor, "ops": [
+            {"t":"upsert_space","space":{"id":"s","name":"S","color":"#7f5539","kind":"room"}},
+            {"t":"paint_cells","cells":[{"x":x,"y":0}],"space":"s"}
+        ]})
+    }
+
+    #[tokio::test]
+    async fn revert_busts_the_tile_cache() {
+        let router = build_router(test_app());
+        let (id, floor) = fresh_doc(&router).await;
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::to_vec(&paint_ops(&floor, 0)).unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let tile = format!("/tiles/{id}/{floor}/0/0_0");
+        let (st, painted) = call(&router, "GET", &tile, vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        // Jump back to before the paint (journal prefix of length 0).
+        let rv = serde_json::json!({"floor": floor, "index": 0});
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/revert"),
+            serde_json::to_vec(&rv).unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, reverted) = call(&router, "GET", &tile, vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_ne!(
+            painted, reverted,
+            "the tile must reflect the revert, not a stale cached picture"
+        );
+    }
+
+    #[tokio::test]
+    async fn ops_with_a_stale_base_rev_are_refused() {
+        let router = build_router(test_app());
+        let (id, floor) = fresh_doc(&router).await;
+        // First edit takes rev 0 -> 1.
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::to_vec(&paint_ops(&floor, 0)).unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        // A client still believing rev 0 is refused with 409, not interleaved.
+        let mut stale = paint_ops(&floor, 1);
+        stale["base_rev"] = serde_json::json!(0);
+        let (st, body) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["rev"], 1, "the conflict reports the current rev");
+        // The current base_rev goes through.
+        let mut current = paint_ops(&floor, 1);
+        current["base_rev"] = serde_json::json!(1);
+        let (st, _) = call(
+            &router,
+            "POST",
+            &format!("/api/docs/{id}/ops"),
+            serde_json::to_vec(&current).unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn projects_can_be_renamed_and_deleted() {
+        let router = build_router(test_app());
+        let (id, _) = fresh_doc(&router).await;
+        let (st, _) = call(
+            &router,
+            "PATCH",
+            &format!("/api/docs/{id}"),
+            br#"{"name":"Renamed"}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (_, body) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        let d: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(d["manifest"]["name"], "Renamed");
+        // An empty name is refused.
+        let (st, _) = call(
+            &router,
+            "PATCH",
+            &format!("/api/docs/{id}"),
+            br#"{"name":"   "}"#.to_vec(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+        // Delete, then it is gone (and deleting again is a 404, not a panic).
+        let (st, _) = call(&router, "DELETE", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&router, "GET", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = call(&router, "DELETE", &format!("/api/docs/{id}"), vec![]).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn wild_tile_coordinates_are_refused() {
+        let router = build_router(test_app());
+        let (id, floor) = fresh_doc(&router).await;
+        let (st, _) = call(
+            &router,
+            "GET",
+            &format!("/tiles/{id}/{floor}/0/9223372036854775807_0"),
+            vec![],
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_foundry_scene_imports_as_a_project() {
+        let router = build_router(test_app());
+        let scene = serde_json::json!({
+            "name": "Crypt", "width": 400, "height": 300, "grid": {"size": 100},
+            "walls": [{"c": [0, 0, 100, 0], "move": 20, "sense": 20}],
+            "lights": [{"x": 50, "y": 50, "config": {"dim": 20}}]
+        });
+        let (st, body) = call(
+            &router,
+            "POST",
+            "/api/import/foundry",
+            serde_json::to_vec(&scene).unwrap(),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["manifest"]["id"].as_str().is_some());
+        assert_eq!(v["stats"]["walls"], 1);
+        assert_eq!(v["stats"]["lights"], 1);
     }
 
     #[tokio::test]

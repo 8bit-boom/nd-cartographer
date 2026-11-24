@@ -34,6 +34,10 @@ const state = {
   pendingFlush: null,
 };
 
+// A rev pushed by the SSE feed while we were busy (dialog open, mid-stroke, tab
+// hidden). Remembered so we catch up later instead of silently staying stale.
+let pendingRev = 0;
+
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
@@ -158,6 +162,39 @@ async function api(method, url, body) {
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).error || msg; } catch { /* keep */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+// Errors go to a dedicated alert region (the status line is a disposable tool
+// hint that the next click overwrites, and screen readers never heard it).
+const toastsEl = document.getElementById('toasts');
+function toast(msg, kind) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (kind === 'info' ? ' info' : '');
+  t.textContent = msg;
+  toastsEl.appendChild(t);
+  setTimeout(() => t.remove(), kind === 'info' ? 4000 : 7000);
+}
+
+// POST ops with an optimistic-concurrency guard: base_rev is the rev we believe
+// the map is at. If another window moved it on, the server answers 409; we
+// refresh to the current state and ask the user to redo the edit rather than
+// silently interleaving two authors' changes.
+async function sendOps(ops) {
+  const res = await fetch(`/api/docs/${state.docId}/ops`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ floor: state.floorId, ops, base_rev: state.rev }),
+  });
+  if (res.status === 409) {
+    await refresh();
+    throw new Error('The map changed in another window — your edit was not applied. Redo it.');
+  }
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).error || msg; } catch { /* keep */ }
@@ -614,8 +651,7 @@ document.getElementById('bk-stock').onclick = async () => {
   try {
     const { tables } = await api('GET', '/api/world/tables');
     if (!tables.length) { statusEl.textContent = 'Your nd-world has no tables yet.'; return; }
-    const list = tables.map((t, i) => `${i + 1}) ${t.name} (${t.entries.length} entries)`).join('
-');
+    const list = tables.map((t, i) => `${i + 1}) ${t.name} (${t.entries.length} entries)`).join('\n');
     const pick = Number(window.prompt(`Stock from which table?
 ${list}`, '1'));
     const tbl = tables[pick - 1];
@@ -810,6 +846,7 @@ const curFloor = () => state.doc.floors.find(f => f.id === state.floorId) || sta
 async function refresh() {
   state.doc = await api('GET', `/api/docs/${state.docId}`);
   state.rev = state.doc.rev;
+  pendingRev = 0;   // we now hold the latest state
   // Keep the selected floor if it still exists; otherwise fall back to the first.
   if (!state.doc.floors.some(f => f.id === state.floorId)) state.floorId = state.doc.floors[0].id;
   const floor = curFloor();
@@ -1103,12 +1140,12 @@ async function toggleMark(edge, kind) {
 
 async function postOps(ops) {
   try {
-    const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: state.floorId, ops });
+    const res = await sendOps(ops);
     state.rev = res.rev;
     tileCache.clear();
     await refresh();
   } catch (e) {
-    statusEl.textContent = `Error: ${e.message}`;
+    toast(e.message);
   }
 }
 
@@ -1128,14 +1165,8 @@ async function flushStroke() {
       { t: 'paint_cells', cells, space: spaceId },
     ],
   }];
-  try {
-    const res = await api('POST', `/api/docs/${state.docId}/ops`, { floor: state.floorId, ops });
-    state.rev = res.rev;
-    tileCache.clear();
-    await refresh();
-  } catch (e) {
-    statusEl.textContent = `Error: ${e.message}`;
-  }
+  await postOps(ops);
+  catchUp();
 }
 
 // Every cell on the segment between two cells (Bresenham), so a fast stroke
@@ -1327,7 +1358,7 @@ function rotateStamp(deg) {
 async function loadStamps() {
   try {
     STAMPS = (await api('GET', '/api/stamps')).stamps;
-  } catch { STAMPS = []; }
+  } catch (e) { STAMPS = []; toast(`Could not load stamps: ${e.message}`); }
   const wrap = document.getElementById('stamp-palette');
   wrap.textContent = '';
   for (const s of STAMPS) {
@@ -1684,9 +1715,25 @@ function isDoubleClick(e) {
 // ---------- input ----------
 
 let dragging = null; // {sx, sy, px, py, moved}
+// Active pointers, for two-finger pinch zoom on touch devices.
+const pointers = new Map();
+let pinch = null;
 
 canvas.addEventListener('pointerdown', (e) => {
   try { canvas.setPointerCapture(e.pointerId); } catch { /* an inactive pointer id: keep going */ }
+  pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+  if (pointers.size === 2) {
+    // A second finger turns the gesture into a pinch: drop any single-pointer
+    // drag/stroke and zoom/pan with the two fingers instead.
+    const [a, b] = [...pointers.values()];
+    pinch = {
+      dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+    };
+    dragging = null;
+    state.painting = null;
+    return;
+  }
   const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
   if (state.pv.on && e.button === 0 && isDoubleClick(e)) {
     state.pv.x = wx / ppc(); state.pv.y = wy / ppc();
@@ -1789,6 +1836,30 @@ canvas.addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointermove', (e) => {
+  if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.offsetX, y: e.offsetY });
+  if (pinch && pointers.size >= 2) {
+    const [a, b] = [...pointers.values()];
+    const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    // Pan with the midpoint.
+    state.px += mid.x - pinch.mid.x;
+    state.py += mid.y - pinch.mid.y;
+    pinch.mid = mid;
+    // Zoom in integer steps (tiles are baked per integer z): a 1.5x spread
+    // since the last step zooms one level, keeping the midpoint anchored.
+    const ratio = dist / pinch.dist;
+    if (ratio >= 1.5 || ratio <= 1 / 1.5) {
+      const nz = Math.min(MAX_Z, Math.max(0, state.z + (ratio > 1 ? 1 : -1)));
+      const [wx, wy] = screenToWorld(mid.x, mid.y);
+      const k = 2 ** (nz - state.z);
+      state.z = nz;
+      state.px = mid.x - wx * k;
+      state.py = mid.y - wy * k;
+      pinch.dist = dist;
+    }
+    render();
+    return;
+  }
   const [hx, hy] = screenToWorld(e.offsetX, e.offsetY);
   state.hover = [hx / ppc(), hy / ppc()];
   if (TERRAIN_TOOLS.includes(state.tool) || ['river', 'region', 'route', 'pathlabel', 'biome'].includes(state.tool)) render();
@@ -1820,6 +1891,8 @@ canvas.addEventListener('pointermove', (e) => {
 });
 
 canvas.addEventListener('pointerup', (e) => {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
   const wasClick = dragging && dragging.sx !== undefined
     && Math.abs(e.offsetX - dragging.sx) + Math.abs(e.offsetY - dragging.sy) <= 4;
   if (dragging && dragging.stroking) finishStroke();
@@ -1838,22 +1911,36 @@ canvas.addEventListener('pointerup', (e) => {
       && Math.hypot(m.x * s + state.px - e.offsetX, m.y * s + state.py - e.offsetY) < 14);
     if (hit) openLink(hit.link_schematic);
   }
+  catchUp();
 });
+
+canvas.addEventListener('pointercancel', (e) => {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinch = null;
+  dragging = null;
+  canvas.classList.remove('panning');
+});
+
+// Zoom to an integer level, keeping the world point under (sx, sy) fixed.
+function zoomTo(nz, sx, sy) {
+  nz = Math.min(MAX_Z, Math.max(0, nz));
+  if (nz === state.z) return;
+  const [wx, wy] = screenToWorld(sx, sy);
+  const k = 2 ** (nz - state.z);
+  state.z = nz;
+  state.px = sx - wx * k;
+  state.py = sy - wy * k;
+  render();
+}
 
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const dir = e.deltaY < 0 ? 1 : -1;
-  const nz = Math.min(MAX_Z, Math.max(0, state.z + dir));
-  if (nz === state.z) return;
-  // Zoom at the cursor: keep the world point under it fixed.
-  // (wx, wy) are in the CURRENT zoom's pixels, so rescale by the zoom *change*.
-  const [wx, wy] = screenToWorld(e.offsetX, e.offsetY);
-  const k = 2 ** (nz - state.z);
-  state.z = nz;
-  state.px = e.offsetX - wx * k;
-  state.py = e.offsetY - wy * k;
-  render();
+  zoomTo(state.z + (e.deltaY < 0 ? 1 : -1), e.offsetX, e.offsetY);
 }, { passive: false });
+
+// On-screen zoom buttons (touch has no wheel; also helps motor accessibility).
+document.getElementById('zoom-in').onclick = () => zoomTo(state.z + 1, canvas.clientWidth / 2, canvas.clientHeight / 2);
+document.getElementById('zoom-out').onclick = () => zoomTo(state.z - 1, canvas.clientWidth / 2, canvas.clientHeight / 2);
 
 // ONE table is both the key handler and the F1 help (they cannot drift).
 const KEYS = [
@@ -1862,14 +1949,13 @@ const KEYS = [
   { key: 'e', label: 'Eraser tool', run: () => setTool('erase') },
   { key: 'h', label: 'Raise land (world maps)', run: () => regionOnly('raise') },
   { key: 'l', label: 'Lower land (world maps)', run: () => regionOnly('lower') },
-  { key: 'm', label: 'Smooth land (world maps)', run: () => regionOnly('smooth') },
+  { key: 'm', label: 'Smooth land (world) / Measure (battle)', run: () => { if (isRegion()) setTool('smooth'); else setTool('measure'); } },
   { key: 'g', label: 'Flatten land (world maps)', run: () => regionOnly('flatten') },
   { key: 'x', label: 'Roughen land (world maps)', run: () => regionOnly('roughen') },
   { key: 'i', label: 'River tool (world maps)', run: () => regionOnly('river') },
   { key: 't', label: 'Label tool', run: () => setTool('label') },
   { key: 'y', label: 'Text along a path', run: () => setTool('pathlabel') },
   { key: 'k', label: 'Marker tool (world maps)', run: () => regionOnly('marker') },
-  { key: 'm', label: 'Measure tool', run: () => setTool('measure') },
   { key: 'Enter', label: 'Measure: close the polygon for area', run: () => measureFinish(true) },
   { key: 'u', label: 'Route tool (world maps)', run: () => regionOnly('route') },
   { key: 'Enter', label: 'Finish the river / region / route', run: () => finishDraft() },
@@ -1892,6 +1978,9 @@ const KEYS = [
 function keyLabel(k) { return (k.ctrl ? 'Ctrl+' : '') + (k.key.length === 1 ? k.key.toUpperCase() : k.key); }
 
 window.addEventListener('keydown', (e) => {
+  // An open modal owns the keyboard: tool keys (and Ctrl+Z) must not fire
+  // behind it. Escape keeps its native dialog-close behaviour; F1 still helps.
+  if (e.key !== 'F1' && document.querySelector('dialog[open]')) return;
   // Inside the outline tree (or any text field) letters belong to it, not to the tools.
   if (e.target.closest) {
     const inField = e.target.closest('input, textarea');
@@ -2394,10 +2483,8 @@ async function askMaps() {
     const answer = (await api('POST', '/api/ask', { question: q })).answer;
     // Cited rooms (SEE: project | floor | room) become Go buttons that jump.
     out.textContent = '';
-    const lines = answer.split('
-');
-    const body = lines.filter(l => !l.startsWith('SEE:')).join('
-').trim();
+    const lines = answer.split('\n');
+    const body = lines.filter(l => !l.startsWith('SEE:')).join('\n').trim();
     out.append(document.createTextNode(body));
     for (const line of lines.filter(l => l.startsWith('SEE:'))) {
       const [, proj, fl, room] = line.slice(4).split('|').map(s => s.trim());
@@ -2574,7 +2661,13 @@ searchBox.addEventListener('input', () => {
   if (!q) { searchList.hidden = true; return; }
   searchTimer = setTimeout(async () => {
     let hits = [];
-    try { hits = (await api('GET', `/api/search?q=${encodeURIComponent(q)}`)).hits; } catch { return; }
+    try { hits = (await api('GET', `/api/search?q=${encodeURIComponent(q)}`)).hits; }
+    catch {
+      searchList.textContent = '';
+      const li = document.createElement('li'); li.className = 'dim'; li.textContent = 'Search is unavailable';
+      searchList.appendChild(li); searchList.hidden = false;
+      return;
+    }
     searchList.textContent = '';
     if (hits.length === 0) { const li = document.createElement('li'); li.className = 'dim'; li.textContent = 'Nothing found'; searchList.appendChild(li); }
     for (const h of hits) {
@@ -2650,7 +2743,19 @@ async function setShare(on) {
   state.pv.share = on;
   const btn = document.getElementById('pv-share');
   btn.setAttribute('aria-pressed', String(on));
-  document.getElementById('pv-link').textContent = on ? `On the table: open ${location.origin}/table/${state.docId} on the TV or tablet` : '';
+  const linkEl = document.getElementById('pv-link');
+  linkEl.textContent = '';
+  if (on) {
+    // The TV is a different device, so it needs the token in the URL (the
+    // HttpOnly cookie does not travel). It is the one the GM opened with.
+    const token = new URLSearchParams(location.search).get('token');
+    const url = `${location.origin}/table/${state.docId}${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+    linkEl.append('On the table: open ');
+    const a = document.createElement('a');
+    a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = url;
+    linkEl.appendChild(a);
+    linkEl.append(' on the TV or tablet');
+  }
   if (on) await pushTable();
   else { try { await api('DELETE', `/api/docs/${state.docId}/table`); } catch { /* already off */ } }
 }
@@ -2786,13 +2891,14 @@ document.getElementById('view-copy').onclick = () => {
 
 // ---------- projects gallery ----------
 const galleryDialog = document.getElementById('gallery-dialog');
-document.getElementById('btn-gallery').onclick = async () => {
+async function buildGallery() {
   const grid = document.getElementById('gallery-grid');
   grid.textContent = '';
   let docs = [];
-  try { docs = (await api('GET', '/api/docs')).docs; } catch (e) { statusEl.textContent = `Error: ${e.message}`; return; }
+  try { docs = (await api('GET', '/api/docs')).docs; } catch (e) { toast(e.message); return; }
   for (const d of docs) {
-    const card = document.createElement('button');
+    // A div, not a button: the card holds its own rename/delete buttons.
+    const card = document.createElement('div');
     card.className = 'card'; card.setAttribute('role', 'listitem');
     card.setAttribute('aria-current', String(d.id === state.docId));
     const img = document.createElement('img');
@@ -2802,10 +2908,48 @@ document.getElementById('btn-gallery').onclick = async () => {
     const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = d.name;
     const mt = document.createElement('div'); mt.className = 'mt';
     mt.textContent = `${d.kind} · ${d.floors.length} floor${d.floors.length === 1 ? '' : 's'}`;
-    card.append(img, nm, mt);
-    card.onclick = () => { galleryDialog.close(); if (d.id !== state.docId) { state.nav = []; updateNavBack(); openDoc(d.id); } };
+    const open = document.createElement('button');
+    open.type = 'button'; open.className = 'card-open';
+    open.append(img, nm, mt);
+    open.onclick = () => { galleryDialog.close(); if (d.id !== state.docId) { state.nav = []; updateNavBack(); openDoc(d.id); } };
+    const ren = document.createElement('button');
+    ren.type = 'button'; ren.className = 'card-act'; ren.textContent = '✎';
+    ren.title = 'Rename'; ren.setAttribute('aria-label', `Rename ${d.name}`);
+    ren.onclick = async () => {
+      const name = window.prompt('Rename project:', d.name);
+      if (name === null) return;
+      try {
+        await api('PATCH', `/api/docs/${d.id}`, { name });
+        if (d.id === state.docId) await refresh();
+        await loadDocList();
+        await buildGallery();
+      } catch (e) { toast(e.message); }
+    };
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'card-act danger'; del.textContent = '🗑';
+    del.title = 'Delete'; del.setAttribute('aria-label', `Delete ${d.name}`);
+    del.onclick = async () => {
+      if (!window.confirm(`Delete “${d.name}” and all its floors? This cannot be undone.`)) return;
+      try {
+        await api('DELETE', `/api/docs/${d.id}`);
+        if (d.id === state.docId) {
+          // The open project is gone: fall back to another, or a fresh one.
+          state.docId = await ensureDoc();
+          state.nav = []; updateNavBack();
+          await refresh();
+          subscribeDoc();
+        }
+        await loadDocList();
+        await buildGallery();
+        toast(`Deleted “${d.name}”.`, 'info');
+      } catch (e) { toast(e.message); }
+    };
+    card.append(open, ren, del);
     grid.appendChild(card);
   }
+}
+document.getElementById('btn-gallery').onclick = async () => {
+  await buildGallery();
   galleryDialog.showModal();
 };
 document.getElementById('gallery-close').onclick = () => galleryDialog.close();
@@ -2816,6 +2960,16 @@ document.getElementById('gallery-close').onclick = () => galleryDialog.close();
 // and for when the feed is down. Two windows on one server stay in sync.
 let es = null;
 let esDebounce = null;
+const isBusy = () => document.hidden || state.painting || dragging || !!document.querySelector('dialog[open]');
+// Flush a remembered external rev once we are able to refresh. Skipping a
+// refresh used to drop the rev forever, leaving the tab silently stale.
+async function catchUp() {
+  if (pendingRev <= state.rev || isBusy()) return;
+  pendingRev = 0;
+  tileCache.clear();
+  await refresh();
+  statusEl.textContent = 'Updated: this project was changed elsewhere.';
+}
 function subscribeDoc() {
   if (es) { es.close(); es = null; }
   if (!state.docId || typeof EventSource === 'undefined') return;
@@ -2823,19 +2977,26 @@ function subscribeDoc() {
   es.addEventListener('rev', (e) => {
     const rev = Number(e.data);
     if (rev <= state.rev) return;
+    pendingRev = Math.max(pendingRev, rev);
     clearTimeout(esDebounce);
-    esDebounce = setTimeout(async () => {
-      if (document.hidden || state.painting || dragging || document.querySelector('dialog[open]')) return;
-      tileCache.clear();
-      await refresh();
-      statusEl.textContent = 'Updated: this project was changed elsewhere.';
-    }, 150);
+    esDebounce = setTimeout(catchUp, 150);
+  });
+  es.addEventListener('gone', () => {
+    toast('This project was deleted in another window.', 'info');
+    state.doc = null;
   });
   es.onerror = () => { /* the poll below covers it; EventSource retries itself */ };
 }
+// Catch up the moment we become able to: the tab returns to the foreground or a
+// dialog closes (the close event does not bubble, so listen in the capture phase).
+document.addEventListener('visibilitychange', () => { if (!document.hidden) catchUp(); });
+document.addEventListener('close', (e) => {
+  if (e.target && e.target.matches && e.target.matches('dialog')) catchUp();
+}, true);
 setInterval(async () => {
+  if (pendingRev > state.rev) { await catchUp(); return; }
   if (es && es.readyState === 1) return; // the feed is doing this job
-  if (!state.doc || document.hidden || state.painting || dragging || document.querySelector('dialog[open]')) return;
+  if (!state.doc || isBusy()) return;
   try {
     const { docs } = await api('GET', '/api/docs');
     const mine = docs.find(d => d.id === state.docId);
@@ -3166,7 +3327,7 @@ document.getElementById('bk-move').onclick = async () => {
 };
 document.getElementById('bk-resize').onclick = async () => {
   if (!state.sel.size) { statusEl.textContent = 'Select rooms to resize.'; return; }
-  const d = window.prompt('Scale selected rooms by fx,fy (whole factors 1-10, about each room's top-left; e.g. "2,2")', '2,2');
+  const d = window.prompt('Scale selected rooms by fx,fy (whole factors 1-10, about each room\'s top-left; e.g. "2,2")', '2,2');
   if (d === null || !d.trim()) return;
   const [fx, fy] = d.split(',').map(v => parseInt(v.trim(), 10));
   if (!(fx >= 1 && fx <= 10 && fy >= 1 && fy <= 10)) { statusEl.textContent = 'Factors must be 1-10.'; return; }
@@ -3270,7 +3431,7 @@ async function undo() {
     tileCache.clear();
     await refresh();
   } catch (err) {
-    statusEl.textContent = err.message;
+    toast(err.message);
   }
 }
 
@@ -3317,10 +3478,16 @@ function buildPalette() {
 }
 
 window.addEventListener('resize', resizeCanvas);
+// The canvas CSS size also changes without a window resize (the era bar showing
+// or hiding, the toolbar wrapping). Observe the stage so the bitmap never
+// stretches or clips against its box.
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => resizeCanvas()).observe(document.getElementById('stage'));
+}
 
 // ---------- boot ----------
 
-(async function boot() {
+async function boot() {
   try {
     const { materials } = await api('GET', '/api/materials');
     if (materials.length) {
@@ -3336,8 +3503,19 @@ window.addEventListener('resize', resizeCanvas);
     state.docId = await ensureDoc();
     await refresh();
     await loadDocList();
+    subscribeDoc();
     setTool('paint');
   } catch (e) {
     statusEl.textContent = `Cannot reach the server: ${e.message}`;
+    // Not a dead end: the server may just be starting up. Offer a retry.
+    const t = document.createElement('div');
+    t.className = 'toast';
+    t.textContent = `Cannot reach the server: ${e.message} `;
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.textContent = 'Retry';
+    btn.onclick = () => { t.remove(); boot(); };
+    t.appendChild(btn);
+    toastsEl.appendChild(t);
   }
-})();
+}
+boot();

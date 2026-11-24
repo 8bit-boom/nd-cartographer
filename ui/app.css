@@ -46,6 +46,9 @@ canvas#gl {
 canvas#canvas {
   width: 100%; height: 100%; display: block;
   cursor: grab; background: var(--bg);
+  /* Own every pointer gesture: without this the browser claims drag/pinch and
+     cancels the pointer stream mid-stroke on touch devices. */
+  touch-action: none;
 }
 /* With WebGL2 the tiles render on #gl; #canvas is the transparent overlay. */
 body.gl canvas#canvas { background: transparent; }
@@ -56,6 +59,30 @@ canvas#canvas.panning { cursor: grabbing; }
   background: rgba(29, 32, 38, 0.85); border: 1px solid var(--line);
   border-radius: 6px; padding: 4px 10px; pointer-events: none;
 }
+
+/* On-screen zoom (touch devices have no wheel; also a motor-accessibility aid). */
+#zoomctl {
+  position: absolute; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px;
+}
+#zoomctl button {
+  width: 40px; height: 40px; font-size: 20px; line-height: 1; border-radius: 8px;
+  background: rgba(29, 32, 38, 0.9); border: 1px solid var(--line); color: var(--ink);
+  cursor: pointer;
+}
+#zoomctl button:hover { border-color: var(--accent); }
+
+/* Errors land here (role=alert), separate from the disposable tool-hint line. */
+#toasts {
+  position: absolute; left: 50%; bottom: 48px; transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: 6px; align-items: center;
+  pointer-events: none; max-width: 80%;
+}
+#toasts .toast {
+  background: #3a2020; border: 1px solid #e85a5a; color: #ffd9d9;
+  border-radius: 6px; padding: 6px 12px; pointer-events: auto;
+}
+#toasts .toast.info { background: #1e2a3a; border-color: var(--accent); color: #d9e8ff; }
+#toasts .toast button { margin-left: 8px; cursor: pointer; }
 
 #exports a { color: var(--accent); cursor: pointer; margin-left: 6px; text-decoration: none; }
 #exports a:hover { text-decoration: underline; }
@@ -213,11 +240,17 @@ dialog#new-dialog::backdrop { background: rgba(0,0,0,0.55); }
 #viewtools select, #viewtools button { font-size: 12px; padding: 2px 6px; max-width: 150px; }
 #minimap { background: rgba(20, 22, 26, 0.9); border: 1px solid var(--line); border-radius: 6px; cursor: crosshair; }
 #gallery-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; min-width: min(80vw, 760px); max-height: 60vh; overflow: auto; }
-#gallery-grid .card { background: var(--panel, #1d2026); border: 1px solid var(--line); border-radius: 8px; padding: 6px; cursor: pointer; text-align: left; color: inherit; }
+#gallery-grid .card { position: relative; background: var(--panel, #1d2026); border: 1px solid var(--line); border-radius: 8px; padding: 6px; text-align: left; color: inherit; }
 #gallery-grid .card[aria-current=true] { outline: 2px solid var(--accent); }
+#gallery-grid .card-open { display: block; width: 100%; background: none; border: none; padding: 0; color: inherit; cursor: pointer; text-align: left; }
 #gallery-grid .card img { width: 100%; height: 100px; object-fit: contain; background: #14161a; border-radius: 4px; display: block; }
 #gallery-grid .card .nm { font-weight: 600; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #gallery-grid .card .mt { font-size: 11px; color: var(--dim); }
+#gallery-grid .card-act { position: absolute; top: 8px; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--line); background: rgba(20, 22, 26, 0.85); color: var(--ink); cursor: pointer; font-size: 14px; line-height: 1; }
+#gallery-grid .card-act:not(.danger) { right: 40px; }
+#gallery-grid .card-act.danger { right: 8px; }
+#gallery-grid .card-act:hover { border-color: var(--accent); }
+#gallery-grid .card-act.danger:hover { border-color: #e85a5a; color: #e85a5a; }
 #symbar[hidden] { display: none; }
 
 #biomebar { position: absolute; left: 10px; top: 10px; z-index: 4; max-width: calc(100% - 20px);

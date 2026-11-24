@@ -10,6 +10,10 @@
   #wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
   #map { max-width: 100vw; max-height: 100vh; object-fit: contain; image-rendering: auto; display: none; }
   #msg { font-size: 1.4rem; text-align: center; padding: 2rem; }
+  #fs { position: fixed; top: 10px; right: 10px; width: 40px; height: 40px; border-radius: 8px;
+        border: 1px solid #333; background: rgba(20,22,26,.6); color: #9aa4b2; font-size: 18px;
+        cursor: pointer; opacity: .5; }
+  #fs:hover { opacity: 1; }
 </style>
 </head>
 <body>
@@ -17,6 +21,7 @@
   <img id="map" alt="The map as the players see it">
   <div id="msg" role="status">Waiting for the GM…</div>
 </div>
+<button id="fs" type="button" title="Fullscreen" aria-label="Toggle fullscreen">⛶</button>
 <script>
 'use strict';
 const DOC = '__DOC__';
@@ -57,19 +62,29 @@ img.addEventListener('click', async (e) => {
   } catch { /* the tick loop reports connection trouble */ }
 });
 
+// Size the preview to the display so it is sharp on a 4K TV (a fixed ppc=24 was
+// soft). The picture spans 2*radius+1 cells; fill the larger screen dimension,
+// capped at the server's preview limit (64 px/cell).
+function ppcFor(st) {
+  const span = 2 * st.radius + 1;
+  const dim = Math.max(screen.width, screen.height) * (window.devicePixelRatio || 1);
+  return Math.max(8, Math.min(64, Math.round(dim / span)));
+}
 function urlFor(st, frame) {
-  const q = new URLSearchParams({ floor: st.floor, x: st.x, y: st.y, radius: st.radius, darkness: st.darkness, ppc: 24, frame });
+  const q = new URLSearchParams({ floor: st.floor, x: st.x, y: st.y, radius: st.radius, darkness: st.darkness, ppc: ppcFor(st), frame });
   return `/api/docs/${DOC}/preview?${q}`;
 }
 // Three drifting water frames cycle while the spot stands still (plan 21.10).
 const FRAMES = [0, 1, 2];
 let frameIdx = 0;
+let delay = 1500;
 
 async function tick() {
   try {
     const res = await fetch(`/api/docs/${DOC}/table`, { cache: 'no-store' });
     if (!res.ok) throw new Error(String(res.status));
     const t = await res.json();
+    img.style.opacity = '';
     lastState = t.on ? t.state : null;
     document.title = t.name ? `${t.name} - table view` : 'Table view';
     if (!t.on) {
@@ -81,20 +96,34 @@ async function tick() {
         const next = new Image();
         next.onload = () => { img.src = next.src; img.style.display = 'block'; msg.style.display = 'none'; shown = key; };
         next.src = urlFor(t.state, FRAMES[0]) + `&rev=${t.rev}`;
-      } else if (lastState) {
-        // Same spot: cycle the water frames.
+      } else if (lastState && !document.hidden) {
+        // Same spot: cycle the water frames (paused while the tab is hidden).
         frameIdx = (frameIdx + 1) % FRAMES.length;
         const next = new Image();
         next.onload = () => { img.src = next.src; };
         next.src = urlFor(t.state, FRAMES[frameIdx]) + `&rev=${t.rev}`;
       }
     }
+    delay = 1500;   // healthy: back to the normal cadence
   } catch {
     msg.style.display = ''; msg.textContent = 'Lost touch with the studio; trying again…';
+    img.style.opacity = '0.35';   // dim the stale picture so it is not mistaken for live
+    delay = Math.min(delay * 2, 15000);   // back off while the server is away
   }
+  setTimeout(tick, delay);
 }
 tick();
-setInterval(tick, 1500);
+
+// Fullscreen for a TV, and keep the screen awake on a tablet where supported.
+document.getElementById('fs').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+};
+async function keepAwake() {
+  try { if ('wakeLock' in navigator) await navigator.wakeLock.request('screen'); } catch { /* not allowed */ }
+}
+keepAwake();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) keepAwake(); });
 </script>
 </body>
 </html>
