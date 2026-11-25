@@ -7,6 +7,6 @@ pub mod rooms;
 
 pub use client::{
     Bridge, BridgeError, ImageJob, ImageRequest, Probe, PublishMap, PublishRegion, PublishReport,
-    Published,
+    Published, WorldContext,
 };
 pub use direct::{plain_client, DirectChat};

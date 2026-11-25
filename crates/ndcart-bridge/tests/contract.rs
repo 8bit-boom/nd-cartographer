@@ -938,3 +938,36 @@ async fn ai_status_reports_the_backend_and_model() {
     assert_eq!(st["backend"], "unsloth");
     assert_eq!(st["model"], "unsloth/gemma-4-26B");
 }
+
+#[tokio::test]
+async fn world_context_retrieves_lore_with_the_gm_session() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/ai/world-context-smart"))
+        .and(body_json(
+            json!({"query": "the drowned abbey", "limit": 12, "notes_limit": 4}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "context": "- [location] The Drowned Abbey: a flooded monastery.",
+            "count": 1,
+            "notes": 0,
+            "entities": [{"id": 7, "name": "The Drowned Abbey", "kind": "location"}]
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let bridge = Bridge::with_session(&s.uri(), Some("world-a"), "gm").unwrap();
+    let wc = bridge
+        .world_context("the drowned abbey", 12, 4)
+        .await
+        .unwrap();
+    assert!(wc.context.contains("Drowned Abbey"));
+    assert_eq!(wc.count, 1);
+    assert_eq!(
+        wc.entities,
+        vec![(7, "The Drowned Abbey".to_string(), "location".to_string())]
+    );
+    // Rides the GM session — no password login.
+    let reqs = s.received_requests().await.unwrap();
+    assert!(reqs.iter().all(|r| r.url.path() != "/api/login"));
+}

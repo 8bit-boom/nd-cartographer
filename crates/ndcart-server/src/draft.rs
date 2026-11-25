@@ -307,6 +307,24 @@ impl Backend {
             }
         }
     }
+
+    /// World lore relevant to `query` via nd-world's RAG (nd-world only): matched
+    /// entities, notes and rules, clipped to keep the prompt moderate. The caller
+    /// treats a failure as "no extra lore" rather than a hard error.
+    pub async fn world_context(&self, query: &str) -> Result<String, String> {
+        match self {
+            Backend::World(b, _) => {
+                let wc = b
+                    .world_context(query, 12, 4)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(wc.context.chars().take(6000).collect())
+            }
+            Backend::Direct(_) => {
+                Err("world lore needs nd-world (this is a standalone model)".into())
+            }
+        }
+    }
 }
 
 /// What a draft may lean on besides the prompt.
@@ -316,16 +334,21 @@ pub struct Context {
     pub tone: Option<String>,
     /// Location names to reuse where they fit.
     pub locations: Vec<String>,
-    /// Fetch the world's location names from nd-world before asking.
+    /// Fetch the world's lore from nd-world before asking.
     pub lore: bool,
+    /// Retrieved world lore (RAG) relevant to the prompt, when `lore` is on.
+    pub world_context: Option<String>,
 }
 
 impl Context {
-    /// Fill in the lore if it was asked for (a failure is reported, not ignored).
-    async fn with_lore(&self, backend: &Backend) -> Result<Context, String> {
+    /// Fill in the lore if it was asked for. Location names are required (a failure
+    /// is reported); the RAG blob is a bonus — if retrieval fails (e.g. a vault
+    /// world), draft on the names alone rather than blocking.
+    async fn with_lore(&self, backend: &Backend, query: &str) -> Result<Context, String> {
         let mut c = self.clone();
         if c.lore {
             c.locations = backend.locations().await?;
+            c.world_context = backend.world_context(query).await.ok();
         }
         Ok(c)
     }
@@ -347,6 +370,15 @@ pub fn with_context(base: &str, ctx: &Context) -> String {
             names.join("; ")
         ));
     }
+    if let Some(wc) = ctx
+        .world_context
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        out.push_str(&format!(
+            "\n\nRelevant world lore and notes (ground names and details in this; do not invent beyond what is here):\n{wc}"
+        ));
+    }
     out
 }
 
@@ -361,7 +393,7 @@ fn too_long(prompt: &str) -> Result<(), String> {
 pub async fn draft(cfg: &Config, prompt: &str, ctx: &Context) -> Result<MapSpec, String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
-    let system = with_context(SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
+    let system = with_context(SYSTEM_PROMPT, &ctx.with_lore(&backend, prompt).await?);
     draft_with(prompt, 2, |user| {
         let (backend, system) = (&backend, system.clone());
         async move { backend.chat(&system, &user).await }
@@ -377,7 +409,7 @@ pub async fn draft_world(
 ) -> Result<crate::worldspec::WorldSpec, String> {
     too_long(prompt)?;
     let backend = Backend::connect(cfg).await?;
-    let system = with_context(WORLD_SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
+    let system = with_context(WORLD_SYSTEM_PROMPT, &ctx.with_lore(&backend, prompt).await?);
     draft_loop(
         prompt,
         2,
@@ -451,7 +483,10 @@ pub async fn refine(
 ) -> Result<MapSpec, String> {
     too_long(instruction)?;
     let backend = Backend::connect(cfg).await?;
-    let system = with_context(REFINE_SYSTEM_PROMPT, &ctx.with_lore(&backend).await?);
+    let system = with_context(
+        REFINE_SYSTEM_PROMPT,
+        &ctx.with_lore(&backend, instruction).await?,
+    );
     let first = refine_user_turn(current, pins, instruction)?;
     let judge = judge_refine(current, pins.to_vec());
     // The repair rounds quote the complaint after the same current map and request.
@@ -697,6 +732,7 @@ mod tests {
             tone: Some("gritty cyberpunk".into()),
             locations: vec!["Port Neon".into(), "The Drowned Abbey".into()],
             lore: false,
+            world_context: None,
         };
         let s = with_context(SYSTEM_PROMPT, &ctx);
         assert!(
@@ -704,6 +740,23 @@ mod tests {
                 && s.contains("Port Neon; The Drowned Abbey")
                 && s.starts_with(SYSTEM_PROMPT)
         );
+    }
+
+    #[test]
+    fn world_lore_is_added_to_the_system_prompt_when_present() {
+        let ctx = Context {
+            world_context: Some("- [location] The Drowned Abbey: a flooded monastery.".into()),
+            ..Default::default()
+        };
+        let s = with_context(SYSTEM_PROMPT, &ctx);
+        assert!(s.contains("Relevant world lore and notes"), "{s}");
+        assert!(s.contains("The Drowned Abbey: a flooded monastery"));
+        // Blank lore adds nothing.
+        let empty = Context {
+            world_context: Some("   ".into()),
+            ..Default::default()
+        };
+        assert_eq!(with_context(SYSTEM_PROMPT, &empty), SYSTEM_PROMPT);
     }
 
     #[test]

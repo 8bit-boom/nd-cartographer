@@ -164,6 +164,16 @@ pub struct PublishRegion {
 
 pub const OVERLAY_CAP: usize = 500;
 
+/// nd-world's retrieved world lore for a query: a prompt-ready `context` blob,
+/// the number of matched entities (`count`), and the matched `(id, name, kind)`
+/// list for attribution. From `POST /api/ai/world-context-smart`.
+#[derive(Debug, Clone)]
+pub struct WorldContext {
+    pub context: String,
+    pub count: usize,
+    pub entities: Vec<(i64, String, String)>,
+}
+
 pub struct Bridge {
     http: Client,
     base: String,
@@ -579,6 +589,67 @@ impl Bridge {
             .filter_map(|e| e.get("name").and_then(Value::as_str))
             .map(str::to_string)
             .collect())
+    }
+
+    /// Retrieve world lore relevant to `query` (`POST /api/ai/world-context-smart`,
+    /// GM-only): nd-world's FTS5 RAG returns a prompt-ready context blob (matched
+    /// entities with excerpts, notes, rules, priority entities, PCs) plus the
+    /// matched entity list for attribution. Rides the caller's GM session when
+    /// embedded — the same retrieval nd-world's own AI Chat uses per question.
+    pub async fn world_context(
+        &self,
+        query: &str,
+        limit: usize,
+        notes_limit: usize,
+    ) -> Result<WorldContext, BridgeError> {
+        let body = json!({"query": query, "limit": limit, "notes_limit": notes_limit});
+        let resp = self
+            .send(
+                self.req(Method::POST, "/api/ai/world-context-smart")
+                    .json(&body),
+            )
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        let v: Value = check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("world-context-smart answer: {e}")))?;
+        let context = v
+            .get("context")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let count = v.get("count").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let entities = v
+            .get("entities")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| {
+                        Some((
+                            e.get("id")?.as_i64()?,
+                            e.get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            e.get("kind")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(WorldContext {
+            context,
+            count,
+            entities,
+        })
     }
 
     /// Queue an image on nd-world's durable imagegen jobs

@@ -2981,6 +2981,7 @@ async fn draft_context(app: &App, doc: &Option<String>, lore: bool) -> draft::Co
         tone,
         locations: Vec::new(),
         lore,
+        world_context: None,
     }
 }
 
@@ -3129,6 +3130,10 @@ async fn doctor_checks(State(app): State<App>) -> Json<serde_json::Value> {
 struct AskBody {
     #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
     question: String,
+    /// Also search the world's lore (nd-world RAG), not just the maps.
+    #[serde(default)]
+    #[cfg_attr(not(feature = "bridge"), allow(dead_code))]
+    world: bool,
 }
 
 /// `POST /api/ask` `{question}` — ask your maps a question in plain words. The
@@ -3154,15 +3159,36 @@ async fn ask_maps(
         let cfg = app
             .resolve_ai()
             .map_err(|m| ApiError(CoreError::NotFound(m)))?;
-        let turn = {
+        let digest = {
             let store = app.store.read().await;
-            ask::user_turn(&ask::digest(&store), q)
+            ask::digest(&store)
         };
         let backend = draft::Backend::connect(&cfg)
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;
+        // Optionally ground the answer in the world's lore too (nd-world RAG).
+        // Best-effort: a standalone model or a retrieval failure falls back to maps only.
+        let world_lore = if b.world {
+            match &backend {
+                draft::Backend::World(bridge, _) => bridge
+                    .world_context(q, 12, 4)
+                    .await
+                    .ok()
+                    .map(|w| w.context.chars().take(6000).collect::<String>()),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let (system, turn) = match world_lore {
+            Some(wc) if !wc.trim().is_empty() => (
+                ask::SYSTEM_PROMPT_WORLD,
+                ask::user_turn_with_world(&digest, &wc, q),
+            ),
+            _ => (ask::SYSTEM_PROMPT, ask::user_turn(&digest, q)),
+        };
         let answer = backend
-            .chat(ask::SYSTEM_PROMPT, &turn)
+            .chat(system, &turn)
             .await
             .map_err(|m| ApiError(CoreError::Invalid(m)))?;
         Ok(Json(serde_json::json!({ "answer": answer.trim() })))

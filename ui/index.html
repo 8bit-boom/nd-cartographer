@@ -192,7 +192,7 @@
       <button id="spec-draft" type="button" title="Ask nd-world's AI for a spec (needs the studio to be configured for nd-world)">✨ Draft with AI</button>
     </div>
     <p id="spec-ai" class="dim" role="status"></p>
-    <label class="dim"><input type="checkbox" id="spec-lore"> use the place names already in my world (nd-world only)</label>
+    <label class="dim"><input type="checkbox" id="spec-lore"> ground in my world's lore &amp; place names (nd-world only)</label>
     <textarea id="spec-text" rows="12" spellcheck="false" aria-label="MapSpec JSON"></textarea>
     <div class="row">
       <button id="spec-example" type="button">Insert an example</button>
@@ -246,8 +246,9 @@
   </dialog>
   <dialog id="ask-dialog">
     <h3>Ask your maps</h3>
-    <p class="dim">Answers come only from what is written in your projects: room names, notes, markers, zones, regions.</p>
+    <p class="dim">Answers come from what is written in your projects (room names, notes, markers, zones, regions) — and, with the toggle below, your world's lore.</p>
     <input id="ask-q" type="text" maxlength="1000" placeholder="Which map has the smugglers' ledger?" aria-label="Your question" style="width:100%;box-sizing:border-box">
+    <label class="dim"><input type="checkbox" id="ask-world"> also search my world's lore (nd-world only)</label>
     <div class="row"><button id="ask-go" type="button" class="primary">Ask</button><span id="ask-msg" class="dim" role="status"></span></div>
     <p id="ask-answer" style="white-space:pre-wrap"></p>
     <menu><button id="ask-close" type="button">Close</button></menu>
