@@ -860,3 +860,35 @@ async fn every_entity_is_listed_with_its_id_and_kind() {
         ]
     );
 }
+
+#[tokio::test]
+async fn with_session_forwards_the_gm_cookie_without_logging_in() {
+    // Embedded in nd-world: the caller is already the signed-in GM, so the bridge
+    // reuses their session cookie — no /api/login, no password.
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tables.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"tables": []})))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let bridge = Bridge::with_session(&s.uri(), Some("world-a"), "gm-session-token").unwrap();
+    let tables = bridge.tables().await.unwrap();
+    assert!(tables.get("tables").is_some());
+
+    let reqs = s.received_requests().await.unwrap();
+    assert!(reqs.iter().all(|r| r.url.path() != "/api/login"));
+    let req = reqs
+        .iter()
+        .find(|r| r.url.path() == "/api/tables.json")
+        .unwrap();
+    let cookie = req.headers.get("cookie").unwrap().to_str().unwrap();
+    assert!(
+        cookie.contains("session=gm-session-token"),
+        "cookie was {cookie}"
+    );
+    assert_eq!(
+        req.url.query_pairs().find(|(k, _)| k == "w").unwrap().1,
+        "world-a"
+    );
+}

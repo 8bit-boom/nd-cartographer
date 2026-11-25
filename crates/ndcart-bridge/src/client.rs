@@ -233,6 +233,35 @@ impl Bridge {
         })
     }
 
+    /// A bridge that authenticates with an existing nd-world GM session cookie
+    /// instead of logging in with a password. Used when the studio is compiled
+    /// into nd-world: the caller is already the signed-in GM, so their `session`
+    /// cookie is forwarded as-is — no password is ever stored. `session_cookie`
+    /// is the cookie's value (the part after `session=`).
+    pub fn with_session(
+        base_url: &str,
+        world: Option<&str>,
+        session_cookie: &str,
+    ) -> Result<Self, BridgeError> {
+        let url = base_url
+            .parse::<reqwest::Url>()
+            .map_err(|e| BridgeError::Protocol(e.to_string()))?;
+        let jar = std::sync::Arc::new(reqwest::cookie::Jar::default());
+        jar.add_cookie_str(&format!("session={session_cookie}; Path=/"), &url);
+        let http = Client::builder()
+            .cookie_provider(jar)
+            .redirect(redirect::Policy::none())
+            .user_agent(concat!("ndcart/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| BridgeError::Protocol(e.to_string()))?;
+        Ok(Bridge {
+            http,
+            base: base_url.trim_end_matches('/').to_string(),
+            world: world.map(str::to_string),
+        })
+    }
+
     /// Every request targets the pinned world with `?w=<slug>` (overrides the cookie).
     fn req(&self, method: Method, path: &str) -> RequestBuilder {
         let r = self.http.request(method, format!("{}{}", self.base, path));
