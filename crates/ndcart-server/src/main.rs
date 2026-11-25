@@ -44,6 +44,24 @@ const INDEX_HTML: &str = include_str!("../../../ui/index.html");
 const APP_JS: &str = include_str!("../../../ui/app.js");
 const APP_CSS: &str = include_str!("../../../ui/app.css");
 
+/// Optional URL prefix when served behind a reverse proxy (`ND_CARTO_BASE_PATH`,
+/// e.g. `/cartographer/studio` inside nd-world). Empty at the root. Routes nest
+/// under it and the UI's `<base>` tag carries it, so asset/API URLs resolve back
+/// through the proxy instead of the proxy host's root.
+static BASE_PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+fn base_path() -> &'static str {
+    BASE_PATH.get().map(String::as_str).unwrap_or("")
+}
+/// The `<base href>` value: the prefix with a trailing slash, or "/" at the root.
+fn base_href() -> String {
+    let b = base_path();
+    if b.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{b}/")
+    }
+}
+
 /// (doc, floor, rev) -> derived walls.
 type WallCache = HashMap<(String, String, u64), Arc<Vec<Wall>>>;
 
@@ -198,7 +216,7 @@ async fn health() -> Json<serde_json::Value> {
 /// matching If-None-Match still gets a cheap 304.
 fn shell_response(
     content_type: &'static str,
-    body: &'static str,
+    body: &str,
     req_headers: &header::HeaderMap,
 ) -> Response {
     let etag = format!(
@@ -218,13 +236,14 @@ fn shell_response(
             (header::CACHE_CONTROL, "no-cache".to_string()),
             (header::ETAG, etag),
         ],
-        body,
+        body.to_string(),
     )
         .into_response()
 }
 
 async fn index(headers: header::HeaderMap) -> Response {
-    shell_response("text/html; charset=utf-8", INDEX_HTML, &headers)
+    let html = INDEX_HTML.replace("__ND_BASE__", &base_href());
+    shell_response("text/html; charset=utf-8", &html, &headers)
 }
 
 async fn app_js(headers: header::HeaderMap) -> Response {
@@ -3739,7 +3758,9 @@ async fn table_page(Path(id): Path<String>) -> Response {
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        TABLE_HTML.replace("__DOC__", &id),
+        TABLE_HTML
+            .replace("__DOC__", &id)
+            .replace("__ND_BASE__", &base_href()),
     )
         .into_response()
 }
@@ -4257,7 +4278,11 @@ fn cached_walls(
 }
 
 fn build_router(app: App) -> Router {
-    Router::new()
+    build_router_at(app, base_path())
+}
+
+fn build_router_at(app: App, b: &str) -> Router {
+    let inner = Router::new()
         .route("/health", get(health))
         .route("/", get(index))
         .route("/app.js", get(app_js))
@@ -4392,7 +4417,21 @@ fn build_router(app: App) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(
             convert::MAX_INPUT_BYTES,
         ))
-        .with_state(app)
+        .with_state(app);
+    // Behind a reverse proxy the whole studio lives under a prefix; the proxy
+    // forwards the full path, so nesting here makes the routes match it.
+    if b.is_empty() {
+        inner
+    } else {
+        // axum's nest answers the index at the bare prefix; redirect the
+        // trailing-slash form (the natural iframe src) to it.
+        let slash = format!("{b}/");
+        let target = b.to_string();
+        Router::new().nest(b, inner).route(
+            &slash,
+            get(move || async move { axum::response::Redirect::to(&target) }),
+        )
+    }
 }
 
 // ---------- bench ----------
@@ -4743,6 +4782,19 @@ async fn main() {
                     }
                 }
             });
+            // Optional reverse-proxy prefix (nd-world embeds the studio under
+            // /cartographer/studio). Normalised to a leading slash, no trailing slash.
+            if let Ok(bp) = std::env::var("ND_CARTO_BASE_PATH") {
+                let bp = bp.trim().trim_end_matches('/');
+                if !bp.is_empty() {
+                    let bp = if bp.starts_with('/') {
+                        bp.to_string()
+                    } else {
+                        format!("/{bp}")
+                    };
+                    let _ = BASE_PATH.set(bp);
+                }
+            }
             let mut router = build_router(app);
             if !auth::is_loopback(&listen) {
                 let (token, fresh) = auth::resolve_token(app_data_dir.as_deref());
@@ -5295,6 +5347,24 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn base_path_nests_every_route_under_the_prefix() {
+        // Behind nd-world's proxy the studio lives under /cartographer/studio.
+        let router = build_router_at(test_app(), "/cartographer/studio");
+        let (st, _) = call(&router, "GET", "/cartographer/studio/health", vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, _) = call(&router, "GET", "/cartographer/studio/api/docs", vec![]).await;
+        assert_eq!(st, StatusCode::OK);
+        // The un-prefixed paths no longer answer (the proxy always sends the prefix).
+        let (st, _) = call(&router, "GET", "/health", vec![]).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = call(&router, "GET", "/api/docs", vec![]).await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        // The shell carries the base tag and the URL shim.
+        assert!(INDEX_HTML.contains("<base href=\"__ND_BASE__\">"));
+        assert!(APP_JS.contains("const ND_BASE"));
     }
 
     #[tokio::test]
