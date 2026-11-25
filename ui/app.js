@@ -2406,6 +2406,7 @@ async function showAiStatus() {
     btn.disabled = st.mode === 'off';
     btn.title = st.mode === 'off' ? st.detail : 'Ask the AI for a spec';
     document.getElementById('spec-lore').disabled = st.mode !== 'nd-world';
+    document.getElementById('ask-world').disabled = st.mode !== 'nd-world';
   } catch { el.textContent = ''; }
 }
 function openSpecDialog() { document.getElementById('spec-msg').textContent = ''; specDialog.showModal(); showAiStatus(); }
@@ -2578,14 +2579,14 @@ document.getElementById('art-close').onclick = () => artDialog.close();
 
 // ---------- ask your maps ----------
 const askDialog = document.getElementById('ask-dialog');
-document.getElementById('btn-ask').onclick = () => { document.getElementById('ask-answer').textContent = ''; document.getElementById('ask-msg').textContent = ''; askDialog.showModal(); };
+document.getElementById('btn-ask').onclick = () => { document.getElementById('ask-answer').textContent = ''; document.getElementById('ask-msg').textContent = ''; showAiStatus(); askDialog.showModal(); };
 async function askMaps() {
   const q = document.getElementById('ask-q').value.trim();
   if (!q) return;
   const go = document.getElementById('ask-go'), msg = document.getElementById('ask-msg'), out = document.getElementById('ask-answer');
   go.disabled = true; msg.textContent = 'Reading your maps…'; out.textContent = '';
   try {
-    const answer = (await api('POST', '/api/ask', { question: q })).answer;
+    const answer = (await api('POST', '/api/ask', { question: q, world: document.getElementById('ask-world').checked })).answer;
     // Cited rooms (SEE: project | floor | room) become Go buttons that jump.
     out.textContent = '';
     const lines = answer.split('\n');
@@ -3473,7 +3474,7 @@ document.getElementById('bk-refine').onclick = async () => {
   if (instruction === null || !instruction.trim()) return;
   statusEl.textContent = 'Asking the AI to revise this floor…';
   try {
-    const { spec } = await api('POST', `/api/docs/${state.docId}/refine`, { floor: state.floorId, pins: [...state.sel], instruction: instruction.trim() });
+    const { spec } = await api('POST', `/api/docs/${state.docId}/refine`, { floor: state.floorId, pins: [...state.sel], instruction: instruction.trim(), lore: document.getElementById('spec-lore').checked });
     document.querySelector('input[name=spec-mode][value=battle]').checked = true;
     document.getElementById('spec-text').value = JSON.stringify(spec, null, 2);
     openSpecDialog();

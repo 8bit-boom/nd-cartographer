@@ -101,6 +101,21 @@ pub fn user_turn(digest: &str, question: &str) -> String {
     )
 }
 
+/// Like [`SYSTEM_PROMPT`], but the answer may also draw on retrieved world lore.
+pub const SYSTEM_PROMPT_WORLD: &str =
+    "You answer questions about a game master's maps and world using ONLY the world lore and maps \
+digest below. Name the project and floor when you cite a map, and the entity when you cite world lore. \
+If neither contains the answer, say that the maps and world do not say, and do not invent places or \
+details. Be brief.";
+
+/// The user turn with retrieved world lore prepended to the maps digest.
+pub fn user_turn_with_world(digest: &str, world_lore: &str, question: &str) -> String {
+    format!(
+        "WORLD LORE\n{world_lore}\n\nDIGEST OF THE MAPS\n{digest}\nQUESTION: {}",
+        question.trim()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
