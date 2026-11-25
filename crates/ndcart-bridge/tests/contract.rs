@@ -892,3 +892,49 @@ async fn with_session_forwards_the_gm_cookie_without_logging_in() {
         "world-a"
     );
 }
+
+#[tokio::test]
+async fn models_lists_nd_worlds_catalogue() {
+    let s = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/ai/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                {"id": "unsloth/gemma-4-26B", "label": "Gemma", "loaded": true},
+                {"id": "unsloth/Qwen3-4B", "loaded": false}
+            ],
+            "default": "unsloth/gemma-4-26B"
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let bridge = Bridge::with_session(&s.uri(), Some("world-a"), "gm").unwrap();
+    let models = bridge.models().await.unwrap();
+    assert_eq!(
+        models,
+        vec![
+            "unsloth/gemma-4-26B".to_string(),
+            "unsloth/Qwen3-4B".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn ai_status_reports_the_backend_and_model() {
+    let s = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/ai/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ok",
+            "backend": "unsloth",
+            "model": "unsloth/gemma-4-26B",
+            "loaded_models": ["unsloth/gemma-4-26B"]
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let bridge = Bridge::with_session(&s.uri(), Some("world-a"), "gm").unwrap();
+    let st = bridge.ai_status().await.unwrap();
+    assert_eq!(st["backend"], "unsloth");
+    assert_eq!(st["model"], "unsloth/gemma-4-26B");
+}

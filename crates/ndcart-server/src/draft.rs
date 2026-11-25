@@ -233,7 +233,8 @@ impl Config {
             server: Some(session.server.clone()),
             world: session.world.clone(),
             email: None,
-            model: env("ND_CARTO_MODEL"),
+            // The model picked from nd-world's catalogue (env keeps the final word).
+            model: env("ND_CARTO_MODEL").or_else(|| stored.world_model.clone()),
             direct,
             key: env("ND_CARTO_LLM_KEY").or_else(|| stored.key.clone()),
             session: Some(session),

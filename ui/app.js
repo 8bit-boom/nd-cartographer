@@ -58,6 +58,9 @@ const state = {
   materialId: null,
   painting: null,   // in-progress stroke: Set of "x,y"
   pendingFlush: null,
+  // Finished paint/brush previews kept on screen until the server's baked tiles
+  // arrive ({rev, draw(ctx)}), so a stroke never blanks out while the bake trails.
+  baking: [],
 };
 
 // A rev pushed by the SSE feed while we were busy (dialog open, mid-stroke, tab
@@ -309,6 +312,7 @@ function buildFloorBar() {
 async function selectFloor(id) {
   if (id === state.floorId) return;
   state.floorId = id;
+  state.painting = null; state.baking = [];
   tileCache.clear();
   await refresh();
 }
@@ -833,6 +837,7 @@ async function loadDocList() {
 async function openDoc(id) {
   state.docId = id;
   state.px = 0; state.py = 0; state.z = 0;
+  state.painting = null; state.baking = [];
   tileCache.clear();
   await refresh();
   await loadDocList();
@@ -980,9 +985,15 @@ function render() {
   drawMeasure();
   drawStrokePreview();
   drawLiveStroke();
+  drawBaking();
   drawTerrainOverlay();
   drawOverlayDraft();
-  Promise.allSettled(pending).then(() => { drawStrokePreview(); drawLiveStroke(); drawTerrainOverlay(); drawOverlayDraft(); drawPreview(); drawMinimap(); });  drawPreview();
+  Promise.allSettled(pending).then(() => {
+    // The baked tiles have arrived: drop the paint/brush previews they replace,
+    // so the preview lingered exactly as long as the bake took (no blank gap).
+    state.baking = state.baking.filter((e) => e.rev > state.rev);
+    drawStrokePreview(); drawLiveStroke(); drawBaking(); drawTerrainOverlay(); drawOverlayDraft(); drawPreview(); drawMinimap();
+  });  drawPreview();
   drawMinimap();
 }
 
@@ -1108,18 +1119,29 @@ function measureFinish(closed) {
 function measureClear() { state.measure = null; render(); }
 
 // hook keyboard: Enter closes, Esc clears (the KEYS table drives both).
-function drawStrokePreview() {
-  if (!state.painting) return;
+// Painted cells as a translucent block of the material colour. Shared by the live
+// stroke preview and the "baking" overlay that lingers until the tiles catch up.
+function drawCells(g, cells, color) {
   const s = ppc();
-  ctx.save();
-  ctx.fillStyle = state.color;
-  ctx.globalAlpha = 0.55;
-  for (const key of state.painting) {
+  g.save();
+  g.fillStyle = color;
+  g.globalAlpha = 0.55;
+  for (const key of cells) {
     const [x, y] = key.split(',').map(Number);
     const [sx, sy] = worldToScreen(x * s, y * s);
-    ctx.fillRect(sx, sy, s, s);
+    g.fillRect(sx, sy, s, s);
   }
-  ctx.restore();
+  g.restore();
+}
+
+function drawStrokePreview() {
+  if (state.painting) drawCells(ctx, state.painting, state.color);
+}
+
+// Finished previews waiting for the bake: drawn over the loading tiles, then
+// dropped (in render) once the tiles at their rev have arrived.
+function drawBaking() {
+  for (const e of state.baking) e.draw(ctx);
 }
 
 // ---------- tools ----------
@@ -1208,20 +1230,27 @@ async function postOps(ops) {
     tileCache.clear();
     await refresh();
     scheduleAutoSave();
+    return res.rev;
   } catch (e) {
     toast(e.message);
+    return undefined;
   }
 }
 
 async function flushStroke() {
   if (!state.painting || state.painting.size === 0) return;
-  const cells = [...state.painting].map((k) => {
+  const painted = new Set(state.painting);
+  const color = state.color;
+  const cells = [...painted].map((k) => {
     const [x, y] = k.split(',').map(Number);
     return { x, y };
   });
   state.painting = null;
   const item = activeItem();
   const spaceId = item.id || ('sp_' + item.color.slice(1).toLowerCase());
+  // Keep the painted region on screen until the baked tiles arrive (no blank gap).
+  const entry = { rev: Infinity, draw: (g) => drawCells(g, painted, color) };
+  state.baking.push(entry);
   const ops = [{
     t: 'batch',
     ops: [
@@ -1229,7 +1258,9 @@ async function flushStroke() {
       { t: 'paint_cells', cells, space: spaceId },
     ],
   }];
-  await postOps(ops);
+  const rev = await postOps(ops);
+  if (rev == null) state.baking = state.baking.filter((e) => e !== entry);
+  else entry.rev = rev;
   catchUp();
 }
 
@@ -1344,35 +1375,39 @@ function addStrokePoint(wx, wy, e) {
   render();
 }
 
-function drawLiveStroke() {
-  if (!liveStroke || liveStroke.points.length === 0) return;
-  const b = brushSettings();
+// A freehand stroke (pressure/tilt aware). Shared by the live preview and the
+// "baking" overlay; `b` is the brush settings captured when the stroke was made.
+function drawBrushStroke(g, pts, b, erase, color) {
+  if (!pts || pts.length === 0) return;
   const s = ppc();
-  ctx.save();
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.strokeStyle = liveStroke.erase ? '#d8e2ec' : state.color;
-  ctx.fillStyle = ctx.strokeStyle;
-  ctx.globalAlpha = (liveStroke.erase ? 0.35 : 0.8) * b.opacity;
-  const pts = liveStroke.points;
+  g.save();
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+  g.strokeStyle = erase ? '#d8e2ec' : color;
+  g.fillStyle = g.strokeStyle;
+  g.globalAlpha = (erase ? 0.35 : 0.8) * b.opacity;
   const w = (p) => b.size * (0.35 + 0.65 * p.pressure) * (1 + 0.5 * p.tilt) * s;
   for (let i = 0; i < pts.length; i++) {
     const [sx, sy] = worldToScreen(pts[i].x * s, pts[i].y * s);
-    if (b.brush === 'scatter' && !liveStroke.erase) {
-      ctx.beginPath();
-      ctx.arc(sx, sy, Math.max(1.5, w(pts[i]) * 0.1), 0, Math.PI * 2);
-      ctx.fill();
+    if (b.brush === 'scatter' && !erase) {
+      g.beginPath();
+      g.arc(sx, sy, Math.max(1.5, w(pts[i]) * 0.1), 0, Math.PI * 2);
+      g.fill();
       continue;
     }
     if (i > 0) {
       const [px, py] = worldToScreen(pts[i - 1].x * s, pts[i - 1].y * s);
-      ctx.lineWidth = Math.max(1, w(pts[i]));
-      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(sx, sy); ctx.stroke();
+      g.lineWidth = Math.max(1, w(pts[i]));
+      g.beginPath(); g.moveTo(px, py); g.lineTo(sx, sy); g.stroke();
     } else {
-      ctx.beginPath(); ctx.arc(sx, sy, Math.max(0.5, w(pts[i]) / 2), 0, Math.PI * 2); ctx.fill();
+      g.beginPath(); g.arc(sx, sy, Math.max(0.5, w(pts[i]) / 2), 0, Math.PI * 2); g.fill();
     }
   }
-  ctx.restore();
+  g.restore();
+}
+
+function drawLiveStroke() {
+  if (liveStroke) drawBrushStroke(ctx, liveStroke.points, brushSettings(), liveStroke.erase, state.color);
 }
 
 async function finishStroke() {
@@ -1381,6 +1416,9 @@ async function finishStroke() {
   if (!st || st.points.length === 0) return;
   const b = brushSettings();
   const item = activeItem();
+  // Keep the stroke on screen until the baked tiles arrive (no blank gap).
+  const entry = { rev: Infinity, draw: (g) => drawBrushStroke(g, st.points, b, st.erase, item.color) };
+  state.baking.push(entry);
   const stroke = {
     id: 'st_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
     kind: st.erase ? 'erase' : 'paint',
@@ -1401,7 +1439,9 @@ async function finishStroke() {
     ...stroke, id: `${stroke.id}_${i}`, seed: (stroke.seed + i * 7919) >>> 0,
     points: stroke.points.map(p => ({ ...p, x: fx ? +(2 * ax - p.x).toFixed(3) : p.x, y: fy ? +(2 * ay - p.y).toFixed(3) : p.y })),
   });
-  await postOps(strokes.length === 1 ? [{ t: 'add_stroke', stroke }] : [{ t: 'batch', ops: strokes.map(st => ({ t: 'add_stroke', stroke: st })) }]);
+  const rev = await postOps(strokes.length === 1 ? [{ t: 'add_stroke', stroke }] : [{ t: 'batch', ops: strokes.map(st => ({ t: 'add_stroke', stroke: st })) }]);
+  if (rev == null) state.baking = state.baking.filter((e) => e !== entry);
+  else entry.rev = rev;
 }
 
 for (const id of ['br-size']) {
@@ -2607,9 +2647,21 @@ async function fillAiSettings() {
     document.getElementById('ai-model').value = settings.direct_model || '';
     document.getElementById('ai-key').value = '';
     document.getElementById('ai-key').placeholder = settings.key_set ? '(saved - leave empty to keep)' : 'leave empty if none';
-    const line = `source: ${settings.source}`;
     const st = await api('GET', '/api/ai/status');
-    document.getElementById('ai-result').textContent = `${st.detail} · ${line}`;
+    // Embedded in nd-world: show the Unsloth model picker; standalone: the direct endpoint.
+    const world = st.mode === 'nd-world';
+    document.getElementById('ai-world-block').hidden = !world;
+    document.getElementById('ai-direct-block').hidden = world;
+    await loadAiModels();
+    if (world) {
+      document.getElementById('ai-world-model').value = settings.world_model || '';
+      const backend = st.backend ? ` · ${st.backend}` : '';
+      const model = st.model ? ` · ${st.model}` : '';
+      document.getElementById('ai-world-status').textContent = `nd-world${backend}${model}`;
+      document.getElementById('ai-result').textContent = st.detail || '';
+    } else {
+      document.getElementById('ai-result').textContent = `${st.detail} · source: ${settings.source}`;
+    }
   } catch (e) { /* the dialog still opens for the health checks */ }
 }
 
@@ -2622,6 +2674,7 @@ document.getElementById('ai-save').onclick = async () => {
   if (url) body.direct_url = url;
   if (model) body.direct_model = model;
   if (key) body.key = key;
+  if (!document.getElementById('ai-world-block').hidden) body.world_model = document.getElementById('ai-world-model').value;
   try {
     const out = await api('POST', '/api/ai-settings', body);
     res.textContent = `Saved. ${out.status.detail}`;
@@ -2634,11 +2687,21 @@ async function loadAiModels() {
     const { models } = await api('GET', '/api/ai-models');
     const list = document.getElementById('ai-model-list');
     list.textContent = '';
+    const sel = document.getElementById('ai-world-model');
+    const cur = sel.value;
+    sel.textContent = '';
+    const def = document.createElement('option');
+    def.value = ''; def.textContent = 'nd-world default';
+    sel.appendChild(def);
     for (const m of models) {
       const o = document.createElement('option');
       o.value = m;
       list.appendChild(o);
+      const so = document.createElement('option');
+      so.value = m; so.textContent = m;
+      sel.appendChild(so);
     }
+    sel.value = cur;
     return models;
   } catch { return []; }
 }
@@ -2662,13 +2725,13 @@ async function saveAiQuiet() {
   if (url) body.direct_url = url;
   if (model) body.direct_model = model;
   if (key) body.key = key;
+  if (!document.getElementById('ai-world-block').hidden) body.world_model = document.getElementById('ai-world-model').value;
   await api('POST', '/api/ai-settings', body);
 }
 
 const settingsDialog = document.getElementById('settings-dialog');
 document.getElementById('btn-settings').onclick = async () => {
   fillAiSettings();
-  loadAiModels();
   const list = document.getElementById('settings-list');
   list.textContent = 'Checking…';
   settingsDialog.showModal();

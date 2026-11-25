@@ -436,6 +436,48 @@ impl Bridge {
             .map_err(|e| BridgeError::Protocol(format!("tables answer: {e}")))
     }
 
+    /// nd-world's AI model catalogue (`GET /api/ai/models`, GM-only): the ids the
+    /// studio can pick from when embedded — Unsloth's builtin/loaded/fine-tuned/hub
+    /// models. Reuses the caller's GM session, so no separate credentials.
+    pub async fn models(&self) -> Result<Vec<String>, BridgeError> {
+        let resp = self.send(self.req(Method::GET, "/api/ai/models")).await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        let v: Value = check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("ai/models answer: {e}")))?;
+        let list = v
+            .get("models")
+            .and_then(Value::as_array)
+            .ok_or_else(|| BridgeError::Protocol("ai/models had no models list".into()))?;
+        Ok(list
+            .iter()
+            .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect())
+    }
+
+    /// nd-world's AI backend status (`POST /api/ai/status`): the backend name
+    /// (e.g. "unsloth"), the configured model and which models are loaded —
+    /// surfaced in the studio's settings banner when embedded.
+    pub async fn ai_status(&self) -> Result<Value, BridgeError> {
+        let resp = self
+            .send(self.req(Method::POST, "/api/ai/status").json(&json!({})))
+            .await?;
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            return Err(BridgeError::AuthRequired);
+        }
+        check(resp)
+            .await?
+            .json()
+            .await
+            .map_err(|e| BridgeError::Protocol(format!("ai/status answer: {e}")))
+    }
+
     /// Create a reusable encounter template (plan 21.3, the nd-world tier-1
     /// route): creatures as "name" or "name xN" lines. GM-only nd-world side.
     pub async fn combat_template(

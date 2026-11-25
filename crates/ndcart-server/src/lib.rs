@@ -3301,6 +3301,7 @@ struct AiSettingsBody {
     direct_url: Option<String>,
     direct_model: Option<String>,
     key: Option<String>,
+    world_model: Option<String>,
 }
 
 async fn post_ai_settings(
@@ -3326,6 +3327,10 @@ async fn post_ai_settings(
         let k = k.trim().to_string();
         stored.key = (!k.is_empty()).then_some(k);
     }
+    if let Some(m) = b.world_model {
+        let m = m.trim().to_string();
+        stored.world_model = (!m.is_empty()).then_some(m);
+    }
     ai_settings::save(app.data_dir.as_deref(), &stored)
         .map_err(|m| ApiError(CoreError::Invalid(m)))?;
     *app.ai.lock().expect("ai settings") = stored.clone();
@@ -3345,20 +3350,36 @@ async fn ai_models(_app: State<App>) -> Result<Json<serde_json::Value>, ApiError
 
 #[cfg(feature = "bridge")]
 async fn ai_models(State(app): State<App>) -> Result<Json<serde_json::Value>, ApiError> {
-    let url = {
-        let stored = app.ai.lock().expect("ai settings").clone();
-        ai_settings::resolve_direct(
-            std::env::var("ND_CARTO_LLM_URL")
-                .ok()
-                .filter(|v| !v.is_empty()),
-            std::env::var("ND_CARTO_LLM_MODEL")
-                .ok()
-                .filter(|v| !v.is_empty()),
-            &stored,
-        )
+    let stored = app.ai.lock().expect("ai settings").clone();
+    let direct = ai_settings::resolve_direct(
+        std::env::var("ND_CARTO_LLM_URL")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        std::env::var("ND_CARTO_LLM_MODEL")
+            .ok()
+            .filter(|v| !v.is_empty()),
+        &stored,
+    );
+    // Embedded in nd-world without a direct endpoint: list nd-world's own catalogue
+    // (Unsloth's builtin/loaded/fine-tuned models) through the caller's GM session.
+    if direct.is_none() {
+        if let Ok(Some(sess)) = ND_EMBED_SESSION.try_with(|s| s.clone()) {
+            let bridge = ndcart_bridge::Bridge::with_session(
+                &sess.server,
+                sess.world.as_deref(),
+                &sess.cookie,
+            )
+            .map_err(|e| ApiError(CoreError::Invalid(e.to_string())))?;
+            let models = bridge
+                .models()
+                .await
+                .map_err(|e| ApiError(CoreError::Invalid(e.to_string())))?;
+            return Ok(Json(serde_json::json!({ "models": models })));
+        }
+    }
+    let url = direct
         .map(|(u, _)| u)
-        .ok_or_else(|| ApiError(CoreError::NotFound("no direct model configured".into())))?
-    };
+        .ok_or_else(|| ApiError(CoreError::NotFound("no direct model configured".into())))?;
     let client = ndcart_bridge::plain_client();
     let base = url.trim_end_matches('/');
     let models_url = if base.ends_with("/v1") {
@@ -3511,10 +3532,39 @@ async fn theme_pack(
     Ok(Json(serde_json::json!({ "plan": plan })))
 }
 
-/// `GET /api/ai/status`/// `GET /api/ai/status`/// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
-/// `{mode: "nd-world" | "standalone" | "off", detail}`.
+/// `GET /api/ai/status` — which AI the studio is wired to, for the banner:
+/// `{mode: "nd-world" | "standalone" | "off", detail}`. When embedded, also the
+/// nd-world backend name/model/loaded models (e.g. Unsloth) via the GM session.
 async fn ai_status(State(app): State<App>) -> Json<serde_json::Value> {
-    Json(ai_status_value(&app))
+    let mut v = ai_status_value(&app);
+    #[cfg(feature = "bridge")]
+    if let Ok(Some(sess)) = ND_EMBED_SESSION.try_with(|s| s.clone()) {
+        if let Ok(bridge) =
+            ndcart_bridge::Bridge::with_session(&sess.server, sess.world.as_deref(), &sess.cookie)
+        {
+            if let Ok(st) = bridge.ai_status().await {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert(
+                        "backend".into(),
+                        st.get("backend")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!("unknown")),
+                    );
+                    obj.insert(
+                        "model".into(),
+                        st.get("model").cloned().unwrap_or(serde_json::Value::Null),
+                    );
+                    obj.insert(
+                        "loaded_models".into(),
+                        st.get("loaded_models")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!([])),
+                    );
+                }
+            }
+        }
+    }
+    Json(v)
 }
 
 #[cfg(feature = "bridge")]
