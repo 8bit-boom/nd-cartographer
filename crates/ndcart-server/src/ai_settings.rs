@@ -19,6 +19,11 @@ pub struct StoredAiSettings {
     /// Sent as `Authorization: Bearer`; many local servers need none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The preferred nd-world model when embedded (picked from nd-world's Unsloth
+    /// catalogue). Distinct from `direct_model`, which forces standalone mode;
+    /// empty means "use nd-world's configured default".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_model: Option<String>,
 }
 
 pub const FILE_NAME: &str = "ai-settings.json";
@@ -74,6 +79,7 @@ pub struct AiSettingsView {
     pub direct_model: Option<String>,
     pub key_set: bool,
     pub source: &'static str,
+    pub world_model: Option<String>,
 }
 
 pub fn view(stored: &StoredAiSettings) -> AiSettingsView {
@@ -97,6 +103,10 @@ pub fn view(stored: &StoredAiSettings) -> AiSettingsView {
         direct_model: env_model.or_else(|| stored.direct_model.clone()),
         key_set: std::env::var("ND_CARTO_LLM_KEY").is_ok() || stored.key.is_some(),
         source,
+        world_model: std::env::var("ND_CARTO_MODEL")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| stored.world_model.clone()),
     }
 }
 
@@ -110,6 +120,7 @@ mod tests {
             direct_url: Some("http://file:1/v1".into()),
             direct_model: Some("file-model".into()),
             key: Some("file-key".into()),
+            world_model: None,
         };
         // Both from the file.
         assert_eq!(
@@ -142,6 +153,7 @@ mod tests {
             direct_url: Some("http://127.0.0.1:3915/v1".into()),
             direct_model: Some("unsloth/Qwen3-4B-GGUF".into()),
             key: None,
+            world_model: None,
         };
         save(Some(&dir), &stored).unwrap();
         assert_eq!(load(Some(&dir)), stored);

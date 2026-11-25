@@ -217,15 +217,24 @@
     <h3>Settings and health</h3>
     <ul id="settings-list" class="checks" aria-live="polite"></ul>
     <fieldset>
-      <legend>AI model (local Unsloth Studio, Ollama, ...)</legend>
-      <p class="dim">An OpenAI-compatible endpoint. Example for Unsloth Studio:
-        <code>http://127.0.0.1:3915/v1</code> — for Ollama: <code>http://127.0.0.1:11434/v1</code>.
-        Applies immediately to draft, refine and ask. nd-world credentials stay in the
-        environment as before.</p>
-      <label>Endpoint <input id="ai-url" placeholder="http://127.0.0.1:3915/v1" autocomplete="off"></label>
-      <label>Model <input id="ai-model" list="ai-model-list" placeholder="unsloth/Qwen3-4B-GGUF" autocomplete="off">
-        <datalist id="ai-model-list"></datalist></label>
-      <label>API key <input id="ai-key" type="password" placeholder="leave empty if none" autocomplete="off"></label>
+      <legend>AI model</legend>
+      <div id="ai-world-block" hidden>
+        <p class="dim">The studio uses nd-world's AI (Unsloth Studio). Pick a model from
+          nd-world's catalogue, or keep nd-world's default. Applies immediately to draft,
+          refine and ask.</p>
+        <label>Model <select id="ai-world-model"><option value="">nd-world default</option></select></label>
+        <p id="ai-world-status" class="hint" aria-live="polite"></p>
+      </div>
+      <div id="ai-direct-block">
+        <p class="dim">A standalone OpenAI-compatible endpoint. Example for Unsloth Studio:
+          <code>http://127.0.0.1:3915/v1</code> — for Ollama: <code>http://127.0.0.1:11434/v1</code>.
+          Applies immediately to draft, refine and ask. nd-world credentials stay in the
+          environment as before.</p>
+        <label>Endpoint <input id="ai-url" placeholder="http://127.0.0.1:3915/v1" autocomplete="off"></label>
+        <label>Model <input id="ai-model" list="ai-model-list" placeholder="unsloth/Qwen3-4B-GGUF" autocomplete="off">
+          <datalist id="ai-model-list"></datalist></label>
+        <label>API key <input id="ai-key" type="password" placeholder="leave empty if none" autocomplete="off"></label>
+      </div>
       <menu>
         <button id="ai-test" type="button">Test connection</button>
         <button id="ai-save" type="button" class="primary">Save AI settings</button>
