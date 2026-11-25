@@ -6,6 +6,10 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "ndcart_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ndcart"
 path = "src/main.rs"

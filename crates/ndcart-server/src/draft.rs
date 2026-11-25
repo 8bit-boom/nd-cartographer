@@ -163,6 +163,19 @@ pub struct Config {
     pub direct: Option<(String, String)>,
     /// Bearer key for the direct endpoint (from the same two sources).
     pub key: Option<String>,
+    /// Embedded mode (nd-world compiles the studio in): reuse the caller's
+    /// already-signed-in GM session instead of logging in with a password.
+    pub session: Option<SessionAuth>,
+}
+
+/// An existing nd-world GM session to reuse for the bridge's calls back into the
+/// host — the studio is embedded and the caller is already the signed-in GM, so
+/// no password is stored. `cookie` is the `session` cookie's value.
+#[derive(Clone)]
+pub struct SessionAuth {
+    pub server: String,
+    pub world: Option<String>,
+    pub cookie: String,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -197,6 +210,7 @@ impl Config {
             model: env("ND_CARTO_MODEL"),
             direct,
             key,
+            session: None,
         };
         if cfg.direct.is_none() && (cfg.server.is_none() || cfg.email.is_none()) {
             return Err("to draft with AI set ND_CARTO_SERVER and ND_CARTO_EMAIL (nd-world), or ND_CARTO_LLM_URL and ND_CARTO_LLM_MODEL (a model you run yourself)".into());
@@ -204,8 +218,33 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Embedded in nd-world: the caller's GM session authenticates the bridge, so
+    /// no server/email/password is needed. A direct model (env or saved settings)
+    /// still wins when configured, exactly as in [`from_env_and`].
+    pub fn embedded(session: SessionAuth, stored: &crate::ai_settings::StoredAiSettings) -> Config {
+        let direct = match (
+            env("ND_CARTO_LLM_URL").or_else(|| stored.direct_url.clone()),
+            env("ND_CARTO_LLM_MODEL").or_else(|| stored.direct_model.clone()),
+        ) {
+            (Some(u), Some(m)) => Some((u, m)),
+            _ => None,
+        };
+        Config {
+            server: Some(session.server.clone()),
+            world: session.world.clone(),
+            email: None,
+            model: env("ND_CARTO_MODEL"),
+            direct,
+            key: env("ND_CARTO_LLM_KEY").or_else(|| stored.key.clone()),
+            session: Some(session),
+        }
+    }
+
     /// One line for the UI banner, or None when no AI is configured.
     pub fn describe(&self) -> String {
+        if let Some(s) = &self.session {
+            return format!("nd-world: {} (embedded session)", s.server);
+        }
         match (&self.direct, &self.server) {
             (Some((u, m)), _) => format!("standalone: {u} ({m})"),
             (None, Some(s)) => format!("nd-world: {s}"),
@@ -227,6 +266,12 @@ impl Backend {
                 ndcart_bridge::DirectChat::new(url, model, cfg.key.clone())
                     .map_err(|e| e.to_string())?,
             ));
+        }
+        // Embedded in nd-world: reuse the caller's GM session, no password.
+        if let Some(s) = &cfg.session {
+            let bridge = Bridge::with_session(&s.server, s.world.as_deref(), &s.cookie)
+                .map_err(|e| e.to_string())?;
+            return Ok(Backend::World(bridge, cfg.model.clone()));
         }
         let (server, email) = (
             cfg.server.as_deref().ok_or("--server is required")?,
@@ -534,6 +579,7 @@ pub async fn run(args: Vec<String>) -> Result<(), String> {
         model,
         direct,
         key,
+        session: None,
     };
     let spec = draft(
         &cfg,
