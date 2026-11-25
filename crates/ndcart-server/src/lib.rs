@@ -40,6 +40,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// The studio version, for a host app (nd-world) to report in its status UI.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 const INDEX_HTML: &str = include_str!("../../../ui/index.html");
 const APP_JS: &str = include_str!("../../../ui/app.js");
 const APP_CSS: &str = include_str!("../../../ui/app.css");

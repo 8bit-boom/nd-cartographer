@@ -26,6 +26,7 @@ RUN mkdir -p crates/ndcart-core/src crates/ndcart-formats/src crates/ndcart-brid
     && echo "" > crates/ndcart-bridge/src/lib.rs \
     && echo "" > crates/ndcart-paint/src/lib.rs \
     && echo "" > crates/ndcart-terrain/src/lib.rs \
+    && echo "" > crates/ndcart-server/src/lib.rs \
     && echo "fn main() {}" > crates/ndcart-server/src/main.rs \
     && echo "fn main() {}" > crates/ndcart-desktop/src/main.rs \
     && cargo build --release --locked --target x86_64-unknown-linux-musl
@@ -33,7 +34,7 @@ RUN mkdir -p crates/ndcart-core/src crates/ndcart-formats/src crates/ndcart-brid
 # Real sources.
 COPY crates crates
 COPY ui ui
-RUN touch crates/ndcart-core/src/lib.rs crates/ndcart-formats/src/lib.rs crates/ndcart-bridge/src/lib.rs crates/ndcart-paint/src/lib.rs crates/ndcart-terrain/src/lib.rs crates/ndcart-server/src/main.rs \
+RUN touch crates/ndcart-core/src/lib.rs crates/ndcart-formats/src/lib.rs crates/ndcart-bridge/src/lib.rs crates/ndcart-paint/src/lib.rs crates/ndcart-terrain/src/lib.rs crates/ndcart-server/src/lib.rs crates/ndcart-server/src/main.rs \
     && cargo build --release --locked --target x86_64-unknown-linux-musl \
     && mkdir -p /out && cp target/x86_64-unknown-linux-musl/release/ndcart /out/ndcart
 
