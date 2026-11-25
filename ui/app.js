@@ -4,6 +4,32 @@
 // and issues ops.
 'use strict';
 
+// Base-path support: when the studio is served behind a reverse proxy under a
+// prefix (e.g. nd-world's /cartographer/studio), a <base> tag carries that
+// prefix. Rewrite absolute API/tile/asset URLs so they go back through the
+// proxy. At the root (no <base>, or href="/") this is a no-op.
+const ND_BASE = (() => {
+  const b = document.querySelector('base');
+  const href = b ? (b.getAttribute('href') || '/') : '/';
+  return href.replace(/\/+$/, '');
+})();
+if (ND_BASE) {
+  const ndAbs = (u) => (typeof u === 'string' && u.startsWith('/') && !u.startsWith('//')) ? ND_BASE + u : u;
+  const _fetch = window.fetch;
+  window.fetch = (input, init) => _fetch(typeof input === 'string' ? ndAbs(input) : input, init);
+  const _ES = window.EventSource;
+  if (_ES) {
+    window.EventSource = function (url, cfg) { return new _ES(ndAbs(url), cfg); };
+    window.EventSource.prototype = _ES.prototype;
+  }
+  const _src = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+  Object.defineProperty(HTMLImageElement.prototype, 'src', {
+    configurable: true,
+    get() { return _src.get.call(this); },
+    set(v) { _src.set.call(this, ndAbs(v)); },
+  });
+}
+
 const PPC0 = 16;          // pixels per cell at zoom 0 (matches tiles.rs)
 const TILE = 256;
 const MAX_Z = 4;
@@ -2788,7 +2814,7 @@ async function setShare(on) {
     // The TV is a different device, so it needs the token in the URL (the
     // HttpOnly cookie does not travel). It is the one the GM opened with.
     const token = new URLSearchParams(location.search).get('token');
-    const url = `${location.origin}/table/${state.docId}${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+    const url = `${location.origin}${ND_BASE}/table/${state.docId}${token ? `?token=${encodeURIComponent(token)}` : ''}`;
     linkEl.append('On the table: open ');
     const a = document.createElement('a');
     a.href = url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = url;

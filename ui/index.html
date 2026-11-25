@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<base href="__ND_BASE__">
 <title>nd-cartographer</title>
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
 <header id="topbar">
@@ -20,7 +21,7 @@
   <input id="pack-file" type="file" accept=".dungeondraft_pack,.pck" hidden>
   <button id="btn-settings" title="Is everything set up? Folder, picture formats, fonts, AI and nd-world">⚙ Settings</button>
   <button id="btn-ask" title="Ask a question about everything written in your maps (needs an AI)">❓ Ask</button>
-  <a id="btn-pack-out" href="/api/packs/export?name=My%20art" download title="Download your own props and materials as a pack">⬇ My art pack</a>
+  <a id="btn-pack-out" href="api/packs/export?name=My%20art" download title="Download your own props and materials as a pack">⬇ My art pack</a>
   <button id="btn-theme" title="Describe a theme; the AI drafts a pack plan - material and prop prompts, names, tags, palette - for the art pipeline">🧰 Theme pack…</button>
   <button id="btn-gallery" title="All projects as thumbnails">🗂 Projects</button>
   <button id="btn-new" title="New project: a battle map or a generated world map">＋ New…</button>
@@ -465,6 +466,6 @@
   <div id="toasts" role="alert" aria-live="assertive"></div>
   </div>
 </main>
-<script src="/app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

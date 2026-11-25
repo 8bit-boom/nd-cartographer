@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<base href="__ND_BASE__">
 <title>Table view</title>
 <style>
   :root { color-scheme: dark; }
@@ -24,6 +25,16 @@
 <button id="fs" type="button" title="Fullscreen" aria-label="Toggle fullscreen">⛶</button>
 <script>
 'use strict';
+// Base-path support (served behind nd-world's /cartographer/studio proxy):
+// prefix absolute API URLs with the <base> prefix. No-op at the root.
+const ND_BASE = (() => { const b = document.querySelector('base'); const h = b ? (b.getAttribute('href') || '/') : '/'; return h.replace(/\/+$/, ''); })();
+if (ND_BASE) {
+  const ndAbs = (u) => (typeof u === 'string' && u.startsWith('/') && !u.startsWith('//')) ? ND_BASE + u : u;
+  const _fetch = window.fetch;
+  window.fetch = (input, init) => _fetch(typeof input === 'string' ? ndAbs(input) : input, init);
+  const _src = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+  Object.defineProperty(HTMLImageElement.prototype, 'src', { configurable: true, get() { return _src.get.call(this); }, set(v) { _src.set.call(this, ndAbs(v)); } });
+}
 const DOC = '__DOC__';
 const img = document.getElementById('map');
 const msg = document.getElementById('msg');
