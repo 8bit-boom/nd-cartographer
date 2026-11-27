@@ -1156,6 +1156,7 @@ function setTool(tool) {
   }
   canvas.classList.toggle('painting', tool !== 'pan');
   document.getElementById('brushbar').hidden = !(tool === 'brush' || tool === 'erase');
+  document.getElementById('br-cells-wrap').hidden = tool !== 'erase' || state.doc?.manifest.kind === 'region';
   document.getElementById('stampbar').hidden = tool !== 'stamp';
   setTerrainBar(tool);
   document.getElementById('labelbar').hidden = !(tool === 'label' || tool === 'pathlabel');
@@ -1165,7 +1166,7 @@ function setTool(tool) {
   statusEl.textContent =
     tool === 'paint' ? `Painting ${activeItem().name}`
     : tool === 'brush' ? `Brush: ${activeItem().name} — drag to paint (pressure and tilt count)`
-    : tool === 'erase' ? 'Eraser: drag to reveal the room layer beneath'
+    : tool === 'erase' ? 'Eraser: drag to rub out brush strokes and painted cells'
     : tool === 'stamp' ? `Stamp: click to place a ${state.stamp?.name || 'prop'} (, . rotate · F flip)`
     : TERRAIN_TOOLS.includes(tool) ? `${tool[0].toUpperCase()}${tool.slice(1)}: drag over the map`
     : tool === 'river' ? 'River: click points from source to mouth · Enter finishes · Esc cancels'
@@ -1410,6 +1411,37 @@ function drawLiveStroke() {
   if (liveStroke) drawBrushStroke(ctx, liveStroke.points, brushSettings(), liveStroke.erase, state.color);
 }
 
+// The grid cells a freehand stroke passes over (the eraser clears them). Sizes are in cells.
+const MAX_CELL = 10000;
+function cellsUnderStroke(pts, mirror) {
+  const out = new Set();
+  const add = (cx, cy) => {
+    for (const [mx, my] of mirror(cx, cy)) {
+      if (Math.abs(mx) <= MAX_CELL && Math.abs(my) <= MAX_CELL) out.add(`${mx},${my}`);
+    }
+  };
+  const size = parseFloat(brushEl('br-size').value);
+  const stamp = (x, y, p) => {
+    const r = Math.max(0.05, size * (0.35 + 0.65 * p.pressure) * (1 + 0.5 * p.tilt) / 2);
+    add(Math.floor(x), Math.floor(y));
+    for (let cy = Math.floor(y - r); cy <= Math.floor(y + r); cy++) {
+      for (let cx = Math.floor(x - r); cx <= Math.floor(x + r); cx++) {
+        if (Math.hypot(cx + 0.5 - x, cy + 0.5 - y) <= r + 0.5) add(cx, cy);
+      }
+    }
+  };
+  for (let i = 0; i < pts.length; i++) {
+    const a = i > 0 ? pts[i - 1] : pts[i], b = pts[i];
+    const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 0.25));
+    for (let k = 1; k <= steps; k++) {
+      const t = k / steps;
+      stamp(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, b);
+      if (out.size > 40000) return out;   // a sane cap on one request
+    }
+  }
+  return out;
+}
+
 async function finishStroke() {
   const st = liveStroke;
   liveStroke = null;
@@ -1439,7 +1471,16 @@ async function finishStroke() {
     ...stroke, id: `${stroke.id}_${i}`, seed: (stroke.seed + i * 7919) >>> 0,
     points: stroke.points.map(p => ({ ...p, x: fx ? +(2 * ax - p.x).toFixed(3) : p.x, y: fy ? +(2 * ay - p.y).toFixed(3) : p.y })),
   });
-  const rev = await postOps(strokes.length === 1 ? [{ t: 'add_stroke', stroke }] : [{ t: 'batch', ops: strokes.map(st => ({ t: 'add_stroke', stroke: st })) }]);
+  const ops = strokes.map(st => ({ t: 'add_stroke', stroke: st }));
+  // The eraser also rubs out painted cells under the stroke (unless it is turned off).
+  if (st.erase && brushEl('br-cells').checked && !isRegion()) {
+    const cells = [...cellsUnderStroke(st.points, mirrored)].map((k) => {
+      const [x, y] = k.split(',').map(Number);
+      return { x, y };
+    });
+    if (cells.length) ops.push({ t: 'paint_cells', cells, space: null });
+  }
+  const rev = await postOps(ops.length === 1 ? ops : [{ t: 'batch', ops }]);
   if (rev == null) state.baking = state.baking.filter((e) => e !== entry);
   else entry.rev = rev;
 }

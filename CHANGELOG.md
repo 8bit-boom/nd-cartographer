@@ -7,6 +7,13 @@ Notable changes to nd-cartographer. Format follows
 
 ## [Unreleased]
 
+### Added
+- **The Erase tool now also clears painted cells.** It used to remove only brush
+  strokes, so cells made with the Paint tool could not be rubbed out. The
+  eraser sends the cells under the stroke (mirrored when symmetry is on) as a
+  `paint_cells` op with a null space, in the same undoable batch as the stroke.
+  A "clear painted cells" checkbox in the brush bar turns it off.
+
 ### Fixed
 - **The browser UI shipped with JavaScript syntax errors** (literal newlines
   inside three single-quoted strings and an unescaped apostrophe) that broke the

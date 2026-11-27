@@ -47,7 +47,7 @@
     </span>
     <button id="tool-paint" class="tool battle-only" title="Paint cells (drag)">🖌 Paint</button>
     <button id="tool-brush" class="tool" title="Brush: freehand material (R). Pen pressure and tilt shape the line">🖍 Brush</button>
-    <button id="tool-erase" class="tool" title="Eraser: reveals the room layer beneath (E)">🧽 Erase</button>
+    <button id="tool-erase" class="tool" title="Eraser: rubs out brush strokes and painted cells (E)">🧽 Erase</button>
     <button id="tool-biome" class="tool" title="Biome: outline an area and fill it with trees, rocks or scrub">🌲 Biome</button>
     <button id="tool-prefab" class="tool" title="Prefabs: pick one from the Outline panel, then click the map to place it">🧩 Prefab</button>
     <button id="tool-stairs" class="tool" title="Stairs: place a way to another floor (double-click one with the pan tool to follow it)">🪜 Stairs</button>
@@ -420,6 +420,7 @@
     <label>Hardness <input type="range" id="br-hardness" min="0" max="1" step="0.05" value="0.8"></label>
     <label>Rough edge <input type="range" id="br-rough" min="0" max="1" step="0.05" value="0.2"></label>
     <label>Density <input type="range" id="br-density" min="0.05" max="1" step="0.05" value="0.6"></label>
+    <label id="br-cells-wrap" hidden title="Also rub out painted cells (rooms) under the eraser"><input type="checkbox" id="br-cells" checked> clear painted cells</label>
     <span class="dim">[ ] size</span>
   </div>
   <div id="symbar" class="battle-only" title="Mirror what you paint about axis lines">
